@@ -328,6 +328,8 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           container,
           image: host.image,
           path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
+          owned: dockerCase.owned !== false,
           network: host.network ?? 'bridge',
           ...(dockerCase.availableModes ? { availableModes: dockerCase.availableModes } : {}),
           ...(dockerCase.owned === false ? { owned: false } : {}),
@@ -1607,6 +1609,8 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           container,
           image: host.image,
           path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
+          owned: dockerCase.owned !== false,
           network: host.network ?? 'bridge',
         },
       };
