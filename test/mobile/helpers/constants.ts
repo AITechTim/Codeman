@@ -9,6 +9,7 @@ export const PORTS = {
   VISUAL_REGRESSION: 3206,
   ACCESSIBILITY: 3207,
   HEADER_BUTTONS: 3208,
+  VOICE_INPUT: 3209,
 } as const;
 
 // CSS Selectors
