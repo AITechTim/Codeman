@@ -1,6 +1,7 @@
 /**
  * @fileoverview AudioWorklet that turns microphone audio into the PCM frames the
- * Claude voice endpoint expects.
+ * Claude voice endpoint expects. Capture is released on confirmation while the
+ * voice controller waits for the server's final transcript.
  *
  * The endpoint is opened as `encoding=linear16, sample_rate=16000, channels=1`,
  * i.e. raw signed 16-bit little-endian mono. MediaRecorder cannot produce that
