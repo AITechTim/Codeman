@@ -1,5 +1,8 @@
 # Claude voice dictation in Codeman
 
+For empty recordings, Android duplicate transcripts, and the workspace runtime
+repair, see [Voice input troubleshooting](voice-input-troubleshooting.md).
+
 Wire Codeman's existing mic button to the same speech-to-text service Claude Code's own
 `/voice` mode uses, so dictation works with **no third-party API key** for anyone already
 signed in to Claude Code on the server.

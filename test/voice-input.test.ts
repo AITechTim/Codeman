@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const source = readFileSync(new URL('../src/web/public/voice-input.js', import.meta.url), 'utf8');
 
-function harness(provider = 'webspeech') {
+function harness(provider = 'webspeech', userAgent = '') {
   const recognitions: any[] = [];
   const sockets: any[] = [];
   const recorders: any[] = [];
@@ -83,7 +83,7 @@ function harness(provider = 'webspeech') {
   };
   const context = vm.createContext({
     window: { SpeechRecognition: Recognition },
-    navigator: { mediaDevices: { getUserMedia } },
+    navigator: { userAgent, mediaDevices: { getUserMedia } },
     location: { protocol: 'https:', host: 'localhost' },
     localStorage: { getItem: () => JSON.stringify({ provider, apiKey: 'test-key' }) },
     app,
@@ -122,6 +122,34 @@ afterEach(() => {
 });
 
 describe('voice confirmation', () => {
+  it('uses Android phrase recognition, retains revisions and preserves intentional repetition across phrases', () => {
+    const h = harness('webspeech', 'Mozilla/5.0 (Linux; Android 14; Pixel 8) Chrome/140.0 Mobile');
+    h.voice.start();
+    const first = h.recognitions[0];
+    expect(first.continuous).toBe(false);
+    first.result(['hello', false]);
+    first.result(['hello hello', false]);
+    first.result(['hello hello', true]);
+    first.result(['hello hello', true]);
+    expect(h.voice._transcript()).toBe('hello hello');
+    vi.advanceTimersByTime(2000);
+    first.onend();
+    vi.advanceTimersByTime(250);
+    expect(h.voice.isRecording).toBe(true);
+    const second = h.recognitions[1];
+    expect(second.continuous).toBe(false);
+    second.result(['hello hello', true]);
+    h.voice.stop();
+    second.onend();
+    expect(h.app.sendInput).toHaveBeenCalledExactlyOnceWith('hello hello hello hello');
+  });
+
+  it('keeps native continuous recognition outside Android', () => {
+    const h = harness('webspeech', 'Mozilla/5.0 (X11; Linux x86_64) Chrome/140.0');
+    h.voice.start();
+    expect(h.recognitions[0].continuous).toBe(true);
+  });
+
   it('listens through silence, unchanged interims, and finalized phrases', () => {
     const h = harness();
     h.voice.start();
