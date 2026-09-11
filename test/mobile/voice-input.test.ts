@@ -111,6 +111,37 @@ describe('Android Chrome voice input', () => {
     }
   });
 
+  it('restarts Android phrase recognition and preserves repeated words without duplicate delivery', async () => {
+    const { page, context } = await open();
+    try {
+      await page.evaluate('app._localEchoEnabled = false');
+      await page.locator('#voiceInputBtnMobile').tap();
+      expect(await page.evaluate('window.voiceRecognitions[0].continuous')).toBe(false);
+      await page.evaluate(`
+        window.voiceRecognitions[0].result('hello', false);
+        window.voiceRecognitions[0].result('hello hello', false);
+        window.voiceRecognitions[0].result('hello hello', true);
+        window.voiceRecognitions[0].result('hello hello', true);
+        window.voiceRecognitions[0].onend();
+      `);
+      await page.waitForFunction(() => (window as any).voiceRecognitions.length === 2);
+      expect(await page.locator('#voiceInputBtnMobile').getAttribute('aria-pressed')).toBe('true');
+      expect(await page.evaluate('window.voiceRecognitions[1].continuous')).toBe(false);
+      await page.evaluate("window.voiceRecognitions[1].result('second phrase', false)");
+      expect(await page.evaluate('window.voiceDelivered')).toEqual([]);
+      await page.locator('#voiceInputBtnMobile').tap();
+      await page.evaluate(`
+        window.voiceRecognitions[1].result('second phrase complete', true);
+        window.voiceRecognitions[1].onend();
+      `);
+      expect(await page.evaluate('window.voiceDelivered')).toEqual([
+        { id: 'voice-test', text: 'hello hello second phrase complete' },
+      ]);
+    } finally {
+      await context.close();
+    }
+  });
+
   it('retains a literal editable draft across a session switch and blocks sending to the wrong session', async () => {
     const { page, context } = await open();
     try {

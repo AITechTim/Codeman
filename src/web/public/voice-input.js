@@ -758,7 +758,12 @@ const VoiceInput = {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SR();
     this.recognition = recognition;
-    recognition.continuous = true;
+    // Android's continuous bridge promotes provisional results to finals,
+    // so revised phrases can be appended again. Use single-phrase recognition
+    // there; onend below restarts capture until the user confirms. Never dedup
+    // by transcript text: speaking the same words twice is legitimate input.
+    const android = navigator.userAgentData?.platform === 'Android' || /Android/i.test(navigator.userAgent || '');
+    recognition.continuous = !android;
     recognition.interimResults = true;
     const language = this._getDeepgramConfig().language;
     recognition.lang = language && language !== 'multi' ? language : 'en-US';
