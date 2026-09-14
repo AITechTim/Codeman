@@ -2282,10 +2282,14 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
 
+      const fontSettings = this.loadAppSettingsFromStorage?.() || {};
       const terminal = new Terminal({
         theme: { ...window.codemanCurrentXtermTheme() },
         minimumContrastRatio: window.codemanCurrentSkinIsLight() ? 4.5 : 1,
-        fontFamily: window.CodemanTerminalFont.resolve(this.loadAppSettingsFromStorage?.().terminalFontFamily),
+        fontFamily: window.CodemanTerminalFont.resolve(fontSettings.terminalFontFamily),
+        // A pane opened after a weight change must match the main terminal;
+        // one open across the change is repainted by applyTerminalFontWeights().
+        ...window.CodemanTerminalFont.resolveWeights(fontSettings),
         fontSize: 12,
         lineHeight: 1.2,
         cursorBlink: true,

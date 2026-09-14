@@ -709,6 +709,54 @@ function resolveTerminalFontFamily(custom) {
   return `${families.join(', ')}, ${TERMINAL_FONT_DEFAULT_STACK}`;
 }
 
+/**
+ * xterm's own defaults for the two weight slots, one per slot.
+ *
+ * They are deliberately kept apart rather than collapsed into a single
+ * fallback: handing the bold slot `normal` (or the normal slot `bold`) would
+ * turn an unset setting into a visible change, which is exactly the thing this
+ * feature exists to make controllable.
+ */
+const TERMINAL_FONT_WEIGHT_DEFAULTS = { fontWeight: 'normal', fontWeightBold: 'bold' };
+
+/**
+ * Resolve ONE weight slot against xterm's validation rules.
+ *
+ * xterm accepts a number in 1..1000, or one of its own keyword/numeric-string
+ * options, and silently falls back to the slot default for anything else
+ * (`OptionsService._sanitizeAndValidateOption`). Resolving here instead means a
+ * stored value the picker does not list (a hand-set 350) still reaches the
+ * terminal, while junk in localStorage never does.
+ */
+function resolveTerminalFontWeightSlot(value, fallback) {
+  if (value === 'normal' || value === 'bold') return value;
+  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value.trim()) : NaN;
+  if (!Number.isFinite(numeric) || numeric < 1 || numeric > 1000) return fallback;
+  return Math.round(numeric);
+}
+
+/**
+ * Resolve both xterm weight slots from the per-device settings blob.
+ *
+ * Bold text on the theme's default foreground carries exactly ONE cue, the
+ * weight step: Claude Code marks its markdown bold with a bare `ESC[1m` and no
+ * colour, and xterm's bold-to-bright substitution only fires for palette
+ * indices 0-7, so it never applies to default-foreground text. A family that
+ * ships only a regular and a bold face keeps that step small, and 400 stays
+ * 400 whatever family is chosen — lowering the NORMAL weight is the only way
+ * to widen the gap.
+ */
+function resolveTerminalFontWeights(settings) {
+  const s = settings && typeof settings === 'object' ? settings : {};
+  return {
+    fontWeight: resolveTerminalFontWeightSlot(s.terminalFontWeight, TERMINAL_FONT_WEIGHT_DEFAULTS.fontWeight),
+    fontWeightBold: resolveTerminalFontWeightSlot(
+      s.terminalFontWeightBold,
+      TERMINAL_FONT_WEIGHT_DEFAULTS.fontWeightBold
+    ),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Auto Copy (copy-on-select). Pure decision, so every guard below is testable
 // without a terminal, a clipboard, or a browser.
@@ -809,6 +857,8 @@ if (typeof window !== 'undefined') {
   window.CodemanTerminalFont = {
     DEFAULT_STACK: TERMINAL_FONT_DEFAULT_STACK,
     resolve: resolveTerminalFontFamily,
+    WEIGHT_DEFAULTS: TERMINAL_FONT_WEIGHT_DEFAULTS,
+    resolveWeights: resolveTerminalFontWeights,
   };
 }
 

@@ -335,6 +335,32 @@ Object.assign(CodemanApp.prototype, {
   // App Settings Modal
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * Point one terminal-weight select at its stored value.
+   *
+   * A stored value the picker does not list (a hand-set 350, or a weight from a
+   * build whose options differ) is ADDED to the select rather than dropped:
+   * otherwise `select.value = '350'` silently selects nothing, the next save
+   * reads back '' and the setting resets itself just for having been opened.
+   * Empty means "use xterm's default for this slot".
+   */
+  populateTerminalFontWeight(select, value) {
+    if (!select) return;
+    const stored = value === undefined || value === null ? '' : String(value).trim();
+    if (stored && !Array.from(select.options).some((opt) => opt.value === stored)) {
+      const extra = document.createElement('option');
+      extra.value = stored;
+      extra.textContent = `${stored} (custom)`;
+      select.appendChild(extra);
+    }
+    select.value = stored;
+  },
+
+  /** Read one terminal-weight select back. '' means default; the resolver in constants.js validates. */
+  readTerminalFontWeight(select) {
+    return select?.value.trim() || '';
+  },
+
   openAppSettings() {
     // Load current settings
     const settings = this.loadAppSettingsFromStorage();
@@ -411,6 +437,11 @@ Object.assign(CodemanApp.prototype, {
     // a way to read, so it is opt-in rather than a default anyone has to discover.
     document.getElementById('appSettingsAutoCopySelection').checked = settings.autoCopySelection === true;
     document.getElementById('appSettingsTerminalFont').value = settings.terminalFontFamily || '';
+    this.populateTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight'), settings.terminalFontWeight);
+    this.populateTerminalFontWeight(
+      document.getElementById('appSettingsTerminalFontWeightBold'),
+      settings.terminalFontWeightBold
+    );
     document.getElementById('appSettingsTerminalWheelLocal').checked =
       settings.terminalWheelLocalScrollback ?? defaults.terminalWheelLocalScrollback ?? false;
     document.getElementById('appSettingsCjkInput').checked = settings.cjkInputEnabled ?? defaults.cjkInputEnabled ?? false;
@@ -2091,6 +2122,10 @@ Object.assign(CodemanApp.prototype, {
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
       autoCopySelection: document.getElementById('appSettingsAutoCopySelection').checked,
       terminalFontFamily: document.getElementById('appSettingsTerminalFont').value.trim(),
+      terminalFontWeight: this.readTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight')),
+      terminalFontWeightBold: this.readTerminalFontWeight(
+        document.getElementById('appSettingsTerminalFontWeightBold')
+      ),
       terminalWheelLocalScrollback: document.getElementById('appSettingsTerminalWheelLocal').checked,
       cjkInputEnabled: document.getElementById('appSettingsCjkInput').checked,
       webglRendererEnabled: document.getElementById('appSettingsWebglRenderer').checked,
@@ -2145,6 +2180,7 @@ Object.assign(CodemanApp.prototype, {
     this.saveAppSettingsToStorage(settings);
     this._updateLocalEchoState();
     this.applyTerminalFontFamily?.(settings.terminalFontFamily);
+    this.applyTerminalFontWeights?.(settings);
 
     // A real OFF→ON flip of the WebGL toggle retires the GPU-stall auto-fallback
     // marker so the next reload actually re-tries WebGL. Only the transition
@@ -2302,6 +2338,11 @@ Object.assign(CodemanApp.prototype, {
       // Per-device by nature (the font must exist on the device) and absent
       // from SettingsUpdateSchema (.strict()) — sending it would 400 the PUT.
       terminalFontFamily: _tff,
+      // Same two reasons: which weights a family can actually render is a
+      // property of the faces installed on THIS device, and neither key is
+      // declared in the .strict() schema.
+      terminalFontWeight: _tfw,
+      terminalFontWeightBold: _tfwb,
       // Per-device header/toolbar button toggles — client-only, and absent from
       // SettingsUpdateSchema (.strict()), so sending them would 400 the PUT.
       showSessionButton: _ssb,
@@ -3076,7 +3117,7 @@ Object.assign(CodemanApp.prototype, {
           'showMonitor', 'showProjectInsights', 'showFileBrowser', 'showSubagents',
           'subagentActiveTabOnly', 'tabTwoRows', 'tabOrientation', 'tabRailWidth', 'tabRailDetail', 'tabRailSort', 'sessionListLayout', 'sessionSidebarFontSize', 'localEchoEnabled', 'cjkInputEnabled', 'extendedKeyboardBar',
           'skin', 'showPlanUsageLimits', 'showAttachmentsButton', 'showFileViewerButton', 'webglRendererEnabled',
-          'terminalFontFamily',
+          'terminalFontFamily', 'terminalFontWeight', 'terminalFontWeightBold',
           'language',
           'terminalWheelLocalScrollback',
           'autoCopySelection',
