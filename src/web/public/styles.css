@@ -11969,6 +11969,18 @@ kbd {
   display: inline-flex;
 }
 
+/* Keyboard-accessory ⇧←/⇧→ keys: Codex bindings (edit the last queued
+   message / prompt stack back), so they are revealed only while the active
+   session runs Codex. Same marker-class shape as the 🧠 key above, for the
+   same reason (the bar's innerHTML is rebuilt on every layout switch); the
+   class is synced from the active session's mode (keyboard-accessory.js). */
+.keyboard-accessory-bar .accessory-btn-codex {
+  display: none;
+}
+.keyboard-accessory-bar.codex-enabled .accessory-btn-codex {
+  display: inline-flex;
+}
+
 .approvals-badge {
   position: absolute;
   top: 2px;
