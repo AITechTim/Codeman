@@ -411,34 +411,34 @@ describe('system-routes', () => {
   // ========== GET /api/settings ==========
 
   describe('GET /api/settings', () => {
-    it('reconciles showPlanUsageLimits to true when the settings file does not exist', async () => {
-      // The chip/checkbox default to ON client-side (planUsageChipEnabled()) whenever
-      // this key is absent, but readPlanUsageTelemetryEnabled() deliberately treats
-      // absence as "no telemetry" — nothing reconciled those two defaults, so a fresh
-      // install showed a checked box that silently collected nothing. GET now persists
-      // the resolved default the first time anything reads settings.
+    // A plain read that never writes. The route briefly reconciled an absent
+    // showPlanUsageLimits to true on first read, but readJsonConfig() answers {}
+    // for ANY read failure and every page load hits this route, so one unlucky
+    // read replaced the whole file with a one-key file. The default now lives in
+    // readPlanUsageTelemetryEnabled() (absent means ON); see also
+    // system-routes-settings-get-plan-usage-default.test.ts.
+    it('answers {} for a missing settings file and creates nothing', async () => {
       mockedReadFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      mockedWriteFile.mockClear();
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual({ showPlanUsageLimits: true });
-      // Reconciliation actually reached disk, not just the response.
-      expect(mockedWriteFile).toHaveBeenCalledWith(
-        expect.anything(),
-        JSON.stringify({ showPlanUsageLimits: true }, null, 2)
-      );
+      expect(JSON.parse(res.body)).toEqual({});
+      expect(mockedWriteFile).not.toHaveBeenCalled();
     });
 
-    it('reconciles showPlanUsageLimits to true when the file exists but omits it', async () => {
+    it('returns the file unchanged when showPlanUsageLimits is absent', async () => {
       const settings = { subagentTrackingEnabled: true, showSystemStats: false };
       mockedReadFile.mockResolvedValue(JSON.stringify(settings) as never);
+      mockedWriteFile.mockClear();
 
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toEqual({ ...settings, showPlanUsageLimits: true });
+      expect(JSON.parse(res.body)).toEqual(settings);
+      expect(mockedWriteFile).not.toHaveBeenCalled();
     });
 
-    it('never overwrites an explicit false', async () => {
+    it('passes an explicit false through untouched', async () => {
       const settings = { subagentTrackingEnabled: true, showPlanUsageLimits: false };
       mockedReadFile.mockResolvedValue(JSON.stringify(settings) as never);
       mockedWriteFile.mockClear();
@@ -446,7 +446,6 @@ describe('system-routes', () => {
       const res = await harness.app.inject({ method: 'GET', url: '/api/settings' });
       expect(res.statusCode).toBe(200);
       expect(JSON.parse(res.body)).toEqual(settings);
-      // No reconciliation write when the key is already explicit.
       expect(mockedWriteFile).not.toHaveBeenCalled();
     });
   });

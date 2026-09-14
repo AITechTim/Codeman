@@ -1345,13 +1345,22 @@ describe('readPlanUsageTelemetryEnabled', () => {
     expect(await readPlanUsageTelemetryEnabled()).toBe(false);
   });
 
-  it('defaults to false when the setting is absent or the file is missing', async () => {
+  it('defaults to true when the setting is absent or the file is missing (mirrors readWorkspaceHooksEnabled)', async () => {
+    // The desktop chip shows as ON for an install that never touched the
+    // setting, so collection must agree with it. Resolving the default HERE
+    // is what keeps GET /api/settings a plain read (see its route test).
     rmSync(SETTINGS_PATH, { force: true });
-    expect(await readPlanUsageTelemetryEnabled()).toBe(false);
+    expect(await readPlanUsageTelemetryEnabled()).toBe(true);
 
     mkdirSync(join(SETTINGS_PATH, '..'), { recursive: true });
     writeFileSync(SETTINGS_PATH, JSON.stringify({ someOtherSetting: true }));
-    expect(await readPlanUsageTelemetryEnabled()).toBe(false);
+    expect(await readPlanUsageTelemetryEnabled()).toBe(true);
+  });
+
+  it('only an explicit false turns collection off; junk values read as on', async () => {
+    mkdirSync(join(SETTINGS_PATH, '..'), { recursive: true });
+    writeFileSync(SETTINGS_PATH, JSON.stringify({ showPlanUsageLimits: 'no' }));
+    expect(await readPlanUsageTelemetryEnabled()).toBe(true);
   });
 
   it('never caches — a change on disk is visible on the very next call', async () => {

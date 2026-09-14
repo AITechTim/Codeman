@@ -2315,21 +2315,25 @@ Object.assign(CodemanApp.prototype, {
     // and syncing would leak mobile's hidden-checkbox false onto desktop); it's
     // also absent from SettingsUpdateSchema, which is .strict() — sending it
     // would 400 the whole settings PUT.
-    // showPlanUsageLimits is the ONE exception to "per-device keys never sync":
-    // its DISPLAY stays per-device (loadAppSettingsFromServer only seeds it into
-    // localStorage when a device has no value yet — same as every other display
-    // key), but it ALSO doubles as the server-side plan-usage telemetry
+    // showPlanUsageLimits is per-device for DISPLAY (loadAppSettingsFromServer
+    // only seeds it into localStorage when a device has no value yet, like every
+    // other display key) but ALSO doubles as the server-side plan-usage telemetry
     // COLLECTION switch (readPlanUsageTelemetryEnabled in hooks-config.ts, read
-    // fresh at every claude session create/respawn), so unlike the others it
-    // MUST flow through in `serverSettings` below on every save — including
-    // OFF, which used to be un-sendable under the old one-way "ENABLE only"
-    // action field this replaces.
+    // fresh at every claude session create/respawn). So it is stripped here like
+    // the others and re-added below ONLY when this save FLIPS it on this device
+    // (planUsageCollectionFlip): the chip defaults OFF on handhelds, so sending
+    // it on every save let a phone saving its font size persist `false` and
+    // switch collection off for every desktop, whose chip then went stale with
+    // no error anywhere. An explicit toggle on any device still writes it, in
+    // either direction.
+    const _chipFlip = this.planUsageCollectionFlip(_prev, settings.showPlanUsageLimits);
     const {
       localEchoEnabled: _leo,
       cjkInputEnabled: _cjk,
       extendedKeyboardBar: _ekb,
       skin: _skin,
       language: _language,
+      showPlanUsageLimits: _pul,
       showAttachmentsButton: _ahb,
       showFileViewerButton: _fvb,
       webglRendererEnabled: _wgl,
@@ -2364,6 +2368,7 @@ Object.assign(CodemanApp.prototype, {
     try {
       const res = await this._apiPut('/api/settings', {
         ...serverSettings,
+        ...(_chipFlip !== undefined ? { showPlanUsageLimits: _chipFlip } : {}),
         notificationPreferences: notifPrefsToSave,
         voiceSettings,
       });
@@ -2635,6 +2640,18 @@ Object.assign(CodemanApp.prototype, {
   planUsageChipEnabled(settings = null) {
     const s = settings ?? this.loadAppSettingsFromStorage();
     return s.showPlanUsageLimits ?? this.getDefaultSettings().showPlanUsageLimits ?? true;
+  },
+
+  // What a settings save tells the server about plan-usage COLLECTION: the new
+  // chip value when this save FLIPS it relative to what this device resolved
+  // before (stored value, else the per-device default), otherwise undefined,
+  // meaning "say nothing". The server reads an absent key as ON, so a device
+  // that never touched the chip leaves collection alone, and a handheld (chip
+  // default OFF) cannot switch it off for every desktop by saving its font
+  // size. Pure so test/plan-usage-collection-flip.test.ts can drive it.
+  planUsageCollectionFlip(prevSettings, now) {
+    const before = this.planUsageChipEnabled(prevSettings ?? {});
+    return now === before ? undefined : now;
   },
 
   applyHeaderVisibilitySettings() {

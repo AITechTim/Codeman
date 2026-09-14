@@ -1299,7 +1299,9 @@ export const SettingsUpdateSchema = z
     // Doubles as the plan-usage telemetry COLLECTION switch, read fresh from
     // disk by readPlanUsageTelemetryEnabled() (hooks-config.ts) at every claude
     // session create/respawn — not just the chip's DISPLAY preference. See that
-    // function's doc comment for why one persisted field serves both.
+    // function's doc comment for why one persisted field serves both. Absent
+    // means ON there, and the client sends it only on a save that flips the
+    // chip (planUsageCollectionFlip in settings-ui.js), never on every save.
     showPlanUsageLimits: z.boolean().optional(),
     showRedrawButton: z.boolean().optional(),
     // Input

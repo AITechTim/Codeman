@@ -1044,10 +1044,21 @@ export async function ensureStatusLineExporterScript(): Promise<string> {
  * to thread a request-time flag through: they all already construct a
  * session via TmuxManager.createSession/respawnPane, which reads this at
  * spawn time.
+ *
+ * An ABSENT key means ON, mirroring readWorkspaceHooksEnabled() above: the
+ * client shows the chip and its checkbox as already on for a desktop that has
+ * never touched the setting (planUsageChipEnabled() in settings-ui.js), and
+ * the exporter only ever posts to THIS Codeman over loopback, so the honest
+ * default for an install that never said otherwise is the one the user can
+ * see. Resolving the default here, in the reader, is what lets
+ * `GET /api/settings` stay a plain read: a reconcile write there ran on every
+ * page load and could replace an unreadable settings.json with a one-key
+ * file. Only an explicit `false` (a save that flipped the chip off on some
+ * device) turns collection off.
  */
 export async function readPlanUsageTelemetryEnabled(): Promise<boolean> {
   const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'settings.json', {});
-  return settings.showPlanUsageLimits === true;
+  return settings.showPlanUsageLimits !== false;
 }
 
 /**
