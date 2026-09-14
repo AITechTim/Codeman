@@ -38,6 +38,7 @@
     "changeset": "changeset",
     "version-packages": "changeset version && node scripts/sync-plugin.mjs && npm install --package-lock-only && node scripts/check-lockfile-sync.mjs",
     "check:lockfile": "node scripts/check-lockfile-sync.mjs",
+    "check:plugin": "node scripts/sync-plugin.mjs --check && claude plugin validate --strict plugins/codeman && claude plugin validate --strict .claude-plugin/marketplace.json",
     "knip": "npx --yes knip@latest --config config/knip.json",
     "release": "changeset publish"
   },
