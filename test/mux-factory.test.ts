@@ -54,6 +54,7 @@ vi.mock('node:fs', async () => {
 describe('createMultiplexer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.CODEMAN_MUX_BACKEND;
   });
 
   it('should return a TmuxManager when tmux is available', () => {
@@ -68,5 +69,14 @@ describe('createMultiplexer', () => {
     tmuxAvailableSpy.mockReturnValue(false);
 
     expect(() => createMultiplexer()).toThrow('tmux not found');
+  });
+
+  it('selects Herdr without requiring tmux', () => {
+    process.env.CODEMAN_MUX_BACKEND = 'herdr';
+    tmuxAvailableSpy.mockReturnValue(false);
+
+    const mux = createMultiplexer();
+    expect(mux.backend).toBe('herdr');
+    mux.destroy();
   });
 });

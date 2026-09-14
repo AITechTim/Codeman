@@ -48,7 +48,7 @@ import { EventEmitter } from 'node:events';
 import { Session, isExternalCliMode, type BackgroundTask } from '../session.js';
 import type { ClaudeMode, SessionAttachmentHistoryItem, SessionState, WorkflowRunInfo } from '../types.js';
 import { RespawnController, RespawnConfig } from '../respawn-controller.js';
-import type { TerminalMultiplexer } from '../mux-interface.js';
+import type { MuxSession, TerminalMultiplexer } from '../mux-interface.js';
 import { createMultiplexer } from '../mux-factory.js';
 import { getStore } from '../state-store.js';
 import { TabLayoutService } from '../tab-layout-service.js';
@@ -265,6 +265,8 @@ export class WebServer extends EventEmitter {
   private basePath: string;
   private testMode: boolean;
   private mux: TerminalMultiplexer;
+  private muxRestorationComplete = false;
+  private readonly adoptingExternalMuxSessions = new Set<string>();
   // Centralized cleanup for standalone timers (intervals + resettable timeouts)
   private cleanup = new CleanupManager();
   // Cached light state for SSE init (avoids rebuilding on every reconnect)
@@ -400,12 +402,45 @@ export class WebServer extends EventEmitter {
       this.broadcast(SseEvent.MuxKilled, data);
     });
     this.mux.on('sessionDied', (data) => {
+      const sessionId = (data as { sessionId?: string }).sessionId;
       getLifecycleLog().log({
         event: 'mux_died',
-        sessionId: (data as { sessionId?: string }).sessionId || 'unknown',
+        sessionId: sessionId || 'unknown',
         extra: data as Record<string, unknown>,
       });
       this.broadcast(SseEvent.MuxDied, data);
+      if (this.muxRestorationComplete && this.mux.backend === 'herdr' && sessionId) {
+        void this.cleanupSession(sessionId, false, 'herdr_terminal_closed');
+      }
+    });
+    this.mux.on('externalSessionDiscovered', (session) => {
+      if (!this.muxRestorationComplete || this.mux.backend !== 'herdr') return;
+      void this.adoptExternalMuxSession(session as MuxSession);
+    });
+    this.mux.on('sessionUpdated', (muxSession) => {
+      const session = this.sessions.get((muxSession as MuxSession).sessionId);
+      if (!session) {
+        if (this.muxRestorationComplete && this.mux.backend === 'herdr') {
+          void this.adoptExternalMuxSession(muxSession as MuxSession);
+        }
+        return;
+      }
+      session.syncMuxRuntime(muxSession as MuxSession);
+      this.cachedLightState = null;
+      this.cachedSessionsList = null;
+      this.broadcast(SseEvent.SessionUpdated, this.getSessionStateWithRespawn(session));
+      this.persistSessionState(session);
+    });
+    this.mux.on('rosterUpdated', (muxSessions) => {
+      if (!this.muxRestorationComplete || this.mux.backend !== 'herdr') return;
+      for (const muxSession of muxSessions as MuxSession[]) {
+        if (!this.sessions.has(muxSession.sessionId) && !this.cleaningUp.has(muxSession.sessionId)) {
+          void this.adoptExternalMuxSession(muxSession);
+        }
+      }
+    });
+    this.mux.on('error', (error) => {
+      console.error(`[Server] ${this.mux.backend} backend error:`, error);
     });
     this.mux.on('statsUpdated', (sessions) => {
       this.broadcast(SseEvent.MuxStatsUpdated, sessions);
@@ -2188,6 +2223,7 @@ export class WebServer extends EventEmitter {
 
     const result = {
       version: APP_VERSION,
+      muxBackend: this.mux.backend,
       sessions: this.getLightSessionsState(),
       sessionOrder: this.store.getSessionOrder(),
       scheduledRuns: Array.from(this.scheduledRuns.values()),
@@ -2891,6 +2927,7 @@ export class WebServer extends EventEmitter {
               // when both tabs are on screen.
               parentSessionId: savedState?.parentSessionId,
             });
+            session.syncMuxRuntime(muxSession);
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name
             if (savedState?.name && muxSession.name !== savedState.name) {
@@ -3025,25 +3062,17 @@ export class WebServer extends EventEmitter {
             this.sessions.set(session.id, session);
             await this.setupSessionListeners(session);
 
-            // Auto-attach PTY to the surviving tmux session immediately.
-            // This ensures ALL sessions resume capturing output right away,
-            // not just the one the client happens to select first.
-            try {
-              await session.startInteractive();
-              getLifecycleLog().log({
-                event: 'recovered',
-                sessionId: session.id,
-                name: session.name,
-              });
-              console.log(`[Server] Restored and attached session ${session.id} from mux ${muxSession.muxName}`);
-            } catch (attachErr) {
-              console.error(`[Server] Failed to attach session ${session.id}, keeping as detached:`, attachErr);
-              getLifecycleLog().log({
-                event: 'recovered',
-                sessionId: session.id,
-                name: session.name,
-              });
+            if (this.mux.autoAttachOnRestore) {
+              // tmux needs a persistent client so Codeman can keep ingesting the
+              // stream. Herdr is already the owner and attaches only on focus.
+              try {
+                await session.startInteractive();
+                console.log(`[Server] Restored and attached session ${session.id} from mux ${muxSession.muxName}`);
+              } catch (attachErr) {
+                console.error(`[Server] Failed to attach session ${session.id}, keeping as detached:`, attachErr);
+              }
             }
+            getLifecycleLog().log({ event: 'recovered', sessionId: session.id, name: session.name });
 
             this.persistSessionState(session);
           }
@@ -3055,10 +3084,10 @@ export class WebServer extends EventEmitter {
         // whole time. Claude Code re-reads settings.local.json, so writing the
         // block now arms the RUNNING CLI, no session restart needed.
         await this.ensureHooksForRecoveredWorkspaces();
-
-        // Start stats collection for mux sessions
-        this.mux.startStatsCollection(STATS_COLLECTION_INTERVAL_MS);
       }
+
+      // Always poll: Herdr sessions may be created later from its desktop UI.
+      this.mux.startStatsCollection(STATS_COLLECTION_INTERVAL_MS);
 
       // Start mouse mode sync (tmux only) — toggles mouse on/off based on pane count.
       // Mouse off = native xterm.js selection; mouse on = tmux pane clicking (split layouts).
@@ -3080,6 +3109,7 @@ export class WebServer extends EventEmitter {
       return true;
     } catch (err) {
       console.error('[Server] Failed to restore mux sessions:', err);
+      this.mux.startStatsCollection(STATS_COLLECTION_INTERVAL_MS);
       return false;
     }
   }
@@ -3088,11 +3118,54 @@ export class WebServer extends EventEmitter {
   private async finalizeRestoredState(restored: boolean): Promise<void> {
     if (!restored) {
       this.tabLayouts.markRestorationFailed();
+      // Keep live discovery enabled so a temporarily unavailable Herdr server
+      // can recover without restarting Codeman.
+      this.muxRestorationComplete = true;
       return;
     }
     this.tabLayouts.markRestorationComplete();
     await this.cleanupStaleSessions();
     await this.tabLayouts.reconcileAfterRestoration();
+    this.muxRestorationComplete = true;
+  }
+
+  /** Adopt a Herdr pane without taking ownership of its durable terminal. */
+  private async adoptExternalMuxSession(muxSession: MuxSession): Promise<void> {
+    if (this.cleaningUp.has(muxSession.sessionId)) return;
+    const existing = this.sessions.get(muxSession.sessionId);
+    if (existing) {
+      existing.syncMuxRuntime(muxSession);
+      return;
+    }
+    if (this.adoptingExternalMuxSessions.has(muxSession.sessionId)) return;
+    this.adoptingExternalMuxSessions.add(muxSession.sessionId);
+    const saved = this.store.getSession(muxSession.sessionId);
+    const session = new Session({
+      id: muxSession.sessionId,
+      workingDir: muxSession.workingDir,
+      mode: muxSession.mode,
+      name: saved?.name || muxSession.name || (muxSession.mode === 'shell' ? 'Shell' : muxSession.mode),
+      createdAt: muxSession.createdAt || saved?.createdAt,
+      mux: this.mux,
+      useMux: true,
+      muxSession,
+      codexConfig: muxSession.mode === 'codex' ? saved?.codexConfig : undefined,
+      owner: muxSession.owner ?? saved?.owner,
+      lastActivityAt: saved?.lastActivityAt,
+    });
+    session.syncMuxRuntime(muxSession);
+    try {
+      await this.registerSessionWithLayout(session);
+      await this.setupSessionListeners(session);
+      this.persistSessionState(session);
+      this.broadcast(SseEvent.SessionCreated, this.getSessionStateWithRespawn(session));
+      console.log(`[Server] Adopted Herdr pane ${muxSession.terminalId || muxSession.muxName}`);
+    } catch (error) {
+      this.sessions.delete(session.id);
+      console.error('[Server] Failed to adopt Herdr terminal:', error);
+    } finally {
+      this.adoptingExternalMuxSessions.delete(muxSession.sessionId);
+    }
   }
 
   /**

@@ -1130,7 +1130,8 @@ export function registerSessionRoutes(
     const name = String(body.name || '').slice(0, MAX_SESSION_NAME_LENGTH);
     session.name = name;
     // Also update the mux session name if applicable
-    ctx.mux.updateSessionName(id, session.name);
+    ctx.mux.updateSessionName(id, session.name, 'manual');
+    if (ctx.mux.backend === 'herdr') session.name = ctx.mux.getSession(id)?.name || session.name;
     persistAndBroadcastSession(ctx, session);
     return { name: session.name };
   });
@@ -1316,14 +1317,14 @@ export function registerSessionRoutes(
     // Body is optional (auto-reattach callers send none) — same idiom as /interactive-respawn.
     const bodyResult = req.body
       ? InteractiveStartSchema.safeParse(req.body)
-      : { success: true as const, data: {} as { clearBreaker?: boolean } };
+      : { success: true as const, data: {} as { clearBreaker?: boolean; takeover?: boolean } };
     if (!bodyResult.success) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Invalid request body');
     }
-    const { clearBreaker } = bodyResult.data;
+    const { clearBreaker, takeover } = bodyResult.data;
     const session = findSessionOrFail(ctx, id, req);
 
-    if (session.isBusy()) {
+    if (session.runtimeBackend !== 'herdr' && session.isBusy()) {
       return createErrorResponse(ApiErrorCode.SESSION_BUSY, 'Session is busy');
     }
 
@@ -1366,7 +1367,7 @@ export function registerSessionRoutes(
       // without this, a re-attached session's SSE/terminal/trip events go unobserved.
       // setupSessionListeners is idempotent (no-op while refs are still attached).
       await ctx.setupSessionListeners(session);
-      await session.startInteractive();
+      await session.startInteractive({ takeover });
       getLifecycleLog().log({
         event: 'started',
         sessionId: id,
@@ -1420,6 +1421,14 @@ export function registerSessionRoutes(
     const { id } = req.params as { id: string };
     const { input, useMux, seq, clientId, wait, waitTimeout } = parseBody(SessionInputWithLimitSchema, req.body);
     const session = findSessionOrFail(ctx, id, req);
+
+    if (session.terminalTransport === 'conflict') {
+      reply.code(409);
+      return createErrorResponse(
+        ApiErrorCode.OPERATION_FAILED,
+        'Terminal controlled elsewhere; reconnect to take control'
+      );
+    }
 
     const inputStr = String(input);
     if (inputStr.length > MAX_INPUT_LENGTH) {
@@ -1514,6 +1523,17 @@ export function registerSessionRoutes(
     if (duplicate) {
       // Redelivery of an already-applied input: skip the write, but still honor the
       // wait, since the caller's question ("tell me when this settles") is unanswered.
+    } else if (session.runtimeBackend === 'herdr') {
+      // Browser fallback must use the same owned transport and must not ACK a
+      // swallowed write. Untagged orchestration retains explicit mux delivery.
+      delivered = useMux && !tagged ? await session.writeViaMux(inputStr).catch(() => false) : session.write(inputStr);
+      if (!delivered) {
+        undoOnFailure();
+        if (!waitPromise) {
+          reply.code(503);
+          return createErrorResponse(ApiErrorCode.OPERATION_FAILED, 'Terminal attachment is not ready; retry input');
+        }
+      }
     } else if (useMux && waitPromise) {
       // The response is already staying open for the wait, so the tmux write can be
       // awaited here. This is the ONE path where a writeViaMux failure is observable.

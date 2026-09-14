@@ -604,6 +604,50 @@ describe('ws-routes', () => {
   // ========== Connection cleanup ==========
 
   describe('connection cleanup', () => {
+    it('reports takeover without closing the socket or sending input acknowledgements', async () => {
+      const session = ctx._session;
+      Object.defineProperties(session, {
+        runtimeBackend: { value: 'herdr', configurable: true },
+        terminalTransport: { value: 'conflict', configurable: true },
+        retainInteractiveTransport: {
+          value: vi.fn().mockRejectedValue(new Error('controlled elsewhere')),
+          configurable: true,
+        },
+        releaseInteractiveTransport: { value: vi.fn(), configurable: true },
+        write: { value: vi.fn().mockReturnValue(false), configurable: true },
+      });
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      const messages: Array<{ t: string; state?: string }> = [];
+      ws.on('message', (raw) => messages.push(JSON.parse(String(raw))));
+      ws.send(JSON.stringify({ t: 'z', c: 100, r: 30 }));
+      await vi.waitFor(() => expect(messages.some((m) => m.t === 'ts' && m.state === 'conflict')).toBe(true));
+      ws.send(JSON.stringify({ t: 'i', d: 'saved input', seq: 1, cid: 'conflict-test' }));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(messages.some((m) => m.t === 'ia')).toBe(false);
+      expect(ws.readyState).toBe(WebSocket.OPEN);
+      ws.close();
+      await waitForClose(ws);
+    });
+
+    it('leases a Herdr attachment for the lifetime of the focused socket', async () => {
+      const session = ctx._session;
+      const retain = vi.fn().mockResolvedValue(undefined);
+      const release = vi.fn();
+      Object.defineProperties(session, {
+        runtimeBackend: { value: 'herdr', configurable: true },
+        retainInteractiveTransport: { value: retain, configurable: true },
+        releaseInteractiveTransport: { value: release, configurable: true },
+      });
+
+      const ws = await connectWs('/ws/sessions/ws-test-session/terminal');
+      expect(retain).not.toHaveBeenCalled();
+      ws.send(JSON.stringify({ t: 'z', c: 208, r: 43, v: 'desktop' }));
+      await vi.waitFor(() => expect(retain).toHaveBeenCalledWith({ cols: 208, rows: 43 }));
+      ws.close();
+      await waitForClose(ws);
+      await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    });
+
     it('removes session event listeners on close', async () => {
       const session = ctx._session;
       const listenersBefore = session.listenerCount('terminal');
