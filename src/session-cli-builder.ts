@@ -170,21 +170,17 @@ export function buildClaudeEnv(sessionId: string): Record<string, string | undef
     ...process.env,
     LANG: 'en_US.UTF-8',
     LC_ALL: 'en_US.UTF-8',
-    PATH: getAugmentedPath(),
-    TERM: 'xterm-256color',
-    // Inform Claude it's running within Codeman (helps prevent self-termination)
-    CODEMAN_MUX: '1',
-    CODEMAN_SESSION_ID: sessionId,
-    // CODEMAN_API_URL rides in via the process.env spread when the server has
-    // stamped it (WebServer.start()); no fallback: a hardcoded one was the wrong
-    // scheme on HTTPS installs, and a present-with-undefined key would serialize
-    // as the literal "CODEMAN_API_URL=undefined" (COD-115).
-    // Path only (not the secret value) — hook curls cat it at execution time (COD-54)
-    CODEMAN_HOOK_SECRET_FILE: dataPath('hook-secret'),
   };
+
   // The colour and identity vars come from the registry entry, the same source
   // buildEnvExports() and buildMuxAttachEnv() read, so this fallback cannot drift from
   // the tmux pane the way a hand-maintained list here did.
+  // ⚠️ This block runs BEFORE Codeman's own keys are assigned, mirroring
+  // buildEnvExports(), where `...cliEnv` is emitted ahead of `export CODEMAN_MUX=1`.
+  // Applied afterwards it would outrank them: `unset` and `exports` are config
+  // (`~/.codeman/clis.json` overrides any entry), so an entry naming
+  // CODEMAN_HOOK_SECRET_FILE or PATH would strip or rewrite it on this path while the
+  // tmux pane, where Codeman's exports come last, kept its own value.
   // COD-115: `delete`, not `= undefined` — node-pty serializes a present-with-undefined
   // key as the literal string "KEY=undefined" (see buildMuxAttachEnv below).
   const cliEnv = getCli('claude')?.env;
@@ -202,6 +198,20 @@ export function buildClaudeEnv(sessionId: string): Record<string, string | undef
             : undefined;
     if (value !== undefined) env[item.name] = value;
   }
+
+  Object.assign(env, {
+    PATH: getAugmentedPath(),
+    TERM: 'xterm-256color',
+    // Inform Claude it's running within Codeman (helps prevent self-termination)
+    CODEMAN_MUX: '1',
+    CODEMAN_SESSION_ID: sessionId,
+    // CODEMAN_API_URL rides in via the process.env spread when the server has
+    // stamped it (WebServer.start()); no fallback: a hardcoded one was the wrong
+    // scheme on HTTPS installs, and a present-with-undefined key would serialize
+    // as the literal "CODEMAN_API_URL=undefined" (COD-115).
+    // Path only (not the secret value) — hook curls cat it at execution time (COD-54)
+    CODEMAN_HOOK_SECRET_FILE: dataPath('hook-secret'),
+  });
   return env;
 }
 
