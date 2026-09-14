@@ -97,6 +97,11 @@
   `terminal-overrides ",*:Tc"` on its own tmux server, so 24-bit color already reaches the
   browser for the CLIs that ask for it.
 
+  ### Thanks
+  - **@shenlvkang-collab** for the path picker's typed-path jump and name/date sort (#399), and for the care in the edges: the retry is bounded to one parent level, a typo keeps the listing you had instead of resetting to the root, and a full file path lands in its folder with the entry already selected.
+  - **@irisitymichaelgrundberg** for Claude truecolor in panes (#409), and above all for flagging the one reading they could not prove: that suppressing truecolor may have made Claude's block collapse into the background rather than fixing anything. That paragraph is why this got measured instead of taken on trust, and the measurement changed the changelog.
+  - **@timkjr** for trapping Ctrl+Z in agent sessions (#404), for finding that Caps Lock flips `ev.key` to `'Z'` without setting `shiftKey` so a plain `=== 'z'` check misses exactly the keystroke the guard exists for, and for stating up front that an agent CLI already holds its tty with ISIG off rather than overselling the fix.
+
 ## 1.27.0
 
 ### Minor Changes
