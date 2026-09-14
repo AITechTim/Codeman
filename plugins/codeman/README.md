@@ -9,4 +9,6 @@ The agent skill for [Codeman](https://getcodeman.com), the self-hosted mission c
 
 The skill acts only inside a Codeman-managed session (`CODEMAN_MUX=1`) and refuses everywhere else, so installing it globally costs nothing for unrelated sessions.
 
+Pick one install route. Codeman can inject the skill into each case itself (App Settings, Agent Skill), and `codeman skill install` writes a user-level copy; a Claude Code that has one of those AND this plugin lists the skill twice, as `codeman` and `codeman:codeman`. Both work, the second is just noise.
+
 This directory is a mirror of [`skills/codeman`](../../skills/codeman) in the main repository, kept byte-identical by `scripts/sync-plugin.mjs` and pinned by a test. Edit the source there, never here. Source, issues and the rest of Codeman: https://github.com/Ark0N/Codeman
