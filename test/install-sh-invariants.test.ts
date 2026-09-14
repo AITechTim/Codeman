@@ -11,10 +11,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const SOURCE = readFileSync(fileURLToPath(new URL('../install.sh', import.meta.url)), 'utf-8');
+const INSTALL_SH = fileURLToPath(new URL('../install.sh', import.meta.url));
+const SOURCE = readFileSync(INSTALL_SH, 'utf-8');
 
 /** Lines with the leading `#` comments removed, so prose quoting a banned form is not a hit. */
 const CODE_LINES = SOURCE.split('\n').filter((line) => !/^\s*#/.test(line));
@@ -162,5 +164,66 @@ describe('install.sh runtime safety', () => {
 
   it('still sets the strict flags it has always run under', () => {
     expect(SOURCE).toMatch(/^set -euo pipefail$/m);
+  });
+});
+
+describe('install.sh AI CLI install menu', () => {
+  // The menu is the one interactive path in the script, which is why it used to be the
+  // only part nothing exercised: choosing "s" (Skip) once fell straight into the shared
+  // "failed to install" gate and aborted the installer before the clone. These drive the
+  // real function (offer_ai_cli_install) in a real bash, with detection pointed at
+  // nothing so the menu appears, and read_reply scripted.
+  const DRIVER = `
+    set -euo pipefail
+    export CODEMAN_INSTALL_SH_LIB=1
+    . "$1"
+    k=0; while [[ $k -lt \${#CLI_ALL_BINS[@]} ]]; do CLI_ALL_BINS[$k]="codeman-test-no-such-bin-$k"; k=$((k + 1)); done
+    k=0; while [[ $k -lt \${#CLI_ALL_PATHS[@]} ]]; do CLI_ALL_PATHS[$k]="/nonexistent/codeman-test/$k"; k=$((k + 1)); done
+    if [[ -n "\${MENU_INSTALL_CMD:-}" ]]; then
+      k=0; while [[ $k -lt \${#CLI_INSTALL_CMD_TRUSTED[@]} ]]; do CLI_INSTALL_CMD_TRUSTED[$k]="$MENU_INSTALL_CMD"; k=$((k + 1)); done
+    fi
+    CLI_DETECT_DONE=""
+    detect_all_clis
+    echo "found=$CLI_FOUND_COUNT"
+    NONINTERACTIVE=0
+    DOWNLOADER=curl
+    has_tty() { return 0; }
+    headless_guard() { return 0; }
+    read_reply() { eval "$1=\\"$MENU_ANSWER\\""; }
+    offer_ai_cli_install
+    echo "REACHED THE STEP AFTER THE MENU"
+  `;
+
+  function driveMenu(answer: string, installCommand?: string) {
+    const result = spawnSync('bash', ['-c', DRIVER, 'bash', INSTALL_SH], {
+      encoding: 'utf-8',
+      timeout: 30_000,
+      env: { ...process.env, MENU_ANSWER: answer, ...(installCommand ? { MENU_INSTALL_CMD: installCommand } : {}) },
+    });
+    // eslint-disable-next-line no-control-regex
+    const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    return { status: result.status, stdout: strip(result.stdout ?? ''), stderr: strip(result.stderr ?? '') };
+  }
+
+  it('offers the menu only when nothing is installed', () => {
+    const run = driveMenu('s');
+    expect(run.stdout).toContain('found=0');
+    expect(run.stderr).toContain('Choose [1-');
+  });
+
+  it('continues past the menu when the user skips', () => {
+    const run = driveMenu('s');
+    expect(run.stderr).toContain('Skipping AI CLI install');
+    expect(run.stdout, run.stderr).toContain('REACHED THE STEP AFTER THE MENU');
+    expect(run.stderr).not.toContain('failed to install');
+    expect(run.status).toBe(0);
+  });
+
+  it('still dies when the chosen install leaves nothing behind', () => {
+    const run = driveMenu('1', 'false');
+    expect(run.stderr).toContain('installation failed');
+    expect(run.stderr).toContain('The selected AI CLI failed to install');
+    expect(run.stdout).not.toContain('REACHED THE STEP AFTER THE MENU');
+    expect(run.status).toBe(1);
   });
 });

@@ -61,6 +61,18 @@ jobs:
             echo "bash $BASH_VERSION: ${#CLI_IDS[@]} CLIs, $CLI_FOUND_COUNT found"
             cli_catalog_names >/dev/null
             cli_catalog_print_install_hints >/dev/null
+            # The install menu with nothing installed and the user answering "s":
+            # skipping must warn and continue, never trip the "failed to install"
+            # gate (it did once, aborting the install before the clone).
+            has_tty() { return 0; }
+            headless_guard() { return 0; }
+            read_reply() { eval "$1=s"; }
+            NONINTERACTIVE=0
+            k=0; while [[ $k -lt ${#CLI_ALL_BINS[@]} ]]; do CLI_ALL_BINS[$k]="no-such-cli-$k"; k=$((k + 1)); done
+            k=0; while [[ $k -lt ${#CLI_ALL_PATHS[@]} ]]; do CLI_ALL_PATHS[$k]="/nonexistent/$k"; k=$((k + 1)); done
+            CLI_DETECT_DONE=""; detect_all_clis
+            offer_ai_cli_install >/dev/null 2>&1
+            echo "bash $BASH_VERSION: skipping the AI CLI install menu continues"
           '
 
       - name: CLI catalogue artifacts are in sync with stock.ts

@@ -609,6 +609,121 @@ cli_catalog_print_install_hints() {
 # the first time a hint is printed.
 cli_catalog_select_platform
 
+# Offer to install one AI CLI from the catalogue, or let the user skip.
+#
+# Split out of main() so the bash 3.2 CI step and test/install-sh-invariants.test.ts
+# can drive the menu with a stubbed read_reply: the interactive path is the one
+# part of this script no static check reaches, and it is where choosing "s" (Skip)
+# once fell into the "failed to install" gate and aborted the whole installer.
+# That gate therefore lives INSIDE the install branch: skipping is a documented
+# choice that continues to the clone and build (sessions just need a CLI later),
+# while a chosen install that leaves nothing behind is still fatal.
+offer_ai_cli_install() {
+    local i
+    echo ""
+    warn "No AI CLI found. Codeman needs at least one: $(cli_catalog_names)."
+    headless_guard "install an AI CLI (curl | bash from its vendor)"
+    echo ""
+
+    # The menu is built from the catalogue: every enabled CLI that is not
+    # installed and ships an install command we can run. It used to be a
+    # fixed four-option prompt offering Claude Code and OpenCode only, so the
+    # other seven were unreachable even though the registry knows how to
+    # install five of them.
+    #
+    # ⚠️ TRUST BOUNDARY: the command executed comes from CLI_INSTALL_CMD_TRUSTED,
+    # the only array the generated block above writes and the only one the
+    # installer ever runs or displays — see cli_catalog_select_platform.
+    #
+    # ⚠️ The registry's install commands are a MIX: some call `curl` directly
+    # (vendor one-liners), others are `npm install -g …`, which never needed
+    # curl at all. A wget-only host used to lose the WHOLE menu over this,
+    # including every npm entry — the two literals this replaced went through
+    # download_to_stdout and so honoured `wget`, and CODEMAN_NONINTERACTIVE=1
+    # silently stopped defaulting to Claude Code as documented. Filter per
+    # entry instead: only a command that actually starts with `curl ` is
+    # curl-dependent, so only THOSE are held back on a wget-only host.
+    # Rewriting curl to wget inside a string about to be executed is the
+    # wrong instinct either way — the ones we can't run, we show as a hint.
+    local -a offer_idx=()
+    local curl_only_skipped=0
+    for ((i = 0; i < ${#CLI_IDS[@]}; i++)); do
+        [[ "${CLI_ENABLED[$i]}" == "1" ]] || continue
+        [[ "${CLI_BIN_LEN[$i]}" -gt 0 ]] || continue
+        [[ -z "${CLI_FOUND_PATH[$i]}" ]] || continue
+        [[ -n "${CLI_INSTALL_CMD_TRUSTED[$i]}" ]] || continue
+        if [[ "${DOWNLOADER:-}" != "curl" ]] && [[ "${CLI_INSTALL_CMD_TRUSTED[$i]}" == curl\ * ]]; then
+            curl_only_skipped=$((curl_only_skipped + 1))
+            continue
+        fi
+        offer_idx[${#offer_idx[@]}]=$i
+    done
+
+    if [[ "$curl_only_skipped" -gt 0 ]]; then
+        warn "curl is not available, so $curl_only_skipped install command(s) that need it were left out of the menu below (still shown as hints if you skip)."
+    fi
+
+    if [[ ${#offer_idx[@]} -eq 0 ]]; then
+        warn "No AI CLI can be installed automatically here. Codeman will run, but sessions need a CLI to drive."
+        cli_catalog_print_install_hints
+    else
+        echo -e "  ${BOLD}Which AI CLI would you like to install?${NC}"
+        local n=0 idx
+        for idx in "${offer_idx[@]}"; do
+            n=$((n + 1))
+            echo -e "    ${CYAN}${n})${NC} ${CLI_LABELS[$idx]}"
+        done
+        echo -e "    ${CYAN}s)${NC} Skip (I'll install one myself)"
+        echo ""
+
+        local cli_choice=""
+        if [[ "$NONINTERACTIVE" == "1" ]] || ! has_tty; then
+            # Explicit automation opt-in: default to the first offered entry,
+            # which is registry order, which is Claude Code (order 0) — the
+            # same default this prompt has always taken non-interactively.
+            cli_choice="1"
+            info "CODEMAN_NONINTERACTIVE=1: defaulting to ${CLI_LABELS[${offer_idx[0]}]}"
+        else
+            while true; do
+                echo -en "${CYAN}Choose [1-${n}, or s to skip]:${NC} " >&2
+                read_reply cli_choice || { cli_choice="1"; break; }
+                case "$cli_choice" in
+                    s|S) break ;;
+                    ''|*[!0-9]*) echo "Please enter a number between 1 and ${n}, or s." >&2 ;;
+                    *)
+                        if [[ "$cli_choice" -ge 1 ]] && [[ "$cli_choice" -le "$n" ]]; then
+                            break
+                        fi
+                        echo "Please enter a number between 1 and ${n}, or s." >&2
+                        ;;
+                esac
+            done
+        fi
+
+        if [[ "$cli_choice" == "s" ]] || [[ "$cli_choice" == "S" ]]; then
+            warn "Skipping AI CLI install. Codeman will run, but sessions need a CLI to drive."
+            cli_catalog_print_install_hints
+        else
+            idx="${offer_idx[$((cli_choice - 1))]}"
+            info "Installing ${CLI_LABELS[$idx]}..."
+            # </dev/null: under `curl | bash` a child that reads stdin would
+            # consume the rest of this script.
+            bash -c "${CLI_INSTALL_CMD_TRUSTED[$idx]}" </dev/null || true
+            hash -r 2>/dev/null || true
+            CLI_DETECT_DONE=""
+            detect_all_clis
+            if [[ -n "${CLI_FOUND_PATH[$idx]}" ]]; then
+                success "${CLI_LABELS[$idx]} installed at ${CLI_FOUND_PATH[$idx]}"
+            else
+                warn "${CLI_LABELS[$idx]} installation failed."
+            fi
+            if [[ "$CLI_FOUND_COUNT" -eq 0 ]]; then
+                die "The selected AI CLI failed to install. Install one manually and re-run the installer."
+            fi
+        fi
+    fi
+}
+
 
 check_cloudflared() {
     # Check ~/.local/bin first (matches tunnel-manager.ts resolution order)
@@ -2260,109 +2375,7 @@ main() {
     done
 
     if [[ "$CLI_FOUND_COUNT" -eq 0 ]]; then
-        echo ""
-        warn "No AI CLI found. Codeman needs at least one: $(cli_catalog_names)."
-        headless_guard "install an AI CLI (curl | bash from its vendor)"
-        echo ""
-
-        # The menu is built from the catalogue: every enabled CLI that is not
-        # installed and ships an install command we can run. It used to be a
-        # fixed four-option prompt offering Claude Code and OpenCode only, so the
-        # other seven were unreachable even though the registry knows how to
-        # install five of them.
-        #
-        # ⚠️ TRUST BOUNDARY: the command executed comes from CLI_INSTALL_CMD_TRUSTED,
-        # the only array the generated block above writes and the only one the
-        # installer ever runs or displays — see cli_catalog_select_platform.
-        #
-        # ⚠️ The registry's install commands are a MIX: some call `curl` directly
-        # (vendor one-liners), others are `npm install -g …`, which never needed
-        # curl at all. A wget-only host used to lose the WHOLE menu over this,
-        # including every npm entry — the two literals this replaced went through
-        # download_to_stdout and so honoured `wget`, and CODEMAN_NONINTERACTIVE=1
-        # silently stopped defaulting to Claude Code as documented. Filter per
-        # entry instead: only a command that actually starts with `curl ` is
-        # curl-dependent, so only THOSE are held back on a wget-only host.
-        # Rewriting curl to wget inside a string about to be executed is the
-        # wrong instinct either way — the ones we can't run, we show as a hint.
-        local -a offer_idx=()
-        local curl_only_skipped=0
-        for ((i = 0; i < ${#CLI_IDS[@]}; i++)); do
-            [[ "${CLI_ENABLED[$i]}" == "1" ]] || continue
-            [[ "${CLI_BIN_LEN[$i]}" -gt 0 ]] || continue
-            [[ -z "${CLI_FOUND_PATH[$i]}" ]] || continue
-            [[ -n "${CLI_INSTALL_CMD_TRUSTED[$i]}" ]] || continue
-            if [[ "${DOWNLOADER:-}" != "curl" ]] && [[ "${CLI_INSTALL_CMD_TRUSTED[$i]}" == curl\ * ]]; then
-                curl_only_skipped=$((curl_only_skipped + 1))
-                continue
-            fi
-            offer_idx[${#offer_idx[@]}]=$i
-        done
-
-        if [[ "$curl_only_skipped" -gt 0 ]]; then
-            warn "curl is not available, so $curl_only_skipped install command(s) that need it were left out of the menu below (still shown as hints if you skip)."
-        fi
-
-        if [[ ${#offer_idx[@]} -eq 0 ]]; then
-            warn "No AI CLI can be installed automatically here. Codeman will run, but sessions need a CLI to drive."
-            cli_catalog_print_install_hints
-        else
-            echo -e "  ${BOLD}Which AI CLI would you like to install?${NC}"
-            local n=0 idx
-            for idx in "${offer_idx[@]}"; do
-                n=$((n + 1))
-                echo -e "    ${CYAN}${n})${NC} ${CLI_LABELS[$idx]}"
-            done
-            echo -e "    ${CYAN}s)${NC} Skip (I'll install one myself)"
-            echo ""
-
-            local cli_choice=""
-            if [[ "$NONINTERACTIVE" == "1" ]] || ! has_tty; then
-                # Explicit automation opt-in: default to the first offered entry,
-                # which is registry order, which is Claude Code (order 0) — the
-                # same default this prompt has always taken non-interactively.
-                cli_choice="1"
-                info "CODEMAN_NONINTERACTIVE=1: defaulting to ${CLI_LABELS[${offer_idx[0]}]}"
-            else
-                while true; do
-                    echo -en "${CYAN}Choose [1-${n}, or s to skip]:${NC} " >&2
-                    read_reply cli_choice || { cli_choice="1"; break; }
-                    case "$cli_choice" in
-                        s|S) break ;;
-                        ''|*[!0-9]*) echo "Please enter a number between 1 and ${n}, or s." >&2 ;;
-                        *)
-                            if [[ "$cli_choice" -ge 1 ]] && [[ "$cli_choice" -le "$n" ]]; then
-                                break
-                            fi
-                            echo "Please enter a number between 1 and ${n}, or s." >&2
-                            ;;
-                    esac
-                done
-            fi
-
-            if [[ "$cli_choice" == "s" ]] || [[ "$cli_choice" == "S" ]]; then
-                warn "Skipping AI CLI install. Codeman will run, but sessions need a CLI to drive."
-                cli_catalog_print_install_hints
-            else
-                idx="${offer_idx[$((cli_choice - 1))]}"
-                info "Installing ${CLI_LABELS[$idx]}..."
-                # </dev/null: under `curl | bash` a child that reads stdin would
-                # consume the rest of this script.
-                bash -c "${CLI_INSTALL_CMD_TRUSTED[$idx]}" </dev/null || true
-                hash -r 2>/dev/null || true
-                CLI_DETECT_DONE=""
-                detect_all_clis
-                if [[ -n "${CLI_FOUND_PATH[$idx]}" ]]; then
-                    success "${CLI_LABELS[$idx]} installed at ${CLI_FOUND_PATH[$idx]}"
-                else
-                    warn "${CLI_LABELS[$idx]} installation failed."
-                fi
-            fi
-
-            if [[ "$CLI_FOUND_COUNT" -eq 0 ]]; then
-                die "The selected AI CLI failed to install. Install one manually and re-run the installer."
-            fi
-        fi
+        offer_ai_cli_install
     fi
 
 
