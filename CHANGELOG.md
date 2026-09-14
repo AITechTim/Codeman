@@ -500,6 +500,12 @@
   so cancelling a rename stored an EMPTY session name and the tab fell back to its
   folder label. Escape now cancels without a request, in every layout.
 
+  ### Thanks
+
+  1.23.0 carries no contributor PRs of its own. It lands the day after 1.22.0, so the thanks for that pair belong here too:
+
+  - **@aakhter** built both halves of the new tab experience: the owner-scoped, server-authoritative tab-layout foundation with recipient-safe SSE publication and an unusually deep test suite (#335), and the resizable vertical session rail with accessible pointer/keyboard sizing and careful FitAddon handoff (#334). Fifth and sixth merged PRs, and the layout work also fixed real multi-user ordering leaks along the way.
+
 ## 1.22.0
 
 ### Minor Changes
@@ -511,6 +517,10 @@
 ### Patch Changes
 
 - Fix the file preview's dead pop-out control: a real detach button now opens the previewed file in a browser tab (raw route for PDFs/images/media/text, converted-PDF preview for docx/pptx) and the copy button reports when a preview has no text to copy instead of silently doing nothing. Review-driven hardening for the new tab features: PUT /api/session-order drops unknown ids again instead of rejecting the whole write (a session deleted inside the browser's debounce window could silently lose the user's reorder), a failed mux restore no longer blocks explicit session/webview deletion for the process lifetime (the automated stale sweep stays fail-closed), and the vertical rail gains the axis-awareness the sidebar-only predicates missed: correct drag-reorder insertion, active-tab scroll-into-view, floating windows anchored beside rail tabs, connector redraws on rail scroll, server-seeded orientation applied on first load, a pre-paint stamp so vertical mode no longer flashes through the header strip, and a 12px session-name default matching the sidebar's historical size so untouched installs are not restyled.
+
+  ### Thanks
+
+  - **@aakhter** built both halves of the new tab experience: the owner-scoped, server-authoritative tab-layout foundation with recipient-safe SSE publication and an unusually deep test suite (#335), and the resizable vertical session rail with accessible pointer/keyboard sizing and careful FitAddon handoff (#334). Fifth and sixth merged PRs, and the layout work also fixed real multi-user ordering leaks along the way.
 
 ## 1.21.0
 
