@@ -292,11 +292,11 @@ const customEntries: DeviceEntry[] = [
   // in both axes. The registry's other foldable (Find N5) uses the full
   // viewport for the same reason.
   //
-  // The PAIR is what earns its place here. Both postures land in the tablet
-  // band (466 and 626 are each above the 430px phone cut and below 768), so a
-  // 5.4" phone in someone's hand gets the roomier layout. Deliberate, per the
-  // note on shouldUseMobileOverview(), and worth a profile precisely because it
-  // is easy to regress into a phone-width assumption. What must NOT move with
+  // The PAIR is what earns its place here. The postures straddle the 600px
+  // phone cut (#390): closed, 466 is a phone; open, 626 is a small tablet, so
+  // the layout tier flips with the fold. Deliberate, per the note on
+  // shouldUseMobileOverview(), and worth a profile precisely because it is
+  // easy to regress into a single-width assumption. What must NOT move with
   // the fold is the per-device settings identity, which is UA-based and
   // therefore identical across the two; test/mobile/settings.test.ts pins it.
   custom('iPhone Duo (outer)', 466, 678, 3, IOS_MOBILE_UA('26_0'), true),

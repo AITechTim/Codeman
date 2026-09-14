@@ -22,8 +22,8 @@
  * 3. The gutter an overlay ends up with is a CASCADE across two files and
  *    several breakpoints, not one rule: a later @media block can zero it (the
  *    phone path picker under 600px), mobile.css can replace it with a
- *    shorthand (the palette between 430 and 768px) and, loading later, can
- *    outrank a same-specificity rule (the response viewer under 430px). So the
+ *    shorthand (the palette between 600 and 768px) and, loading later, can
+ *    outrank a same-specificity rule (the response viewer under 600px). So the
  *    cascade is simulated at every breakpoint, once with the fold rules and
  *    once without, and the two results must differ by exactly the fold strip.
  *    Each of the three shipped once with the top-level-only comparison green.
@@ -325,15 +325,15 @@ describe('fold reserved region: every centred overlay is covered', () => {
     // Chromium (styles.css + mobile.css in index.html link order): the phone
     // path picker is flush under 600px and keeps its 16px gutter above it;
     // the palette carries mobile.css's 0.75rem side gutter only inside the
-    // 430-768px band. A model that cannot reproduce these numbers proves
+    // 600-768px band. A model that cannot reproduce these numbers proves
     // nothing about the fold rules built on top of them.
     const picker = ['path-picker-overlay'];
     expect(cascadedPadding(picker, 'right', 393, false)).toBe('0');
     expect(cascadedPadding(picker, 'right', 626, false)).toBe('16px');
     const palette = ELEMENTS.at(-1)!.classes;
     expect(cascadedPadding(palette, 'right', 393, false)).toBeNull();
-    expect(cascadedPadding(palette, 'right', 500, false)).toBe('0.75rem');
-    expect(cascadedPadding(palette, 'bottom', 500, false)).toBe('0');
+    expect(cascadedPadding(palette, 'right', 626, false)).toBe('0.75rem');
+    expect(cascadedPadding(palette, 'bottom', 626, false)).toBe('0');
     expect(cascadedPadding(palette, 'right', 900, false)).toBeNull();
   });
 
@@ -353,7 +353,7 @@ describe('fold reserved region: every centred overlay is covered', () => {
 
   it('composes with the padding shorthand mobile.css gives the command palette, inside that band only', () => {
     // mobile.css loads after styles.css and sets a `padding` SHORTHAND on
-    // .command-palette-modal between 430 and 768px, exactly where a folding
+    // .command-palette-modal between 600 and 768px, exactly where a folding
     // phone lives, so a bare .command-palette-modal rule would lose to it and
     // the compound rule has to restate BOTH of that band's gutters. Scoped to
     // the same band: unscoped, it added 0.75rem where the palette has no side
@@ -374,7 +374,7 @@ describe('fold reserved region: every centred overlay is covered', () => {
 
   it('gives the response viewer cap a later twin in mobile.css', () => {
     // mobile.css sets `max-height` on .response-viewer at the same specificity
-    // under 430px and loads later, so the styles.css cap alone loses on a
+    // under 600px and loads later, so the styles.css cap alone loses on a
     // phone-width foldable. The twin must come after that rule and carry the
     // identical value.
     const capOf = (root: postcss.Root) =>
@@ -441,11 +441,12 @@ describe('a fold never changes which settings the device is using', () => {
     expect(detectionFor(postures[2].ua, postures[2].w).getDeviceType()).toBe('mobile');
   });
 
-  it('gives both iPhone Duo displays the tablet layout', () => {
-    // 466 and 626 both sit above the 430px phone cut and below 768. Deliberate
-    // (see shouldUseMobileOverview), and pinned because a 5.4" phone landing in
-    // the tablet band is the kind of thing that looks like a bug later.
-    expect(detectionFor(postures[0].ua, postures[0].w).getDeviceType()).toBe('tablet');
+  it('gives the closed iPhone Duo the phone layout and the open one the tablet layout', () => {
+    // 466 sits under the 600px phone cut (#390 moved it up from 430) and 626
+    // above it, below 768. Deliberate (see shouldUseMobileOverview), and pinned
+    // because the tier flipping under a fold is the kind of thing that looks
+    // like a bug later: closed, the Duo is a phone; open, it is a small tablet.
+    expect(detectionFor(postures[0].ua, postures[0].w).getDeviceType()).toBe('mobile');
     expect(detectionFor(postures[1].ua, postures[1].w).getDeviceType()).toBe('tablet');
   });
 });

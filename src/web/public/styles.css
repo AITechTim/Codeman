@@ -18128,14 +18128,14 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 }
 
 /* The palette is a .modal, so the generic rule above covers it everywhere
-   EXCEPT the 430-768px band, where mobile.css (loaded after this file) pads
+   EXCEPT the 600-768px band, where mobile.css (loaded after this file) pads
    it with the SHORTHAND `10vh 0.75rem 0`: that shorthand beats the generic
    rule on both sides, so this compound rule (0,2,0) restates that band's own
    gutters, 0.75rem at the side and none at the bottom, plus the fold strips.
    Scoped to the same band on purpose: unscoped, it ADDED 0.75rem on every
    other width, where the palette has no side gutter to compose with, and
    pushed the shell 6px off centre (measured at 393, 900 and 1400). */
-@media (max-width: 768px) and (min-width: 430px) {
+@media (max-width: 768px) and (min-width: 600px) {
   .modal.command-palette-modal {
     padding-right: calc(0.75rem + var(--fold-inline-end));
     padding-bottom: var(--fold-block-end);
