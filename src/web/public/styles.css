@@ -9,11 +9,20 @@
   font-weight: 400 800;
   src: url('fonts/manrope-variable.woff2') format('woff2');
 }
+/* The declared range is what the browser will synthesize from, NOT what the
+   file carries: the woff2 behind this has a `wght` axis of 100 to 800, and a
+   narrower descriptor clamps it — at `400 700`, requesting 100, 200 or 300
+   rendered identically to 400 and 800 identically to 700. The terminal
+   font-weight settings would then be a no-op for anyone on the bundled face,
+   which is most installs (the two families ahead of it in the stack, Fira Code
+   and Cascadia Code, exist only if the user installed them). Nothing in the
+   stylesheets asks for a monospace weight outside 400-700, so widening it
+   changes nothing that renders today. */
 @font-face {
   font-family: 'JetBrains Mono';
   font-style: normal;
   font-display: swap;
-  font-weight: 400 700;
+  font-weight: 100 800;
   src: url('fonts/jetbrains-mono-variable.woff2') format('woff2');
 }
 /* Icons-only per-glyph fallback for the terminal (Symbols Nerd Font Mono, MIT,

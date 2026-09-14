@@ -335,6 +335,12 @@
     'Terminal font': '终端字体',
     'Prepended to the built-in stack, so fallbacks (including bundled Nerd Font symbols) keep working. Must be installed on this device. Leave empty for the default.':
       '置于内置字体栈之前，回退字体（包括内置的 Nerd Font 图标）仍然生效。需已安装在本设备上。留空使用默认值。',
+    'Normal font weight': '常规字重',
+    'Weight for ordinary terminal text. Lowering it widens the step up to bold, which for a family shipping only a regular and a bold face is the only cue bold text carries. Needs a family with faces at that weight; the bundled font covers 100 to 800.':
+      '终端普通文本的字重。调低可拉大与粗体之间的差距；对于只提供常规和粗体两种字形的字体，这一差距是粗体文本唯一的视觉提示。需要字体具备该字重的字形，内置字体覆盖 100 至 800。',
+    'Bold font weight': '粗体字重',
+    'Weight for bold terminal text. Only useful with a family carrying something heavier than its bold face.':
+      '终端粗体文本的字重。仅当字体提供比其粗体更重的字形时才有意义。',
     'Local Echo': '本地回显',
     'CJK Input': '中日韩输入',
     'Extended Keyboard Bar': '扩展键盘栏',

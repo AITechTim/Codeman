@@ -248,9 +248,13 @@ Object.assign(CodemanApp.prototype, {
     const scrollback = Number.isFinite(stored) && stored > 0 ? Math.max(stored, DEFAULT_SCROLLBACK) : DEFAULT_SCROLLBACK;
 
     this._destroyKeyCode229Recovery();
+    const fontSettings = this.loadAppSettingsFromStorage?.() || {};
     this.terminal = new Terminal({
       theme: { ...window.codemanCurrentXtermTheme() },
-      fontFamily: window.CodemanTerminalFont.resolve(this.loadAppSettingsFromStorage?.().terminalFontFamily),
+      fontFamily: window.CodemanTerminalFont.resolve(fontSettings.terminalFontFamily),
+      // Both weight slots, each falling back to xterm's own default for that
+      // slot, so an untouched install renders exactly as it always has.
+      ...window.CodemanTerminalFont.resolveWeights(fontSettings),
       // Use smaller font on mobile to fit more columns (prevents wrapping of Claude's status line)
       fontSize: MobileDetection.getDeviceType() === 'mobile' ? 10 : 14,
       lineHeight: 1.2,
@@ -4903,6 +4907,57 @@ Object.assign(CodemanApp.prototype, {
     this.fitAddon?.fit();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+  },
+
+  /**
+   * Apply the per-device terminal font WEIGHTS to every live xterm.
+   *
+   * Both slots move together because they are resolved together: passing a
+   * settings blob with neither key restores xterm's own `normal`/`bold`.
+   *
+   * Three things follow the option write and none of them is optional:
+   *
+   *  - The echo overlays cache `terminal.options.fontWeight` and paint it into
+   *    their spans, so without `refreshFont()` the characters being typed keep
+   *    the old weight while the rest of the screen changes. Most visible on a
+   *    phone, where local echo is on by default.
+   *  - Agent Teams panes read these options at CONSTRUCTION, so a live save
+   *    would otherwise leave an open pane at the old weight beside a repainted
+   *    terminal. `applyTerminalSkin()` propagates for the same reason.
+   *  - The refit is insurance. `CharSizeService` measures through the CSS
+   *    `font` shorthand, which resets the weight, so the canvas path measures
+   *    the 400 face at every setting — but `DomRenderer` styles its measure
+   *    span with `span:not(.xterm-bold)`, where the normal weight really can
+   *    move the cell.
+   */
+  applyTerminalFontWeights(settings) {
+    const { fontWeight, fontWeightBold } = window.CodemanTerminalFont.resolveWeights(settings);
+    if (!this.terminal) return;
+    if (this.terminal.options.fontWeight === fontWeight && this.terminal.options.fontWeightBold === fontWeightBold) {
+      return;
+    }
+    this.terminal.options.fontWeight = fontWeight;
+    this.terminal.options.fontWeightBold = fontWeightBold;
+    // Same race as a live family change: the option write makes xterm
+    // re-measure immediately, against a face the browser may not have
+    // rasterized yet. Re-arm the wait and fit again once it settles; the fit
+    // below still runs, so the terminal is never left unfitted.
+    this._terminalFontReady = this._awaitTerminalFont().then(() => {
+      if (this.terminal?.options?.fontWeight === fontWeight) this.fitAddon?.fit();
+    });
+    this.fitAddon?.fit();
+    this._localEchoOverlay?.refreshFont();
+    this._predictiveEcho?.refreshFont();
+    for (const [, entry] of this.teammateTerminals || []) {
+      if (!entry?.terminal) continue;
+      entry.terminal.options.fontWeight = fontWeight;
+      entry.terminal.options.fontWeightBold = fontWeightBold;
+      try {
+        entry.fitAddon?.fit();
+      } catch {
+        /* pane not laid out yet — its own resize observer refits it */
+      }
+    }
   },
 
   loadFontSize() {
