@@ -168,6 +168,45 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
       // connected (see Session._desktopSizeClaims).
       const sizingToken = Symbol('ws-desktop-sizing');
       let holdsDesktopClaim = false;
+      let transportRetained = false;
+      let transportStarted = false;
+      let socketClosed = false;
+      let latestTransportSize: {
+        cols: number;
+        rows: number;
+        viewportType?: 'mobile' | 'tablet' | 'desktop';
+        force?: boolean;
+      } | null = null;
+
+      const retainHerdrTransport = () => {
+        if (session.runtimeBackend !== 'herdr' || transportStarted) return;
+        transportStarted = true;
+        const initialSize = latestTransportSize
+          ? { cols: latestTransportSize.cols, rows: latestTransportSize.rows }
+          : undefined;
+        void session
+          .retainInteractiveTransport(initialSize)
+          .then(() => {
+            if (socketClosed) {
+              session.releaseInteractiveTransport();
+              return;
+            }
+            transportRetained = true;
+            if (latestTransportSize) {
+              session.resize(latestTransportSize.cols, latestTransportSize.rows, {
+                viewportType: latestTransportSize.viewportType,
+                force: latestTransportSize.force,
+              });
+            }
+          })
+          .catch((error) => {
+            console.error('[ws] failed to attach Herdr terminal', { sessionId: id, error });
+            transportStarted = false;
+            if (session.terminalTransport === 'conflict') {
+              socket.send(JSON.stringify({ t: 'ts', state: 'conflict' }));
+            } else socket.close(1011, 'Terminal attachment failed');
+          });
+      };
 
       // Attach message handler synchronously BEFORE any async work
       // (@fastify/websocket requirement to avoid dropped messages).
@@ -251,16 +290,13 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
               holdsDesktopClaim = false;
             }
             const force = msg.f === true;
-            session.resize(msg.c, msg.r, { viewportType, force });
-            // Report the geometry that actually took. Resize used to be
-            // write-only, so a client whose request was declined by the
-            // arbitration above — or floored, or overridden by another device
-            // — had no way to find out, and went on rendering a CLI's repaints
-            // against a screen shape that did not exist (issue #464). Sent
-            // unconditionally: it is ~30 bytes on a debounced, rare message,
-            // and always-send means the client needs no "did it take?" state.
-            // A session with no pane sends nothing at all: its `_ptyCols`/
-            // `_ptyRows` are constructor defaults no process was ever told.
+            if (session.runtimeBackend === 'herdr') {
+              latestTransportSize = { cols: msg.c, rows: msg.r, viewportType, force };
+              retainHerdrTransport();
+              if (transportRetained) session.resize(msg.c, msg.r, { viewportType, force });
+            } else {
+              session.resize(msg.c, msg.r, { viewportType, force });
+            }
             const applied = session.ptyGeometry;
             if (applied && socket.readyState === 1) {
               socket.send(`{"t":"zc","c":${applied.cols},"r":${applied.rows}}`);
@@ -310,10 +346,33 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         socket.close(4009, 'Session terminated');
       };
 
+      const onTransport = (state: string) => {
+        if (socketClosed || socket.readyState !== 1) return;
+        socket.send(JSON.stringify({ t: 'ts', state, pid: session.pid }));
+        if (state === 'detached') socket.close(1011, 'Terminal attachment disconnected');
+        if (state === 'connected') {
+          retainHerdrTransport();
+          if (latestTransportSize)
+            session.resize(latestTransportSize.cols, latestTransportSize.rows, {
+              viewportType: latestTransportSize.viewportType,
+              force: true,
+            });
+        }
+      };
+      session.on('terminalTransport', onTransport);
+      if (session.terminalTransport)
+        socket.send(JSON.stringify({ t: 'ts', state: session.terminalTransport, pid: session.pid }));
+
       session.on('terminal', onTerminal);
       session.on('clearTerminal', onClearTerminal);
       session.on('needsRefresh', onNeedsRefresh);
       session.on('exit', onSessionExit);
+
+      // The frontend sends a typed resize immediately after opening the socket.
+      // Wait for it so the direct Herdr attach starts at the final browser size,
+      // rather than visibly reflowing through the historical 120x40 default.
+      // Older clients still attach using the provider's current pane geometry.
+      const transportFallbackTimer = session.runtimeBackend === 'herdr' ? setTimeout(retainHerdrTransport, 1000) : null;
 
       // Heartbeat: detect stale connections (especially through tunnels where
       // TCP RST can take minutes to propagate).
@@ -339,15 +398,19 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
       }, WS_PING_INTERVAL_MS);
 
       socket.on('close', (code: number, reason: Buffer) => {
+        socketClosed = true;
+        if (transportFallbackTimer) clearTimeout(transportFallbackTimer);
         clearInterval(pingInterval);
         if (pongTimeout) clearTimeout(pongTimeout);
         if (batchTimer) clearTimeout(batchTimer);
         batchChunks = [];
+        session.off('terminalTransport', onTransport);
         session.off('terminal', onTerminal);
         session.off('clearTerminal', onClearTerminal);
         session.off('needsRefresh', onNeedsRefresh);
         session.off('exit', onSessionExit);
         session.releaseDesktopSizing(sizingToken);
+        if (transportRetained) session.releaseInteractiveTransport();
 
         // Release this socket's slot. Idempotent and identity-matched: if this
         // socket was already superseded (a same-cid reconnect took its slot) or

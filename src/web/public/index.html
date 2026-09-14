@@ -154,6 +154,7 @@
         <div class="connection-indicator" id="connectionIndicator" style="display: none;">
           <span class="connection-dot" id="connectionDot"></span>
           <span class="connection-text" id="connectionText"></span>
+        <button id="terminalReconnect" type="button" hidden onclick="app.reconnectTerminal()">Reconnect</button>
         </div>
         <div class="header-font-controls">
           <button class="btn-icon-header btn-sm" onclick="app.decreaseFontSize()" title="Decrease font (Ctrl+-)" aria-label="Decrease font size">A-</button>
@@ -1563,12 +1564,12 @@
         </div>
         <div class="close-options">
           <button class="close-option" onclick="app.confirmCloseSession(false)">
-            <span class="close-option-title">Remove Tab</span>
-            <span class="close-option-desc">Tmux session keeps running in background</span>
+            <span class="close-option-title" id="closeConfirmKeepTitle">Remove Tab</span>
+            <span class="close-option-desc" id="closeConfirmKeepDesc">Tmux session keeps running in background</span>
           </button>
           <button class="close-option close-option-danger" onclick="app.confirmCloseSession(true)">
             <span class="close-option-title" id="closeConfirmKillTitle">Kill Tmux & Claude Code</span>
-            <span class="close-option-desc">Terminate the session completely</span>
+            <span class="close-option-desc" id="closeConfirmKillDesc">Terminate the session completely</span>
           </button>
         </div>
         <div class="modal-footer-cancel">

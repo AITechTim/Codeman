@@ -15,19 +15,23 @@ describe('tab layout restore gate', () => {
         reconcileAfterRestoration: typeof reconcileAfterRestoration;
       };
       cleanupStaleSessions: typeof cleanupStaleSessions;
-      mux: { reconcileSessions(): Promise<never> };
+      mux: { reconcileSessions(): Promise<never>; startStatsCollection: ReturnType<typeof vi.fn> };
       restoreMuxSessions(): Promise<boolean>;
       finalizeRestoredState(restored: boolean): Promise<void>;
     };
     server.tabLayouts = { markRestorationComplete, markRestorationFailed, reconcileAfterRestoration };
     server.cleanupStaleSessions = cleanupStaleSessions;
-    server.mux = { reconcileSessions: vi.fn(async () => Promise.reject(new Error('mux unavailable'))) };
+    server.mux = {
+      reconcileSessions: vi.fn(async () => Promise.reject(new Error('mux unavailable'))),
+      startStatsCollection: vi.fn(),
+    };
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const restored = await server.restoreMuxSessions();
     await server.finalizeRestoredState(restored);
 
     expect(restored).toBe(false);
+    expect(server.mux.startStatsCollection).toHaveBeenCalledOnce();
     expect(markRestorationComplete).not.toHaveBeenCalled();
     expect(markRestorationFailed).toHaveBeenCalledTimes(1);
     expect(cleanupStaleSessions).not.toHaveBeenCalled();

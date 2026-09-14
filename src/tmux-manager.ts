@@ -1670,6 +1670,7 @@ function setCliConfigContent(tmuxCmd: string, muxName: string, varName: string, 
  */
 export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
   readonly backend = 'tmux' as const;
+  readonly autoAttachOnRestore = true;
   private sessions: Map<string, MuxSession> = new Map();
   private readonly tmuxSocket = resolveConfiguredTmuxSocket();
   private statsInterval: NodeJS.Timeout | null = null;

@@ -235,3 +235,24 @@ describe('durable input delivery — _redeliverSweep ACK-loss recovery (COD-135)
     expect(frames.map((f) => f.d)).toEqual(['a']);
   });
 });
+
+describe('Herdr input ownership', () => {
+  it('keeps input queued through conflict and drains it only after reconnect', () => {
+    const app = makeApp() as App & {
+      sessions: Map<string, { runtimeBackend: string; terminalTransport: string }>;
+      _onWsReady(id: string): void;
+    };
+    const session = { runtimeBackend: 'herdr', terminalTransport: 'conflict' };
+    app.sessions = new Map([['session-1', session]]);
+    const frames: Frame[] = [];
+    app._ws = { readyState: 1, send: (d: string) => frames.push(JSON.parse(d)) };
+    app._wsSessionId = 'session-1';
+    app._sendInputAsync('session-1', 'saved prompt');
+    expect(frames).toHaveLength(0);
+    expect(app._pendingDeliveries.get('session-1')).toHaveLength(1);
+    session.terminalTransport = 'connected';
+    app._onWsReady('session-1');
+    expect(frames.map((frame) => frame.d)).toEqual(['saved prompt']);
+    expect(app._pendingDeliveries.get('session-1')).toHaveLength(1); // Still needs ACK.
+  });
+});

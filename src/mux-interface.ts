@@ -74,6 +74,22 @@ export interface MuxSession {
    * only the guess Codeman is declining to make.
    */
   discovered?: boolean;
+  /** Runtime provider that owns the underlying terminal. */
+  runtimeBackend?: 'tmux' | 'herdr';
+  /** Agent kind reported by Herdr; absent for an ordinary shell pane. */
+  runtimeAgentKind?: string;
+  /** Stable Herdr terminal identity when runtimeBackend is herdr. */
+  terminalId?: string;
+  /** Current Herdr pane identity. Pane ids can change when a pane moves. */
+  paneId?: string;
+  /** Current Herdr workspace identity. */
+  workspaceId?: string;
+  /** Native coding-agent conversation identity reported by Herdr. */
+  providerSessionId?: string;
+  /** Provider-authored lifecycle state. */
+  runtimeStatus?: 'idle' | 'busy' | 'stopped' | 'error';
+  /** Whether the provider reports an active turn. */
+  runtimeWorking?: boolean;
 }
 
 /**
@@ -216,7 +232,10 @@ export interface PaneCaptureOptions {
  */
 export interface TerminalMultiplexer extends EventEmitter {
   /** Which backend this instance uses */
-  readonly backend: 'tmux';
+  readonly backend: 'tmux' | 'herdr';
+
+  /** Whether recovered sessions should immediately open a persistent attach PTY. */
+  readonly autoAttachOnRestore: boolean;
 
   /** The dedicated tmux socket name all sessions live on (e.g. "codeman"). */
   readonly muxSocket: string;
@@ -262,7 +281,7 @@ export interface TerminalMultiplexer extends EventEmitter {
   // ========== Metadata ==========
 
   /** Update the display name of a session */
-  updateSessionName(sessionId: string, name: string): boolean;
+  updateSessionName(sessionId: string, name: string, source?: 'manual'): boolean;
 
   /** Mark session as attached/detached */
   setAttached(sessionId: string, attached: boolean): void;
@@ -308,7 +327,10 @@ export interface TerminalMultiplexer extends EventEmitter {
   /**
    * Get the arguments for attaching to a session by mux name.
    */
-  getAttachArgs(muxName: string): string[];
+  getAttachArgs(muxName: string, options?: { takeover?: boolean }): string[];
+
+  /** Initial terminal geometry for a newly attached client. */
+  getWindowSize?(muxName: string): { cols: number; rows: number };
 
   /** Pin a mux window so client attaches do not automatically dictate its size. */
   setManualWindowSize?(muxName: string): boolean;

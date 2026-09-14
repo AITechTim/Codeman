@@ -1804,6 +1804,7 @@ export const SubagentParentMapSchema = z.record(z.string(), z.string());
 
 /** POST /api/sessions/:id/interactive */
 export const InteractiveStartSchema = z.object({
+  takeover: z.boolean().optional(),
   /**
    * COD-118: explicit user-initiated restart — clears a tripped PTY-exit circuit
    * breaker before starting. Automatic reconnect/re-attach callers (e.g. the

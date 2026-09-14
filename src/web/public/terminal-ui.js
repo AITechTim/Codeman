@@ -411,8 +411,9 @@ Object.assign(CodemanApp.prototype, {
         return false;
       }
 
-      // Ctrl+V / Cmd+V: intercept before xterm sends ^V to PTY.
-      // Route through our paste trap which handles both images and text.
+      // Ctrl+V / Cmd+V: arm the paste handler, then allow the browser to emit
+      // its trusted ClipboardEvent. The document-level capture handler routes
+      // text to xterm exactly once and uploads images through Codeman.
       if ((ev.ctrlKey || ev.metaKey) && ev.key === 'v' && ev.type === 'keydown') {
         if (this.activeSessionId && this._handleImagePaste) {
           this._handleImagePaste();
@@ -1119,6 +1120,7 @@ Object.assign(CodemanApp.prototype, {
               activeResizeSession &&
               activeResizeSession.mode !== 'shell' &&
               !this._paneWidthRefused &&
+              activeResizeSession.runtimeBackend !== 'herdr' &&
               this.terminal &&
               this.isTerminalAtBottom()
             ) {

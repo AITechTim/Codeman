@@ -3230,7 +3230,7 @@ class CodemanApp {
         this._startMobileResizeRetry(sessionId);
         // Flush any durably-queued input over the fresh socket (covers frames a
         // prior half-open socket silently dropped, and input typed while offline).
-        this._onWsReady(sessionId);
+        if (this.sessions?.get(sessionId)?.runtimeBackend !== 'herdr') this._onWsReady(sessionId);
         // Reconcile the output hole this drop left (see the ws.onclose note).
         // Only after an unintentional close — a first connect has no gap, and
         // refetching there would duplicate the buffer selectSession just wrote.
@@ -3257,7 +3257,15 @@ class CodemanApp {
       this._wsLastRecvAt = Date.now();
       try {
         const msg = JSON.parse(event.data);
-        if (msg.t === 'o') {
+        if (msg.t === 'ts') {
+          const session = this.sessions?.get(sessionId);
+          if (session) {
+            session.terminalTransport = msg.state;
+            if ('pid' in msg) session.pid = msg.pid;
+          }
+          this._updateConnectionIndicator();
+          if (msg.state === 'connected') this._onWsReady(sessionId);
+        } else if (msg.t === 'o') {
           // Terminal output — route through the same batching pipeline as SSE
           this._onSessionTerminal({ id: sessionId, data: msg.d });
         } else if (msg.t === 'c') {
@@ -3509,6 +3517,8 @@ class CodemanApp {
 
   /** Deliver all unacked records for a session, in seq order. */
   _drainSession(sessionId) {
+    const session = this.sessions?.get(sessionId);
+    if (session?.runtimeBackend === 'herdr' && session.terminalTransport !== 'connected') return;
     const list = this._pendingDeliveries.get(sessionId);
     if (!list || list.length === 0) return;
 
@@ -3544,6 +3554,7 @@ class CodemanApp {
           if (this._ws && this._ws.readyState === WebSocket.OPEN && this._wsSessionId === sessionId) {
             break;
           }
+          if (this.sessions?.get(sessionId)?.terminalTransport === 'conflict') break;
           const rec = cur[0];
           rec.tries++;
           rec.sentAt = Date.now();
@@ -3559,6 +3570,12 @@ class CodemanApp {
             });
           } catch {
             resp = null;
+          }
+          if (resp?.status === 409 && this.sessions?.get(sessionId)?.runtimeBackend === 'herdr') {
+            const session = this.sessions?.get(sessionId);
+            session.terminalTransport = 'conflict';
+            this._updateConnectionIndicator();
+            break;
           }
           if (resp && resp.ok) {
             this._ackDelivery(sessionId, rec.seq);
@@ -3673,6 +3690,7 @@ class CodemanApp {
   _redeliverSweep() {
     if (this._pendingDeliveries.size === 0) return;
     for (const sessionId of [...this._pendingDeliveries.keys()]) {
+      if (this.sessions?.get(sessionId)?.terminalTransport === 'conflict') continue;
       const list = this._pendingDeliveries.get(sessionId);
       if (!list || list.length === 0) continue;
       const isActiveWs =
@@ -3823,6 +3841,10 @@ class CodemanApp {
   // '' so the cache compare in _updateConnectionIndicator() is well-defined.
   // Every branch/string here must stay byte-identical to what's rendered today.
   _computeConnectionDescriptor() {
+    if (this.sessions?.get(this.activeSessionId)?.terminalTransport === 'conflict') {
+      return { display: 'flex', dotClass: 'connection-dot offline',
+        text: 'Terminal controlled elsewhere', title: 'Pending input is saved. Reconnect to take control.' };
+    }
     const { bytes: totalBytes, count } = this._pendingBytes();
     const hasQueue = count > 0;
     // Only surface a backlog once it's more than a few bytes. A single keystroke
@@ -3897,6 +3919,9 @@ class CodemanApp {
     const text = this.$('connectionText');
     if (!indicator || !dot || !text) return;
 
+    const reconnect = this.$('terminalReconnect');
+    if (reconnect) reconnect.hidden = this.sessions?.get(this.activeSessionId)?.terminalTransport !== 'conflict';
+
     // Called on EVERY keystroke (_reliableSend) and EVERY ACK (_ackDelivery).
     // During fast typing the rendered tuple is usually identical, so skip the DOM
     // writes when nothing changed (COD-136) — the compute above is DOM-free.
@@ -3918,6 +3943,26 @@ class CodemanApp {
       dot.className = next.dotClass;
       text.textContent = next.text;
       indicator.title = next.title;
+    }
+  }
+
+  async reconnectTerminal() {
+    const sessionId = this.activeSessionId;
+    if (!sessionId || this._terminalReconnecting) return;
+    this._terminalReconnecting = true;
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/interactive`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ takeover: true }),
+      });
+      const result = await response.json();
+      if (!response.ok || result.success === false) throw new Error(result.error || 'Reconnect failed');
+      // Connect even if an old socket survived: the new one gets authoritative transport state.
+      if (this.activeSessionId === sessionId) this._connectWs(sessionId);
+    } catch (error) {
+      this.showToast(error.message || 'Reconnect failed', 'error');
+    } finally {
+      this._terminalReconnecting = false;
     }
   }
 
@@ -6646,7 +6691,7 @@ class CodemanApp {
 
     // Track working directory for path normalization in Project Insights
     this.currentSessionWorkingDir = session?.workingDir || null;
-    if (session && session.pid === null) {
+    if (session && session.pid === null && session.runtimeBackend !== 'herdr') {
       if (session.respawnBlocked) {
         // COD-118: the PTY-exit circuit breaker tripped for this session — the
         // automatic re-attach must NOT silently clear it (that would re-arm the
@@ -7365,6 +7410,11 @@ class CodemanApp {
   }
 
   async closeSession(sessionId, killMux = true) {
+    const selectedSession = this.sessions.get(sessionId);
+    if (!killMux && selectedSession?.runtimeBackend === 'herdr') {
+      this.leaveHerdrSessionRunning(sessionId);
+      return;
+    }
     // ⚠️ Captured BEFORE the await, and the delete is announced to
     // _onSessionDeleted through _closingSessions. The `session_deleted` SSE
     // broadcast for THIS delete routinely lands while the request is still in
@@ -7401,7 +7451,10 @@ class CodemanApp {
       this.renderSessionTabs();
 
       if (killMux) {
-        this.showToast('Session closed and tmux killed', 'success');
+        this.showToast(
+          selectedSession?.runtimeBackend === 'herdr' ? 'Herdr pane closed' : 'Session closed and tmux killed',
+          'success'
+        );
       } else {
         this.showToast('Tab hidden, tmux still running', 'info');
       }
@@ -7410,6 +7463,23 @@ class CodemanApp {
     } finally {
       this._closingSessions.delete(sessionId);
     }
+  }
+
+  leaveHerdrSessionRunning(sessionId) {
+    if (this.activeSessionId !== sessionId) return;
+    this._disconnectWs();
+    this.activeSessionId = null;
+    try { localStorage.removeItem('codeman-active-session'); } catch {}
+    const nextSessionId = this.sessionOrder.find((id) => id !== sessionId && this.sessions.has(id));
+    if (nextSessionId) {
+      this.selectSession(nextSessionId, { auto: true });
+    } else {
+      this.terminal.clear();
+      this.showWelcome();
+      this.renderRalphStatePanel();
+    }
+    this.renderSessionTabs();
+    this.showToast('Herdr pane left running and kept in Codeman', 'info');
   }
 
   // Request confirmation before closing a session
@@ -7426,8 +7496,24 @@ class CodemanApp {
 
     // Update kill button text based on session mode
     const killTitle = document.getElementById('closeConfirmKillTitle');
+    const killDesc = document.getElementById('closeConfirmKillDesc');
+    const keepTitle = document.getElementById('closeConfirmKeepTitle');
+    const keepDesc = document.getElementById('closeConfirmKeepDesc');
+    if (keepTitle) keepTitle.textContent = session.runtimeBackend === 'herdr' ? 'Leave Running' : 'Remove Tab';
+    if (keepDesc) {
+      keepDesc.textContent = session.runtimeBackend === 'herdr'
+        ? 'Keep the live Herdr pane visible in Codeman'
+        : 'Tmux session keeps running in background';
+    }
+    if (killDesc) {
+      killDesc.textContent = session.runtimeBackend === 'herdr'
+        ? 'Terminate the underlying Herdr pane completely'
+        : 'Terminate the session completely';
+    }
     if (killTitle) {
-      killTitle.textContent = session.mode === 'opencode'
+      killTitle.textContent = session.runtimeBackend === 'herdr'
+        ? 'Close Herdr Pane'
+        : session.mode === 'opencode'
         ? 'Kill Tmux & OpenCode'
         : session.mode === 'codex'
           ? 'Kill Tmux & Codex'
@@ -7524,7 +7610,9 @@ class CodemanApp {
       this.showToast('No active session', 'warning');
       return;
     }
-    await this.closeSession(this.activeSessionId);
+    const session = this.sessions.get(this.activeSessionId);
+    if (session?.runtimeBackend === 'herdr') this.requestCloseSession(this.activeSessionId);
+    else await this.closeSession(this.activeSessionId);
   }
 
   async killAllSessions() {
