@@ -18088,8 +18088,10 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
    ⚠️ Each rule re-states the overlay's OWN gutter, because a
    later `padding-right` longhand beats the earlier `padding`
    shorthand it is composing with and would otherwise erase it.
-   test/iphone-duo-fold.test.ts reads both numbers out of this file
-   and fails if they drift apart.
+   test/foldable-layout.test.ts reads both numbers out of this file
+   and fails if they drift apart, and simulates the cascade at every
+   breakpoint so a base gutter overridden by a later @media block (the
+   phone path picker below) needs its own zero-base restatement.
 
    ⚠️ Physical sides, not logical ones: dialogs go in the LEFT
    segment (and the TOP one in tabletop pose) in every language. The
@@ -18125,13 +18127,19 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
   padding-bottom: var(--fold-block-end);
 }
 
-/* Specificity 0,2,0 on purpose: mobile.css loads after this file and gives the
-   palette a `padding` SHORTHAND under 768px, exactly the width where a folding
-   phone lives, so a bare .command-palette-modal rule here would lose to it. The
-   0.75rem side gutter is that mobile rule's; the desktop rule sets no side
-   padding, so composing with it is a no-op above 768px. */
-.modal.command-palette-modal {
-  padding-right: calc(0.75rem + var(--fold-inline-end));
+/* The palette is a .modal, so the generic rule above covers it everywhere
+   EXCEPT the 430-768px band, where mobile.css (loaded after this file) pads
+   it with the SHORTHAND `10vh 0.75rem 0`: that shorthand beats the generic
+   rule on both sides, so this compound rule (0,2,0) restates that band's own
+   gutters, 0.75rem at the side and none at the bottom, plus the fold strips.
+   Scoped to the same band on purpose: unscoped, it ADDED 0.75rem on every
+   other width, where the palette has no side gutter to compose with, and
+   pushed the shell 6px off centre (measured at 393, 900 and 1400). */
+@media (max-width: 768px) and (min-width: 430px) {
+  .modal.command-palette-modal {
+    padding-right: calc(0.75rem + var(--fold-inline-end));
+    padding-bottom: var(--fold-block-end);
+  }
 }
 
 .path-picker-overlay {
@@ -18142,6 +18150,24 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 .path-preview-overlay {
   padding-right: calc(18px + var(--fold-inline-end));
   padding-bottom: calc(18px + var(--fold-block-end));
+}
+
+/* Under 600px both dialogs are flush sheets: their `@media (max-width: 600px)`
+   rules drop the gutter to 0 (borderless right and bottom edges, the picker
+   docked to the bottom). The two rules above sit later in the file at the same
+   specificity, so on their own they put a 16px and 18px gutter back on every
+   phone, fold or no fold (measured at 393 and 500: dialog edges floating 16px
+   off the screen edge). Restate the fold strip on a ZERO base here. */
+@media (max-width: 600px) {
+  .path-picker-overlay {
+    padding-right: var(--fold-inline-end);
+    padding-bottom: var(--fold-block-end);
+  }
+
+  .path-preview-overlay {
+    padding-right: var(--fold-inline-end);
+    padding-bottom: var(--fold-block-end);
+  }
 }
 
 .offline-overlay {
@@ -18163,7 +18189,11 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 /* The response viewer is a bottom sheet, so a vertical hinge running through it
    is fine, since it is a wide surface like the terminal and inset dialogs are what
    the fold guidance is about. A horizontal hinge is not: in tabletop pose the
-   sheet would climb out of the bottom segment and fold away mid-transcript. */
+   sheet would climb out of the bottom segment and fold away mid-transcript.
+   ⚠️ mobile.css carries an identical twin at its end: its 430px block sets
+   `max-height: 92dvh` at the same specificity and loads later, so this copy
+   alone loses on a phone-width foldable. test/foldable-layout.test.ts pins
+   the two values equal. */
 @media (vertical-viewport-segments: 2) {
   .response-viewer {
     max-height: min(88vh, env(viewport-segment-height 0 1, 88vh));

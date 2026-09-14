@@ -3850,3 +3850,15 @@ html[data-session-list="sidebar"] .session-sidebar .session-tab .tab-close {
     transition: none;
   }
 }
+
+/* Folding devices, tabletop pose: cap the response viewer to the bottom
+   segment. Twin of the rule at the end of styles.css, needed here because the
+   430px block above sets `max-height: 92dvh` on the same selector at the same
+   specificity, and this file loads later, so the styles.css copy loses on a
+   phone-width foldable. Keep the value identical; test/foldable-layout.test.ts
+   compares them. */
+@media (vertical-viewport-segments: 2) {
+  .response-viewer {
+    max-height: min(88vh, env(viewport-segment-height 0 1, 88vh));
+  }
+}

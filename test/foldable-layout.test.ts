@@ -8,7 +8,7 @@
  * Segments media features and env() variables, so the styles.css section this
  * file guards is the whole mechanism.
  *
- * Two things about it fail silently and neither is observable without the
+ * Three things about it fail silently and none is observable without the
  * hardware, which is why they are pinned here rather than left to a device lab:
  *
  * 1. Each fold rule RE-STATES the overlay's own gutter, because a later
@@ -19,6 +19,14 @@
  *    inset: 0` flex-centring box in styles.css must have a fold rule. A new
  *    overlay added without one would centre its dialog on the hinge, and
  *    nothing else in the suite would notice.
+ * 3. The gutter an overlay ends up with is a CASCADE across two files and
+ *    several breakpoints, not one rule: a later @media block can zero it (the
+ *    phone path picker under 600px), mobile.css can replace it with a
+ *    shorthand (the palette between 430 and 768px) and, loading later, can
+ *    outrank a same-specificity rule (the response viewer under 430px). So the
+ *    cascade is simulated at every breakpoint, once with the fold rules and
+ *    once without, and the two results must differ by exactly the fold strip.
+ *    Each of the three shipped once with the top-level-only comparison green.
  *
  * Parsed with postcss rather than regexes because the values are calc()
  * expressions and some of the rules live in @media blocks. Rendered behaviour
@@ -91,16 +99,159 @@ function composed(base: string | null, foldVar: string): string {
   return `calc(${inner} + var(${foldVar}))`;
 }
 
-/** The rule that adds the fold inset to `selector`, wherever it lives. */
-function foldRuleFor(selector: string): Rule | undefined {
-  return STYLES.nodes
-    .filter((n): n is Rule => n.type === 'rule')
-    .find((rule) => {
-      if (!rule.selectors.some((s) => s === selector || s.endsWith(selector))) return false;
-      const d = declsOf(rule);
-      return Object.values(d).some((v) => v.includes('--fold-inline-end') || v.includes('--fold-block-end'));
-    });
+function isFoldValue(value: string): boolean {
+  return value.includes('--fold-inline-end') || value.includes('--fold-block-end');
 }
+
+/** Every rule that adds the fold inset to `selector`, top level or inside @media, in source order. */
+function foldRulesFor(selector: string): Rule[] {
+  const found: Rule[] = [];
+  STYLES.walkRules((rule) => {
+    if (!rule.selectors.some((s) => s === selector || s.endsWith(selector))) return;
+    if (Object.values(declsOf(rule)).some(isFoldValue)) found.push(rule);
+  });
+  return found;
+}
+
+/** The first (unconditional, for the derived overlays) fold rule for `selector`. */
+function foldRuleFor(selector: string): Rule | undefined {
+  return foldRulesFor(selector)[0];
+}
+
+// ─── Cascade simulation ──────────────────────────────────────────────────────
+//
+// A small model of what the browser does for one element's padding: every rule
+// in styles.css then mobile.css (index.html link order) whose selector is a
+// class compound matching the element, whose enclosing @media matches the
+// width, ordered by specificity then source order, shorthand expanded to the
+// side asked for. Deliberately narrow: rules nested inside another rule (the
+// skin block) or under an at-rule other than @media / @supports are ignored,
+// and a media query with any feature other than min/max-width is treated as
+// not matching, which is right for a FLAT device (viewport-segments queries
+// only match while bent). The numbers it produces were checked against
+// getComputedStyle in headless Chromium at every width below.
+
+type Side = 'right' | 'bottom';
+
+interface PaddingDecl {
+  order: number;
+  file: 'styles.css' | 'mobile.css';
+  classes: string[];
+  specificity: number;
+  media: string | null;
+  prop: 'padding' | `padding-${Side}`;
+  value: string;
+  fold: boolean;
+}
+
+/** `.a.b` -> ['a', 'b']; anything that is not a pure class compound -> null. */
+function classCompound(selector: string): string[] | null {
+  const trimmed = selector.trim();
+  if (!/^(\.[A-Za-z0-9_-]+)+$/.test(trimmed)) return null;
+  return trimmed.slice(1).split('.');
+}
+
+const PADDING_DECLS: PaddingDecl[] = [];
+{
+  let order = 0;
+  for (const [file, root] of [
+    ['styles.css', STYLES],
+    ['mobile.css', MOBILE],
+  ] as const) {
+    root.walkRules((rule) => {
+      const media: string[] = [];
+      let nested = false;
+      for (let p = rule.parent; p && p.type !== 'root'; p = p.parent) {
+        if (p.type === 'rule') nested = true;
+        else if (p.type === 'atrule' && p.name === 'media') media.push(p.params);
+        else if (p.type === 'atrule' && p.name !== 'supports') nested = true;
+      }
+      if (nested) return;
+      for (const selector of rule.selectors) {
+        const classes = classCompound(selector);
+        if (!classes) continue;
+        rule.each((node) => {
+          if (node.type !== 'decl') return;
+          if (!/^padding(-right|-bottom)?$/.test(node.prop)) return;
+          PADDING_DECLS.push({
+            order: order++,
+            file,
+            classes,
+            specificity: classes.length,
+            media: media.length ? media.join(' and ') : null,
+            prop: node.prop as PaddingDecl['prop'],
+            value: node.value,
+            fold: isFoldValue(node.value),
+          });
+        });
+      }
+    });
+  }
+}
+
+/** Does a width-only media query match `width`? Anything else is "not on a flat device". */
+function mediaMatches(params: string, width: number): boolean {
+  return params.split(',').some((alt) =>
+    alt.split(/\s+and\s+/).every((term) => {
+      const t = term.trim();
+      if (t === 'screen' || t === 'all') return true;
+      const m = /^\((max|min)-width:\s*(\d+(?:\.\d+)?)px\)$/.exec(t);
+      if (!m) return false;
+      return m[1] === 'max' ? width <= Number(m[2]) : width >= Number(m[2]);
+    })
+  );
+}
+
+/** Split a shorthand on whitespace outside parentheses. */
+function tokens(value: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (const ch of value.trim()) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (/\s/.test(ch) && depth === 0) {
+      if (cur) out.push(cur);
+      cur = '';
+    } else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** The side of a 1-4 value `padding` shorthand. */
+function shorthandSideOf(value: string, side: Side): string {
+  const t = tokens(value);
+  if (t.length < 1 || t.length > 4) throw new Error(`padding shorthand not handled: ${value}`);
+  const [top, right = top, bottom = top, left = right] = t;
+  void left;
+  return side === 'right' ? right : bottom;
+}
+
+/**
+ * What `padding-<side>` resolves to for an element carrying `classes` at
+ * `width`, as the declaration VALUE that wins (null when nothing sets it).
+ * `withFold: false` drops every declaration that references a fold variable,
+ * which is the cascade a non-folding build would have.
+ */
+function cascadedPadding(classes: string[], side: Side, width: number, withFold: boolean): string | null {
+  const have = new Set(classes);
+  const winners = PADDING_DECLS.filter(
+    (d) =>
+      (withFold || !d.fold) &&
+      (d.file === 'styles.css' || width <= 1023) &&
+      (d.media === null || mediaMatches(d.media, width)) &&
+      d.classes.every((c) => have.has(c)) &&
+      (d.prop === 'padding' || d.prop === `padding-${side}`)
+  );
+  winners.sort((a, b) => a.specificity - b.specificity || a.order - b.order);
+  const last = winners.at(-1);
+  if (!last) return null;
+  return last.prop === 'padding' ? shorthandSideOf(last.value, side) : last.value;
+}
+
+/** Every breakpoint either stylesheet keys on, plus a phone, a Duo posture and a desktop. */
+const WIDTHS = [393, 430, 500, 600, 626, 768, 900, 1400];
 
 describe('fold reserved region: custom properties', () => {
   it('defaults to zero, so nothing moves on a device that does not fold', () => {
@@ -159,18 +310,84 @@ describe('fold reserved region: every centred overlay is covered', () => {
     expect(d['padding-bottom']).toBe(composed(effectivePadding(o.decls, 'bottom'), '--fold-block-end'));
   });
 
-  it('outranks the padding shorthand mobile.css gives the command palette', () => {
+  /**
+   * The elements whose padding cascade is simulated: every derived overlay as
+   * a bare element, plus the open command palette, which is a `.modal` wearing
+   * two more classes and the one overlay mobile.css pads with a shorthand.
+   */
+  const ELEMENTS: { name: string; classes: string[] }[] = [
+    ...CENTRED_OVERLAYS.map((o) => ({ name: o.selector, classes: classCompound(o.selector)! })),
+    { name: '.modal.command-palette-modal.active', classes: ['modal', 'command-palette-modal', 'active'] },
+  ];
+
+  it('simulates the cascade the browser measured', () => {
+    // Anchors for the model, all read off getComputedStyle in headless
+    // Chromium (styles.css + mobile.css in index.html link order): the phone
+    // path picker is flush under 600px and keeps its 16px gutter above it;
+    // the palette carries mobile.css's 0.75rem side gutter only inside the
+    // 430-768px band. A model that cannot reproduce these numbers proves
+    // nothing about the fold rules built on top of them.
+    const picker = ['path-picker-overlay'];
+    expect(cascadedPadding(picker, 'right', 393, false)).toBe('0');
+    expect(cascadedPadding(picker, 'right', 626, false)).toBe('16px');
+    const palette = ELEMENTS.at(-1)!.classes;
+    expect(cascadedPadding(palette, 'right', 393, false)).toBeNull();
+    expect(cascadedPadding(palette, 'right', 500, false)).toBe('0.75rem');
+    expect(cascadedPadding(palette, 'bottom', 500, false)).toBe('0');
+    expect(cascadedPadding(palette, 'right', 900, false)).toBeNull();
+  });
+
+  it.each(ELEMENTS.map((e) => [e.name, e.classes] as const))(
+    '%s ends up with exactly its own gutter plus the fold strip at every breakpoint',
+    (_, classes) => {
+      for (const width of WIDTHS) {
+        for (const side of ['right', 'bottom'] as const) {
+          const foldVar = side === 'right' ? '--fold-inline-end' : '--fold-block-end';
+          const base = cascadedPadding(classes, side, width, false);
+          const actual = cascadedPadding(classes, side, width, true);
+          expect(actual, `padding-${side} at ${width}px (base ${base})`).toBe(composed(base, foldVar));
+        }
+      }
+    }
+  );
+
+  it('composes with the padding shorthand mobile.css gives the command palette, inside that band only', () => {
     // mobile.css loads after styles.css and sets a `padding` SHORTHAND on
-    // .command-palette-modal under 768px, exactly the width a folding phone
-    // lives at, so a bare .command-palette-modal rule here would lose to it.
+    // .command-palette-modal between 430 and 768px, exactly where a folding
+    // phone lives, so a bare .command-palette-modal rule would lose to it and
+    // the compound rule has to restate BOTH of that band's gutters. Scoped to
+    // the same band: unscoped, it added 0.75rem where the palette has no side
+    // gutter at all and pushed the shell 6px off centre.
     const mobileRule = rulesFor(MOBILE, '.command-palette-modal').find((r) => declsOf(r).padding);
     expect(mobileRule, 'mobile.css no longer pads the palette; this rule can be simplified').toBeDefined();
+    const band = mobileRule!.parent;
+    expect(band).toMatchObject({ type: 'atrule', name: 'media' });
 
-    const sideGutter = declsOf(mobileRule!).padding.trim().split(/\s+/)[1];
-    const fold = foldRuleFor('.command-palette-modal');
+    const shorthand = declsOf(mobileRule!).padding;
+    const fold = foldRulesFor('.command-palette-modal');
+    expect(fold).toHaveLength(1);
+    expect(fold[0].selector).toBe('.modal.command-palette-modal');
+    expect(fold[0].parent).toMatchObject({ type: 'atrule', name: 'media', params: (band as postcss.AtRule).params });
+    expect(declsOf(fold[0])['padding-right']).toBe(composed(shorthandSideOf(shorthand, 'right'), '--fold-inline-end'));
+    expect(declsOf(fold[0])['padding-bottom']).toBe(composed(shorthandSideOf(shorthand, 'bottom'), '--fold-block-end'));
+  });
 
-    expect(fold?.selector).toBe('.modal.command-palette-modal');
-    expect(declsOf(fold!)['padding-right']).toBe(`calc(${sideGutter} + var(--fold-inline-end))`);
+  it('gives the response viewer cap a later twin in mobile.css', () => {
+    // mobile.css sets `max-height` on .response-viewer at the same specificity
+    // under 430px and loads later, so the styles.css cap alone loses on a
+    // phone-width foldable. The twin must come after that rule and carry the
+    // identical value.
+    const capOf = (root: postcss.Root) =>
+      rulesFor(root, '.response-viewer').find((r) => declsOf(r)['max-height']?.includes('viewport-segment'));
+    const styles = capOf(STYLES);
+    const mobile = capOf(MOBILE);
+    expect(mobile, 'mobile.css has no twin of the tabletop cap').toBeDefined();
+    expect(mobile!.parent).toMatchObject({ params: '(vertical-viewport-segments: 2)' });
+    expect(declsOf(mobile!)['max-height']).toBe(declsOf(styles!)['max-height']);
+
+    const competing = rulesFor(MOBILE, '.response-viewer').filter((r) => r !== mobile && declsOf(r)['max-height']);
+    expect(competing.length).toBeGreaterThan(0);
+    for (const rule of competing) expect(rule.source!.start!.line).toBeLessThan(mobile!.source!.start!.line);
   });
 });
 
