@@ -135,6 +135,16 @@ function sendRawStream(reply: FastifyReply, content: Readable, cleanup?: () => v
   // when the client goes away (tab closed, video seek, a cancelled fetch), or the
   // ssh process outlives the request. Registered here because this is the one place
   // that owns the response's lifecycle.
+  //
+  // ⚠️ Check BEFORE attaching: the guard probe that ran ahead of this is an ssh round
+  // trip, and a client that gave up during it has already closed the response, so
+  // `close` has already fired and a listener attached now would never run. The
+  // `open()` call above still spawned the body's ssh child; reap it here instead.
+  if (reply.raw.destroyed) {
+    cleanup?.();
+    content.destroy();
+    return;
+  }
   if (cleanup) {
     reply.raw.on('close', cleanup);
   }
@@ -1010,12 +1020,64 @@ function getSessionAttachmentHistory(
   };
 }
 
+/**
+ * The remote probes an attachment-history listing needs, resolved in ONE batch.
+ *
+ * The list route used to probe each entry on its own, i.e. one ssh handshake per
+ * history item, up to `ATTACHMENT_HISTORY_LIMIT` (100) of them, and the attachments
+ * drawer re-runs the route on every `attachment:detected` event while it is open,
+ * which is exactly when an agent is writing files. OpenSSH's default
+ * `MaxStartups 10:30:100` starts dropping connections at ten concurrent handshakes,
+ * so most of such a burst simply failed. `remoteProbePaths` already takes an array
+ * (and chunks it), so the whole history is one call, plus the global ssh limiter
+ * bounding whatever is left.
+ */
+interface RemoteHistoryProbes {
+  /** The workspace root, canonicalized on the remote host. */
+  root: RemoteProbe | null;
+  /** Keyed by the exact path handed to the probe (a lexical resolution or an external path). */
+  byPath: Map<string, RemoteProbe | null>;
+  /**
+   * The batch itself failed (unreachable host). Every entry is then UNKNOWN, not
+   * missing: reporting "missing" would tell the user their files are gone when the
+   * host is merely asleep.
+   */
+  unreachable: boolean;
+}
+
+async function probeRemoteAttachmentHistory(
+  scope: SessionFileScope,
+  history: readonly SessionAttachmentHistoryItem[]
+): Promise<RemoteHistoryProbes | undefined> {
+  const remote = scope.remote;
+  if (!remote || history.length === 0) return undefined;
+
+  const paths = new Set<string>();
+  for (const item of history) {
+    if (item.source === 'external') {
+      if (item.externalPath) paths.add(item.externalPath);
+    } else if (item.relativePath) {
+      const lexical = validateSessionFilePathLexical(scope.workingDir, item.relativePath);
+      if (lexical) paths.add(lexical.resolvedPath);
+    }
+  }
+
+  const list = [...paths];
+  try {
+    const [root, ...rest] = await remoteProbePaths(remote, [scope.workingDir, ...list]);
+    return { root, byPath: new Map(list.map((path, index) => [path, rest[index] ?? null])), unreachable: false };
+  } catch {
+    return { root: null, byPath: new Map(), unreachable: true };
+  }
+}
+
 // History item for a file detected inside the workspace: re-stat for live
 // size/mtime and resolve preview/thumbnail/raw routes off the relative path.
 async function buildDetectedAttachmentRouteItem(
   sessionId: string,
   scope: SessionFileScope,
-  item: SessionAttachmentHistoryItem
+  item: SessionAttachmentHistoryItem,
+  batch?: RemoteHistoryProbes
 ): Promise<AttachmentHistoryRouteItem> {
   const safe = sanitizeAttachmentHistoryItem(item);
   if (!item.relativePath) {
@@ -1032,15 +1094,22 @@ async function buildDetectedAttachmentRouteItem(
     // inside the workspace), executed on the host that owns the files.
     const lexical = validateSessionFilePathLexical(workingDir, item.relativePath);
     if (!lexical) return { ...safe, missing: true };
-    let probes: Array<RemoteProbe | null>;
-    try {
-      probes = await remoteProbePaths(scope.remote, [lexical.resolvedPath, workingDir]);
-    } catch {
-      // Unreachable host: the entry is not "missing", it is unknown. Reporting it as
-      // missing would tell the user their file is gone when its host is merely asleep.
-      return { ...safe, missing: false, size, mtimeMs };
+    let probe: RemoteProbe | null;
+    let rootProbe: RemoteProbe | null;
+    if (batch) {
+      // The list route resolved the whole history in one round trip.
+      if (batch.unreachable) return { ...safe, missing: false, size, mtimeMs };
+      probe = batch.byPath.get(lexical.resolvedPath) ?? null;
+      rootProbe = batch.root;
+    } else {
+      try {
+        [probe, rootProbe] = await remoteProbePaths(scope.remote, [lexical.resolvedPath, workingDir]);
+      } catch {
+        // Unreachable host: the entry is not "missing", it is unknown. Reporting it as
+        // missing would tell the user their file is gone when its host is merely asleep.
+        return { ...safe, missing: false, size, mtimeMs };
+      }
     }
-    const [probe, rootProbe] = probes;
     if (!probe || !isPathWithinRoot(rootProbe?.realPath ?? workingDir, probe.realPath)) {
       return { ...safe, missing: true };
     }
@@ -1090,17 +1159,24 @@ async function buildDetectedAttachmentRouteItem(
 async function buildExternalAttachmentRouteItem(
   sessionId: string,
   item: SessionAttachmentHistoryItem,
-  scope: SessionFileScope
+  scope: SessionFileScope,
+  batch?: RemoteHistoryProbes
 ): Promise<AttachmentHistoryRouteItem> {
   const safe = sanitizeAttachmentHistoryItem(item);
   if (!item.externalPath) {
     return { ...safe, missing: true };
+  }
+  // Same answer as the detected branch for the same event: an unreachable host makes
+  // the entry unknown, never missing.
+  if (batch?.unreachable) {
+    return { ...safe, missing: false };
   }
 
   try {
     const event = await registerExternalAttachment(sessionId, item.externalPath, {
       sessionWorkingDir: scope.workingDir,
       remote: scope.remote,
+      remoteProbes: batch ? [batch.byPath.get(item.externalPath) ?? null, batch.root] : undefined,
     });
     return {
       ...safe,
@@ -1118,7 +1194,9 @@ async function buildExternalAttachmentRouteItem(
     };
   } catch (err) {
     if (err instanceof AttachmentRegistrationError) {
-      return { ...safe, missing: true };
+      // 502 is the transport, not the file (see resolveRemoteAttachment): unknown,
+      // like the detected branch. Anything else (404, 403, wrong kind) is missing.
+      return { ...safe, missing: err.statusCode === 502 ? false : true };
     }
     throw err;
   }
@@ -1815,6 +1893,20 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
     async (req): Promise<ApiResponse<FileWriteData>> => {
       const { id } = req.params as { id: string };
       const session = findSessionOrFail(ctx, id, req);
+      // Remote WRITES are out of scope by design (docs/file-viewer-edit-plan.md §6),
+      // and this guard must sit ahead of `validateSessionFilePath`: that helper
+      // resolves against the LOCAL filesystem, so with a directory of the same
+      // absolute name on this host (an sshfs mount of the remote tree, `/srv/case`,
+      // a same-named home) the write would land on the local twin while the viewer
+      // believes it edited the remote file. The read-remote/write-local split is
+      // exactly what the no-local-fallback rule exists to prevent.
+      if (session.remote) {
+        throwFileEditError(
+          400,
+          ApiErrorCode.INVALID_INPUT,
+          'Editing is not supported for files in a remote (SSH) case'
+        );
+      }
       const body = parseBody(FileWriteSchema, req.body);
 
       // Exact byte cap — the schema's .max() counts UTF-16 code units and is
@@ -2056,11 +2148,14 @@ export function registerFileRoutes(app: FastifyInstance, ctx: SessionPort & Even
       return;
     }
 
+    // Remote: every entry's realpath + stat in one batched probe, never one ssh per
+    // item (see probeRemoteAttachmentHistory). Local: undefined, each item stats itself.
+    const batch = await probeRemoteAttachmentHistory(sessionHistory.scope, sessionHistory.history);
     const items = await Promise.all(
       sessionHistory.history.map((item) =>
         (item.source === 'external'
-          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.scope)
-          : buildDetectedAttachmentRouteItem(id, sessionHistory.scope, item)
+          ? buildExternalAttachmentRouteItem(id, item, sessionHistory.scope, batch)
+          : buildDetectedAttachmentRouteItem(id, sessionHistory.scope, item, batch)
         ).catch(() => ({ ...sanitizeAttachmentHistoryItem(item), missing: true }))
       )
     );

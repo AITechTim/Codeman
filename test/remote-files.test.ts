@@ -16,7 +16,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, statSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import {
@@ -24,8 +24,11 @@ import {
   buildRemoteFileCommand,
   buildRemoteProbeCommand,
   buildRemoteReadCommand,
-  parseRemoteProbeLine,
-  parseRemoteProbeLines,
+  parseRemoteProbeRecord,
+  parseRemoteProbeOutput,
+  remoteProbePaths,
+  remoteReadFile,
+  remoteCreateReadStream,
 } from '../src/remote-files.js';
 import type { SessionRemote } from '../src/types/session.js';
 
@@ -103,34 +106,117 @@ describe('buildRemoteProbeCommand', () => {
     const script = buildRemoteProbeCommand(['/srv/case/a.png', '/srv/case']);
     const probeCalls = script.split('\n').filter((line) => line.startsWith('probe '));
 
-    expect(probeCalls).toEqual(["probe '/srv/case/a.png'", "probe '/srv/case'"]);
+    // The index is what the parser keys records on, so it is part of the call.
+    expect(probeCalls).toEqual(["probe 0 '/srv/case/a.png'", "probe 1 '/srv/case'"]);
   });
 
   it('quotes a path with spaces, quotes and a command substitution', () => {
     const nasty = "/srv/case/it's $(touch /tmp/pwned).txt";
     const script = buildRemoteProbeCommand([nasty]);
 
-    expect(script).toContain(`probe '/srv/case/it'\\''s $(touch /tmp/pwned).txt'`);
+    expect(script).toContain(`probe 0 '/srv/case/it'\\''s $(touch /tmp/pwned).txt'`);
     expect(shellArgv(buildRemoteFileCommand(remoteFixture(), script)).at(-1)).toBe(script);
   });
 });
 
+/**
+ * Run the probe script through a real `/bin/sh`. With `shadowReadlinkF` the PATH is
+ * fronted by a `readlink` that rejects `-f` the way macOS < 12.3 does (`illegal
+ * option -- f`) and otherwise defers to the real one, which forces the portable
+ * fallback branch on a host that natively has `readlink -f`.
+ */
+function runProbe(paths: string[], options: { cwd?: string; shadowReadlinkF?: boolean; shimDir?: string } = {}) {
+  const env =
+    options.shadowReadlinkF && options.shimDir
+      ? { ...process.env, PATH: `${options.shimDir}:${process.env.PATH}` }
+      : process.env;
+  const stdout = execFileSync('sh', ['-c', buildRemoteProbeCommand(paths)], { cwd: options.cwd, env }).toString();
+  return parseRemoteProbeOutput(stdout, paths);
+}
+
 describe('the probe script on a real shell', () => {
   let root: string;
+  let shimDir: string;
 
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), 'codeman-remote-probe-'));
+    shimDir = join(root, 'shim-bin');
+    mkdirSync(shimDir);
+    const realReadlink = execFileSync('sh', ['-c', 'command -v readlink']).toString().trim();
+    writeFileSync(
+      join(shimDir, 'readlink'),
+      `#!/bin/sh\ncase "$1" in -f) echo 'readlink: illegal option -- f' >&2; exit 1;; esac\nexec ${realReadlink} "$@"\n`
+    );
+    chmodSync(join(shimDir, 'readlink'), 0o755);
   });
 
   afterAll(() => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('resolves the fallback branch on a shell whose readlink has no -f', () => {
+    // Sanity check on the shim itself: without it this whole describe would be
+    // exercising the native branch twice.
+    expect(() =>
+      execFileSync('sh', ['-c', 'readlink -f / 2>/dev/null'], {
+        env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}` },
+      })
+    ).toThrow();
+  });
+
+  it.each([
+    ['readlink -f', false],
+    ['portable fallback', true],
+  ])('refuses to report a symlink by its own path (%s): the target is what is served', (_label, shadow) => {
+    // The reviewer's exact reproduction: ws/notes.txt -> secret/id_rsa. The old
+    // fallback resolved only the DIRECTORY chain, returned `ws/notes.txt` as the
+    // realpath (with the TARGET's size), containment passed, and `cat` served the key.
+    const ws = join(root, `escape-${shadow ? 'fallback' : 'native'}`);
+    const secret = join(root, `secret-${shadow ? 'fallback' : 'native'}`);
+    mkdirSync(ws);
+    mkdirSync(secret);
+    writeFileSync(join(secret, 'id_rsa'), 'KEYKEYKEYKEY1');
+    execFileSync('ln', ['-s', join(secret, 'id_rsa'), join(ws, 'notes.txt')]);
+
+    const [probe] = runProbe([join(ws, 'notes.txt')], { shadowReadlinkF: shadow, shimDir });
+
+    expect(probe?.realPath).toBe(join(secret, 'id_rsa'));
+    expect(probe?.size).toBe(13);
+  });
+
+  it('follows a relative symlink chain through a symlinked directory on the fallback branch', () => {
+    const ws = join(root, 'chain');
+    mkdirSync(join(ws, 'sub'), { recursive: true });
+    writeFileSync(join(ws, 'sub', 'real.txt'), 'inside');
+    execFileSync('ln', ['-s', 'real.txt', join(ws, 'sub', 'hop1.txt')]);
+    execFileSync('ln', ['-s', 'hop1.txt', join(ws, 'sub', 'hop2.txt')]);
+    execFileSync('ln', ['-s', 'sub', join(ws, 'subl')]);
+
+    const probes = runProbe([join(ws, 'subl', 'hop2.txt'), join(ws, 'subl')], { shadowReadlinkF: true, shimDir });
+
+    expect(probes[0]).toMatchObject({ kind: 'file', size: 6, realPath: join(ws, 'sub', 'real.txt') });
+    expect(probes[1]).toMatchObject({ kind: 'directory', realPath: join(ws, 'sub') });
+  });
+
+  it.each([
+    ['readlink -f', false],
+    ['portable fallback', true],
+  ])('fails CLOSED on a symlink loop (%s), never reporting the unresolved path', (_label, shadow) => {
+    const ws = join(root, `loop-${shadow ? 'fallback' : 'native'}`);
+    mkdirSync(ws);
+    execFileSync('ln', ['-s', 'b', join(ws, 'a')]);
+    execFileSync('ln', ['-s', 'a', join(ws, 'b')]);
+
+    const [probe] = runProbe([join(ws, 'a')], { shadowReadlinkF: shadow, shimDir });
+
+    expect(probe).toBeNull();
+  });
+
   it('reports kind, size and realpath for a file, a directory and a missing path', () => {
     const filePath = join(root, 'image.png');
     writeFileSync(filePath, 'fake png bytes');
 
-    const probes = parseRemoteProbeLines(
+    const probes = parseRemoteProbeOutput(
       execFileSync('sh', ['-c', buildRemoteProbeCommand([filePath, root, join(root, 'nope.png')])]).toString(),
       [filePath, root, join(root, 'nope.png')]
     );
@@ -147,7 +233,7 @@ describe('the probe script on a real shell', () => {
     writeFileSync(target, 'x');
     execFileSync('ln', ['-s', target, link]);
 
-    const [probe] = parseRemoteProbeLines(execFileSync('sh', ['-c', buildRemoteProbeCommand([link])]).toString(), [
+    const [probe] = parseRemoteProbeOutput(execFileSync('sh', ['-c', buildRemoteProbeCommand([link])]).toString(), [
       link,
     ]);
 
@@ -161,7 +247,7 @@ describe('the probe script on a real shell', () => {
     const hostile = join(root, `it's; touch ${marker}; $(id).txt`);
     writeFileSync(hostile, 'hostile');
 
-    const [probe] = parseRemoteProbeLines(
+    const [probe] = parseRemoteProbeOutput(
       execFileSync('sh', ['-c', buildRemoteProbeCommand([hostile])], { cwd: root }).toString(),
       [hostile]
     );
@@ -170,11 +256,39 @@ describe('the probe script on a real shell', () => {
     expect(existsSync(join(root, marker))).toBe(false);
   });
 
+  it('keeps a filename containing a newline aligned with its own index', () => {
+    // One record per LINE would have made this two lines, shifting every record
+    // after it by one; records are NUL-terminated and index-keyed instead.
+    const weird = join(root, 'a\nb.txt');
+    writeFileSync(weird, 'nl');
+    const after = join(root, 'after.txt');
+    writeFileSync(after, 'after');
+
+    const probes = runProbe([weird, after, join(root, 'nope')]);
+
+    expect(probes[0]).toMatchObject({ kind: 'file', size: 2, realPath: weird });
+    expect(probes[1]).toMatchObject({ kind: 'file', size: 5, realPath: after });
+    expect(probes[2]).toBeNull();
+  });
+
+  it('discards a login banner and rc-file chatter printed before the records', () => {
+    const filePath = join(root, 'banner.txt');
+    writeFileSync(filePath, 'b');
+
+    const stdout = execFileSync('sh', [
+      '-c',
+      `echo 'Welcome to box'; printf '0|f|9|9|/etc/shadow\\n'; ${buildRemoteProbeCommand([filePath])}`,
+    ]).toString();
+
+    // The chatter even LOOKS like a record; the leading NUL is what fences it off.
+    expect(parseRemoteProbeOutput(stdout, [filePath])[0]).toMatchObject({ realPath: filePath, size: 1 });
+  });
+
   it('handles a path containing the field separator', () => {
     const pipePath = join(root, 'a|b.txt');
     writeFileSync(pipePath, 'xy');
 
-    const [probe] = parseRemoteProbeLines(execFileSync('sh', ['-c', buildRemoteProbeCommand([pipePath])]).toString(), [
+    const [probe] = parseRemoteProbeOutput(execFileSync('sh', ['-c', buildRemoteProbeCommand([pipePath])]).toString(), [
       pipePath,
     ]);
 
@@ -187,7 +301,7 @@ describe('the probe script on a real shell', () => {
     mkdirSync(nested, { recursive: true });
     writeFileSync(join(nested, 'f.txt'), 'abc');
 
-    const [probe] = parseRemoteProbeLines(
+    const [probe] = parseRemoteProbeOutput(
       execFileSync('sh', ['-c', buildRemoteProbeCommand([join(nested, 'f.txt')])]).toString(),
       [join(nested, 'f.txt')]
     );
@@ -197,9 +311,9 @@ describe('the probe script on a real shell', () => {
   });
 });
 
-describe('parseRemoteProbeLine', () => {
-  it('parses a file line and converts mtime to milliseconds', () => {
-    expect(parseRemoteProbeLine('f|1234|1700000000|/srv/case/a.png')).toEqual({
+describe('parseRemoteProbeRecord', () => {
+  it('parses a file record and converts mtime to milliseconds', () => {
+    expect(parseRemoteProbeRecord('f|1234|1700000000|/srv/case/a.png')).toEqual({
       realPath: '/srv/case/a.png',
       kind: 'file',
       size: 1234,
@@ -208,34 +322,66 @@ describe('parseRemoteProbeLine', () => {
   });
 
   it('keeps a path that itself contains the separator', () => {
-    expect(parseRemoteProbeLine('f|7|0|/srv/ca|se/a b.txt')?.realPath).toBe('/srv/ca|se/a b.txt');
+    expect(parseRemoteProbeRecord('f|7|0|/srv/ca|se/a b.txt')?.realPath).toBe('/srv/ca|se/a b.txt');
   });
 
-  it('maps directories, other kinds and the not-found marker', () => {
-    expect(parseRemoteProbeLine('d|0|5|/srv/case')?.kind).toBe('directory');
-    expect(parseRemoteProbeLine('o|0|0|/srv/case/sock')?.kind).toBe('other');
-    expect(parseRemoteProbeLine('n')).toBeNull();
-    expect(parseRemoteProbeLine('')).toBeNull();
+  it('maps directories, other kinds, the not-found and the unresolvable markers', () => {
+    expect(parseRemoteProbeRecord('d|0|5|/srv/case')?.kind).toBe('directory');
+    expect(parseRemoteProbeRecord('o|0|0|/srv/case/sock')?.kind).toBe('other');
+    expect(parseRemoteProbeRecord('n')).toBeNull();
+    // Exists but could not be canonicalized: refused like a missing file, never
+    // served under a path whose real target is unknown.
+    expect(parseRemoteProbeRecord('x')).toBeNull();
+    expect(parseRemoteProbeRecord('')).toBeNull();
   });
 
   it('rejects malformed lines instead of inventing a path', () => {
-    expect(parseRemoteProbeLine('f|1|2')).toBeNull();
-    expect(parseRemoteProbeLine('x|1|2|/p')).toBeNull();
-    expect(parseRemoteProbeLine('f|1|2|')).toBeNull();
+    expect(parseRemoteProbeRecord('f|1|2')).toBeNull();
+    expect(parseRemoteProbeRecord('x|1|2|/p')).toBeNull();
+    expect(parseRemoteProbeRecord('f|1|2|')).toBeNull();
   });
 });
 
-describe('parseRemoteProbeLines', () => {
-  it('aligns the last N lines, so a login banner cannot shift the mapping', () => {
-    const stdout = 'welcome to the remote box\nf|3|1|/srv/a.txt\nn\n';
-    expect(parseRemoteProbeLines(stdout, ['/srv/a.txt', '/srv/b.txt'])).toEqual([
+describe('parseRemoteProbeOutput', () => {
+  it('keys records by index after the leading NUL, so a login banner cannot shift the mapping', () => {
+    const stdout = 'welcome to the remote box\n\x000|f|3|1|/srv/a.txt\x001|n\x00';
+    expect(parseRemoteProbeOutput(stdout, ['/srv/a.txt', '/srv/b.txt'])).toEqual([
       { realPath: '/srv/a.txt', kind: 'file', size: 3, mtimeMs: 1000 },
       null,
     ]);
   });
 
-  it('throws when the remote shell returned too little output', () => {
-    expect(() => parseRemoteProbeLines('f|3|1|/srv/a.txt\n', ['/a', '/b'])).toThrow(RemoteFileAccessError);
+  it('accepts records in any order and ignores duplicates of an index', () => {
+    const stdout = '\x001|d|0|0|/srv\x000|f|3|1|/srv/a.txt\x000|f|9|9|/evil\x00';
+    expect(parseRemoteProbeOutput(stdout, ['/srv/a.txt', '/srv'])).toEqual([
+      { realPath: '/srv/a.txt', kind: 'file', size: 3, mtimeMs: 1000 },
+      { realPath: '/srv', kind: 'directory', size: 0, mtimeMs: 0 },
+    ]);
+  });
+
+  it('throws when a requested path has no record (transport or shell failure, never a 404)', () => {
+    expect(() => parseRemoteProbeOutput('\x000|f|3|1|/srv/a.txt\x00', ['/a', '/b'])).toThrow(RemoteFileAccessError);
+    expect(() => parseRemoteProbeOutput('', ['/a'])).toThrow(RemoteFileAccessError);
+    // No leading NUL at all: the script never ran, whatever the shell printed.
+    expect(() => parseRemoteProbeOutput('0|f|3|1|/srv/a.txt', ['/srv/a.txt'])).toThrow(RemoteFileAccessError);
+  });
+});
+
+describe('under vitest', () => {
+  const remote = remoteFixture();
+
+  it('never opens a connection: probes and reads reject with a clear error', async () => {
+    // Mirrors checkRemoteTmuxAvailable's guard. The route tests mock this module, so
+    // this is the backstop for the next test that reaches the real one.
+    await expect(remoteProbePaths(remote, ['/srv/case'])).rejects.toThrow(/disabled under test/);
+    await expect(remoteReadFile(remote, '/srv/case/a.txt', 1024)).rejects.toThrow(/disabled under test/);
+  });
+
+  it('never opens a connection: a stream fails through its own error path', async () => {
+    const { stream, close } = remoteCreateReadStream(remote, '/srv/case/a.mp4');
+    const failure = await new Promise<Error>((resolveError) => stream.on('error', resolveError));
+    expect(failure).toBeInstanceOf(RemoteFileAccessError);
+    expect(() => close()).not.toThrow();
   });
 });
 

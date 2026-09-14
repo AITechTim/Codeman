@@ -265,11 +265,12 @@ and it follows the same rule as the launch path: every ssh command line comes fr
 |---------|--------------|
 | `GET /api/sessions/:id/file-raw` | Streamed over `ssh` (`cat`, or `tail -c +N \| head -c L` for a `Range`); the same 200/206/416 contract as a local file, so `<video>`/`<audio>` seeking works |
 | `GET /api/sessions/:id/file-content` | `cat` into memory, capped by the existing text limit; `edit=1` answers `400` (see below) and `editable` is always `false` |
+| `PUT /api/sessions/:id/file-content` | `400` before any path is looked at: the guard sits AHEAD of the local path validation, because with a same-named directory on the Codeman host (an `sshfs` mount) the write would otherwise land on the local twin |
 | `GET /api/sessions/:id/file-preview` | Non-office files redirect to `file-raw` (which works remotely); docx/pptx answer `400` |
 | `GET /api/sessions/:id/file-thumbnail` | `400` for remote files |
 | `POST /api/sessions/:id/attachments` | Registers an absolute path that lives on the **remote** host (a clicked link pointing outside the case directory) by probing it there |
 | `GET /api/sessions/:id/attachments/:attachmentId/raw` | Streams the registered remote file over ssh, same 200/206/416 contract; `preview` (office) and `thumbnail` answer `400` |
-| `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing` |
+| `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing`; the history list resolves EVERY entry in one batched probe, never one connection per entry |
 
 ⚠️ The attachment route is the one a clicked path takes when it is **outside** the case
 directory (a remote `/tmp` scratchpad capture, a screenshot elsewhere in the home dir):
@@ -284,13 +285,27 @@ by the transport:
    connection is opened.
 3. ONE ssh round trip that returns `realpath` **and** `stat` for the path **and** the
    workspace root (`remoteProbePaths`). Resolving the root remotely is what keeps the
-   boundary honest for a symlinked `remotePath`; the probe uses `readlink -f` when
-   available and a POSIX `cd`/`pwd -P` fallback otherwise.
+   boundary honest for a symlinked `remotePath`. The probe uses `readlink -f` when
+   available; on a host without it (macOS before 12.3) a POSIX fallback canonicalizes
+   the directory chain with `cd -P`/`pwd -P` and then follows the LAST component with
+   plain `readlink` for a bounded number of hops. ⚠️ **The fallback fails closed**: a
+   path it cannot fully resolve (a loop, a `readlink` failure, the hop cap) is reported
+   as unresolvable and answers 404, never as its own unresolved string. An earlier
+   version resolved only the directory chain, so `ws/notes.txt -> ~/.ssh/id_rsa` passed
+   containment under the link's own path while `cat` followed it to the key.
+   Records come back NUL-separated and index-keyed (`<index>|kind|size|mtime|realPath`,
+   after a leading NUL that fences off any login banner), so a filename containing a
+   newline cannot shift the alignment.
 4. Containment of the remote realpath against the remote root. The sensitive-path
    blocklist then applies on whichever routes already apply it locally (`/api/download`,
    attachment registration, edit mode — where resolving symlinks first is what makes it
    meaningful); the remote branch neither drops a guard the local path has nor invents a
-   stricter one.
+   stricter one. One entry of that blocklist is host-bound by construction: the three
+   home-anchored members (`~/.claude.json`, `~/.claude/settings.json`,
+   `~/.claude/settings.local.json`) are compared against the **Codeman host's** home
+   directory, so they do not match a remote home at a different path. Everything else in
+   the list is depth-anchored (`/.ssh/`, `/.aws/credentials`, `/.claude/.credentials.json`,
+   `/etc/shadow`, ...) and applies to a remote path unchanged.
 5. Size cap (`CODEMAN_MAX_DOWNLOAD_BYTES`) applied to the **remote** size, before the
    body is requested.
 
@@ -298,7 +313,20 @@ The path arrives from the browser (`?path=`) and is interpolated as a single
 `shellescape`-quoted token, in a command that is itself shellescaped into the ssh
 line; `BatchMode=yes` means a host needing a passphrase fails fast instead of hanging.
 A failed connection is reported as **502** with the remote reason — never a 404, which
-used to make an unreachable host look like a typo in the agent's output.
+used to make an unreachable host look like a typo in the agent's output. The reason is
+the first stderr line, the timeout, or the exit code; never Node's `Command failed: …`
+message, which would carry the identity-file path and the probe script into the body.
+
+**Connections are bounded.** Every probe and buffered read runs through a small global
+semaphore (`src/remote-ssh-limiter.ts`, default 4, `CODEMAN_MAX_REMOTE_FILE_SSH`), the
+attachment-history list resolves its whole history in one batched probe instead of one
+handshake per entry, and probes are chunked at 40 paths per round trip. Terminal output
+in a remote session is written on the remote host, so a prompt-injected agent printing
+hundreds of `codeman://attach` links used to make the server fork one `ssh` per link,
+each holding a 20 s probe timeout, and a 100-entry history re-listed on every
+`attachment:detected` event tripped OpenSSH's default `MaxStartups 10:30:100`. Streams
+(`file-raw`, by-id `raw`) are not counted: one is held per browser request for the life
+of a playback, and each is gated behind a counted probe anyway.
 
 ⚠️ **There is deliberately NO local fallback.** A remote case reads the remote bytes or
 fails, even when a file with the same absolute name exists on the Codeman host — which

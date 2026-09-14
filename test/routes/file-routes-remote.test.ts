@@ -542,7 +542,9 @@ describe('file routes in a remote (SSH) case', () => {
           externalPath: outsidePath,
         },
       ];
-      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+      mockedProbePaths.mockImplementation(async (_remote, paths) =>
+        paths.map((path) => (path === outsidePath ? fileProbe(outsidePath, 42) : path === REMOTE_DIR ? dirProbe : null))
+      );
 
       const res = await harness.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/attachments` });
 
@@ -568,7 +570,15 @@ describe('file routes in a remote (SSH) case', () => {
           relativePath: 'out.png',
         },
       ];
-      mockedProbePaths.mockResolvedValue([fileProbe(`${REMOTE_DIR}/out.png`, 7), dirProbe]);
+      mockedProbePaths.mockImplementation(async (_remote, paths) =>
+        paths.map((path) =>
+          path === `${REMOTE_DIR}/out.png`
+            ? fileProbe(`${REMOTE_DIR}/out.png`, 7)
+            : path === REMOTE_DIR
+              ? dirProbe
+              : null
+        )
+      );
 
       const res = await harness.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/attachments` });
 
@@ -576,6 +586,151 @@ describe('file routes in a remote (SSH) case', () => {
       expect(item.missing).toBe(false);
       expect(item.size).toBe(7);
       expect(item.rawUrl).toContain('file-raw');
+    });
+
+    describe('the history list probes the whole history in ONE ssh round trip', () => {
+      // One connection per entry (up to ATTACHMENT_HISTORY_LIMIT, re-run on every
+      // attachment:detected while the drawer is open) tripped OpenSSH's default
+      // MaxStartups 10:30:100, which drops most of a burst that size.
+      const history = () => [
+        {
+          id: 'hist-a',
+          sessionId,
+          fileName: 'out.png',
+          extension: 'png',
+          attachmentType: 'image' as const,
+          size: 1,
+          mtimeMs: 1,
+          timestamp: 1,
+          source: 'detected' as const,
+          relativePath: 'out.png',
+        },
+        {
+          id: 'hist-b',
+          sessionId,
+          fileName: 'shot.png',
+          extension: 'png',
+          attachmentType: 'image' as const,
+          size: 1,
+          mtimeMs: 1,
+          timestamp: 1,
+          source: 'external' as const,
+          externalPath: outsidePath,
+        },
+        {
+          id: 'hist-c',
+          sessionId,
+          fileName: 'gone.png',
+          extension: 'png',
+          attachmentType: 'image' as const,
+          size: 1,
+          mtimeMs: 1,
+          timestamp: 1,
+          source: 'detected' as const,
+          relativePath: 'gone.png',
+        },
+      ];
+
+      it('issues a single batched probe covering every entry plus the workspace root', async () => {
+        harness.ctx._session.attachmentHistory = history();
+        mockedProbePaths.mockImplementation(async (_remote, paths) =>
+          paths.map((path) =>
+            path === `${REMOTE_DIR}/out.png`
+              ? fileProbe(path, 7)
+              : path === outsidePath
+                ? fileProbe(outsidePath, 42)
+                : path === REMOTE_DIR
+                  ? dirProbe
+                  : null
+          )
+        );
+
+        const res = await harness.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/attachments` });
+
+        expect(res.statusCode).toBe(200);
+        expect(mockedProbePaths).toHaveBeenCalledTimes(1);
+        const [, probed] = mockedProbePaths.mock.calls[0];
+        expect([...probed].sort()).toEqual(
+          [REMOTE_DIR, `${REMOTE_DIR}/gone.png`, `${REMOTE_DIR}/out.png`, outsidePath].sort()
+        );
+        // (ids are re-minted for external entries by the sanitizer, so key on the name)
+        const items = JSON.parse(res.body).data.items as Array<{ fileName: string; missing: boolean; size: number }>;
+        expect(items.map((item) => [item.fileName, item.missing, item.size])).toEqual([
+          ['out.png', false, 7],
+          ['shot.png', false, 42],
+          ['gone.png', true, 1],
+        ]);
+      });
+
+      it('reports every entry as unknown (missing: false), detected AND external alike, when the host is unreachable', async () => {
+        harness.ctx._session.attachmentHistory = history();
+        mockedProbePaths.mockRejectedValue(new RemoteFileAccessError('remote host testhost unreachable: timed out'));
+
+        const res = await harness.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/attachments` });
+
+        expect(res.statusCode).toBe(200);
+        const items = JSON.parse(res.body).data.items as Array<{ id: string; missing: boolean }>;
+        // The two branches used to disagree here: detected kept missing:false while
+        // external's 502 was folded into missing:true.
+        expect(items.map((item) => item.missing)).toEqual([false, false, false]);
+      });
+    });
+  });
+
+  describe('PUT /api/sessions/:id/file-content', () => {
+    // The remote guard has to come BEFORE the local path validation: with a
+    // directory of the same absolute name on this host (an sshfs mount of the remote
+    // tree, the documented stop-gap for #415) the write would land on the local twin
+    // while the viewer believes it edited the remote file.
+    let shadowRoot: string;
+    let shadowFile: string;
+
+    beforeEach(() => {
+      shadowRoot = mkdtempSync(join(tmpdir(), 'codeman-remote-put-'));
+      shadowFile = join(shadowRoot, 'notes.txt');
+      writeFileSync(shadowFile, 'LOCAL TEXT');
+      harness.ctx._session.workingDir = shadowRoot;
+      harness.ctx._session.remote = { ...remote, remotePath: shadowRoot };
+    });
+
+    afterEach(() => {
+      rmSync(shadowRoot, { recursive: true, force: true });
+    });
+
+    it('answers 400 for a remote case and never touches the local file of the same name', async () => {
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: `/api/sessions/${sessionId}/file-content`,
+        payload: { path: 'notes.txt', content: 'OVERWRITTEN', baseHash: 'whatever', force: true },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toMatch(/not supported for files in a remote/);
+      expect(readFileSync(shadowFile, 'utf8')).toBe('LOCAL TEXT');
+      expect(mockedProbePaths).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a client that gives up during the guard probe', () => {
+    it('still has its ssh body child reaped', async () => {
+      // The probe is an ssh round trip; a client that aborted during it has already
+      // closed the response, so a `close` listener attached afterwards never fires.
+      const controller = new AbortController();
+      mockedProbePaths.mockImplementation(async () => {
+        controller.abort();
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+        return [fileProbe(`${REMOTE_DIR}/img.png`, 9), dirProbe];
+      });
+
+      await harness.app
+        .inject({ method: 'GET', url: `/api/sessions/${sessionId}/file-raw?path=img.png`, signal: controller.signal })
+        .catch(() => undefined);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+
+      // The body WAS opened (the route ran to completion against an already-closed
+      // response), which is exactly the window the guard covers.
+      expect(mockedCreateReadStream).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalled();
     });
   });
 });

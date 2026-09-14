@@ -13,7 +13,7 @@ import { basename, extname, isAbsolute } from 'node:path';
 import { isBlockedAttachmentPath, isUnderTree, loadAttachmentGuardConfig } from './config/attachment-guard.js';
 import { EDITABLE_EXTENSIONS } from './config/file-editing.js';
 import { validateSessionFilePath } from './web/route-helpers.js';
-import { remoteProbePaths, RemoteFileAccessError } from './remote-files.js';
+import { remoteProbePaths, RemoteFileAccessError, type RemoteProbe } from './remote-files.js';
 import type { AttachmentDetectedEvent, AttachmentDetectedType } from './types.js';
 import type { SessionRemote } from './types/session.js';
 
@@ -228,6 +228,13 @@ export interface RegisterExternalAttachmentOptions {
    * so a symlinked `remotePath` does not refuse every registration.
    */
   remote?: SessionRemote;
+  /**
+   * Remote only: `[file, workspaceRoot]` probes a caller already resolved in a BATCHED
+   * `remoteProbePaths` call (the attachment-history list does one round trip for the
+   * whole history). Skips this registration's own ssh probe; every guard below still
+   * runs on the same resolved path it would have produced itself.
+   */
+  remoteProbes?: readonly [RemoteProbe | null, RemoteProbe | null];
 }
 
 /**
@@ -277,17 +284,24 @@ async function resolveLocalAttachment(requestedPath: string): Promise<ResolvedAt
 async function resolveRemoteAttachment(
   requestedPath: string,
   remote: SessionRemote,
-  sessionWorkingDir?: string
+  sessionWorkingDir?: string,
+  preResolved?: readonly [RemoteProbe | null, RemoteProbe | null]
 ): Promise<ResolvedAttachmentFile> {
   const paths = sessionWorkingDir ? [requestedPath, sessionWorkingDir] : [requestedPath];
-  let probes;
-  try {
-    probes = await remoteProbePaths(remote, paths);
-  } catch (err) {
-    throw new AttachmentRegistrationError(
-      err instanceof RemoteFileAccessError ? err.message : 'remote host unreachable',
-      502
-    );
+  let probes: ReadonlyArray<RemoteProbe | null>;
+  if (preResolved) {
+    probes = preResolved;
+  } else {
+    try {
+      probes = await remoteProbePaths(remote, paths);
+    } catch (err) {
+      // 502 marks the TRANSPORT as the failure, distinct from the file's own 404/403,
+      // so a history listing can report the entry as unknown rather than missing.
+      throw new AttachmentRegistrationError(
+        err instanceof RemoteFileAccessError ? err.message : 'remote host unreachable',
+        502
+      );
+    }
   }
 
   const [probe, rootProbe] = probes;
@@ -315,7 +329,7 @@ export async function registerExternalAttachment(
   }
 
   const resolved = await (options.remote
-    ? resolveRemoteAttachment(requestedPath, options.remote, options.sessionWorkingDir)
+    ? resolveRemoteAttachment(requestedPath, options.remote, options.sessionWorkingDir, options.remoteProbes)
     : resolveLocalAttachment(requestedPath));
 
   // COD-53: enforce the active attachment-guard policy on the symlink-resolved
@@ -343,7 +357,12 @@ export async function registerExternalAttachment(
   // codeman-publish and the ~/.codeman review loop keep working.
   //
   // The list is a pattern list over ABSOLUTE paths, so it is host-agnostic and holds
-  // for a remote path exactly as it does for a local one.
+  // for a remote path exactly as it does for a local one, with ONE exception worth
+  // knowing: `isSensitivePath`'s three home-anchored members (`~/.claude.json`,
+  // `~/.claude/settings.json`, `~/.claude/settings.local.json`) resolve against THIS
+  // host's `homedir()`, so on a remote host with a different home they do not match.
+  // Everything else in that list is depth-anchored (`/.ssh/`, `/.aws/credentials`,
+  // `/.claude/.credentials.json`, ...) and applies unchanged.
   if (isBlockedAttachmentPath(resolved.resolvedPath, guard.blockedTrees)) {
     throw new AttachmentRegistrationError('Access to this file is blocked', 403);
   }
