@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "codeman",
-      "source": "./",
+      "source": "./plugins/codeman",
       "description": "Drive Codeman from inside a Claude Code session: spawn worker sessions, prompt them, wait for them, read their answers, clean up. Acts only inside a Codeman-managed session.",
       "version": "1.28.1",
       "author": {
