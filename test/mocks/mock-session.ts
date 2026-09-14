@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionStatus } from '../../src/types.js';
+import type { SessionAttachmentHistoryItem, SessionStatus, SessionRemote } from '../../src/types.js';
 
 /**
  * Enhanced mock session for testing RespawnController.
@@ -13,6 +13,18 @@ import type { SessionStatus } from '../../src/types.js';
 export class MockSession extends EventEmitter {
   id: string;
   workingDir: string = '/tmp/test-workdir';
+  /**
+   * Mirrors `Session.remote` — set to a `SessionRemote` to model a remote-SSH case,
+   * whose `workingDir` is an absolute path on ANOTHER host. File routes must read it
+   * over ssh instead of with local `fs` (#415).
+   */
+  remote?: SessionRemote;
+  /** Mirrors Session.attachmentHistory (the attachment panel's source of truth). */
+  attachmentHistory: SessionAttachmentHistoryItem[] = [];
+  /** Mirrors Session.getAttachmentHistoryForPersist(). */
+  getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] {
+    return this.attachmentHistory;
+  }
   /**
    * The REAL union, deliberately. This used to be `'idle' | 'working'`, and
    * `'working'` is not a `SessionStatus` at all — so `signalForStatus()` fell to its

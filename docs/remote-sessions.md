@@ -251,6 +251,79 @@ unreachable host answers "unknown", which also means do not revive. The answer
 is cached per session and cleared whenever the pane is next seen alive, so a
 stale `true` from one transport drop can never revive the NEXT clean exit.
 
+## File access over SSH
+
+A remote case's `workingDir` is an absolute path on the **remote** host
+(`Session.workingDir = RemoteCase.remotePath`), so the file routes cannot use local
+`fs`: a local `realpathSync` on a remote-only path fails by construction, which is why
+previewing a file used to answer `404 File not found` for a case that was working
+perfectly (#415). `src/remote-files.ts` is the one module that reads remote bytes,
+and it follows the same rule as the launch path: every ssh command line comes from
+`buildSshConnectionArgs()` — **never** a hand-built ssh line.
+
+| Request | What happens |
+|---------|--------------|
+| `GET /api/sessions/:id/file-raw` | Streamed over `ssh` (`cat`, or `tail -c +N \| head -c L` for a `Range`); the same 200/206/416 contract as a local file, so `<video>`/`<audio>` seeking works |
+| `GET /api/sessions/:id/file-content` | `cat` into memory, capped by the existing text limit; `edit=1` answers `400` (see below) and `editable` is always `false` |
+| `GET /api/sessions/:id/file-preview` | Non-office files redirect to `file-raw` (which works remotely); docx/pptx answer `400` |
+| `GET /api/sessions/:id/file-thumbnail` | `400` for remote files |
+| `POST /api/sessions/:id/attachments` | Registers an absolute path that lives on the **remote** host (a clicked link pointing outside the case directory) by probing it there |
+| `GET /api/sessions/:id/attachments/:attachmentId/raw` | Streams the registered remote file over ssh, same 200/206/416 contract; `preview` (office) and `thumbnail` answer `400` |
+| `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing` |
+
+⚠️ The attachment route is the one a clicked path takes when it is **outside** the case
+directory (a remote `/tmp` scratchpad capture, a screenshot elsewhere in the home dir):
+the frontend's `_isExternalPreviewPath()` sends every absolute path that is not under
+`workingDir` there, so fixing only `file-raw` would leave exactly that half broken.
+
+Guard order is deliberately **the same as locally**, and the checks are not weakened
+by the transport:
+
+1. Ownership (`findSessionOrFail` / the scope helper) — unchanged.
+2. Lexical containment of `workingDir + path` — a `../` escape is refused before any
+   connection is opened.
+3. ONE ssh round trip that returns `realpath` **and** `stat` for the path **and** the
+   workspace root (`remoteProbePaths`). Resolving the root remotely is what keeps the
+   boundary honest for a symlinked `remotePath`; the probe uses `readlink -f` when
+   available and a POSIX `cd`/`pwd -P` fallback otherwise.
+4. Containment of the remote realpath against the remote root. The sensitive-path
+   blocklist then applies on whichever routes already apply it locally (`/api/download`,
+   attachment registration, edit mode — where resolving symlinks first is what makes it
+   meaningful); the remote branch neither drops a guard the local path has nor invents a
+   stricter one.
+5. Size cap (`CODEMAN_MAX_DOWNLOAD_BYTES`) applied to the **remote** size, before the
+   body is requested.
+
+The path arrives from the browser (`?path=`) and is interpolated as a single
+`shellescape`-quoted token, in a command that is itself shellescaped into the ssh
+line; `BatchMode=yes` means a host needing a passphrase fails fast instead of hanging.
+A failed connection is reported as **502** with the remote reason — never a 404, which
+used to make an unreachable host look like a typo in the agent's output.
+
+⚠️ **There is deliberately NO local fallback.** A remote case reads the remote bytes or
+fails, even when a file with the same absolute name exists on the Codeman host — which
+is the ordinary case for the documented stop-gap workaround, an `sshfs` mount of the
+remote tree at the identical path. Serving the local twin instead would silently hand
+back a DIFFERENT filesystem's bytes under a name the user believes is the remote file
+(a stale mount, a different checkout, a leftover file), and the failure would be
+invisible. An existing mount therefore stops being load-bearing for previews and
+downloads but is harmless, and a missing remote file stays a 404 even if the mount
+still has it.
+
+**Not available over ssh (by choice, not by accident):** editing a file (writes would
+need SFTP; `docs/file-viewer-edit-plan.md` §6), office-document previews and
+generated thumbnails (both need the bytes on the server's disk — no remote file is ever
+spilled onto the server), the file-tree/picker listings, and `tail-file`. Those routes
+are still local-only, so with an `sshfs` mount in place they read the mounted copy —
+the two views can only disagree when that mount is stale. Docker cases are unaffected:
+their workspace is bind-mounted at the same absolute path, so local `fs` reads real bytes.
+
+⚠️ A remote record stores the **remote** path, and the same absolute path STRING means a
+different file on each host. What decides which host to read is therefore never the
+path but the SESSION (`session.remote`): a remote session never falls back to local
+`fs`, and a local session never opens an ssh connection — including for attachment
+records, which are keyed to the session that registered them.
+
 ## API
 
 Routes are registered in `src/web/routes/case-routes.ts`:
