@@ -545,18 +545,21 @@ body {
   contain: layout;
 }
 
-.session-tabs.tabs-two-rows {
-  flex-wrap: wrap;
-  overflow-x: hidden;
-  overflow-y: auto;
-  max-height: 120px;
-}
-
+/* A wrapped strip GROWS the header instead of scrolling inside it. The old
+   fixed caps (120px tall-tabs / 96px auto-wrap) were row counts in disguise:
+   a third row of tabs was clipped into a 4px scroller, so the tabs you were
+   looking for were off-screen in a container nothing tells you to scroll —
+   while the header had the whole page below it to grow into (it is
+   `min-height` + `flex-shrink: 0`, and terminal-ui's ResizeObserver refits
+   the terminal on its own). `--tab-strip-max-height` is a safety net for an
+   absurd session count, not a row limit: past it the scroller comes back,
+   which beats a header that swallows the terminal. */
+.session-tabs.tabs-two-rows,
 .session-tabs.tabs-auto-wrap {
   flex-wrap: wrap;
   overflow-x: hidden;
   overflow-y: auto;
-  max-height: 96px;
+  max-height: var(--tab-strip-max-height, 40vh);
 }
 
 .session-tabs::-webkit-scrollbar {
