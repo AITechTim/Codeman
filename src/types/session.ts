@@ -449,6 +449,19 @@ export interface SessionState {
   pid: number | null;
   /** Current session status */
   status: SessionStatus;
+  /** Runtime that owns the durable terminal. */
+  runtimeBackend?: 'tmux' | 'herdr';
+  terminalTransport?: 'detached' | 'connecting' | 'connected' | 'conflict';
+  /** Agent kind reported by Herdr; absent for an ordinary shell pane. */
+  runtimeAgentKind?: string;
+  /** Stable Herdr terminal identity. */
+  terminalId?: string;
+  /** Current Herdr pane identity. */
+  paneId?: string;
+  /** Current Herdr workspace identity. */
+  workspaceId?: string;
+  /** Native Codex conversation identity reported by Herdr. */
+  providerSessionId?: string;
   /** Working directory path */
   workingDir: string;
   /** Remote execution metadata, present when this session runs over SSH through local tmux */

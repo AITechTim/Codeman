@@ -107,6 +107,44 @@ async function createEnvelopeHarness(
 describe('session-routes', () => {
   let harness: LocalHarness;
 
+  it('does not acknowledge browser HTTP input while the Herdr attachment is absent', async () => {
+    const { app, ctx } = harness;
+    const session = ctx._session;
+    const write = vi.fn().mockReturnValue(false);
+    Object.defineProperties(session, {
+      runtimeBackend: { value: 'herdr' },
+      write: { value: write },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/input`,
+      payload: { input: 'preserve this', useMux: true, seq: 1, clientId: 'fallback-test' },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json().success).toBe(false);
+    write.mockReturnValue(true);
+    const retry = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/input`,
+      payload: { input: 'preserve this', useMux: true, seq: 1, clientId: 'fallback-test' },
+    });
+    expect(retry.statusCode).toBe(200);
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects HTTP fallback input during a Herdr ownership conflict without recording a sequence', async () => {
+    const { app, ctx } = harness;
+    const session = ctx._session;
+    Object.defineProperty(session, 'terminalTransport', { value: 'conflict' });
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/sessions/${session.id}/input`,
+      payload: { input: 'keep me', useMux: true, seq: 1, clientId: 'conflict-test' },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().success).toBe(false);
+  });
+
   beforeEach(async () => {
     harness = await createEnvelopeHarness(registerSessionRoutes);
     // Reset remote store so tests start with empty hosts/cases and a passing tmux probe
@@ -362,6 +400,25 @@ describe('session-routes', () => {
   // ========== PUT /api/sessions/:id/name ==========
 
   describe('PUT /api/sessions/:id/name', () => {
+    it('marks explicit Herdr renames as manual and returns the canonical name', async () => {
+      Object.defineProperty(harness.ctx.mux, 'backend', { value: 'herdr', configurable: true });
+      vi.mocked(harness.ctx.mux.getSession).mockReturnValue({ name: 'my-manual-name' } as ReturnType<
+        typeof harness.ctx.mux.getSession
+      >);
+      const res = await harness.app.inject({
+        method: 'PUT',
+        url: `/api/sessions/${harness.ctx._sessionId}/name`,
+        payload: { name: 'My Manual Name' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.mux.updateSessionName).toHaveBeenCalledWith(
+        harness.ctx._sessionId,
+        'My Manual Name',
+        'manual'
+      );
+      expect(JSON.parse(res.body).data.name).toBe('my-manual-name');
+    });
+
     it('renames session', async () => {
       const res = await harness.app.inject({
         method: 'PUT',

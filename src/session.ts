@@ -280,6 +280,8 @@ const TEST_PTY_SCRIPT = 'if (process.stdin.isTTY) process.stdin.setRawMode(true)
 const DOCKER_CLI_VERSION_PROBE_DELAY_MS = 3000;
 /** Delay before the over-ssh Claude CLI version probe (keeps session start off the ssh round-trip). */
 const REMOTE_CLI_VERSION_PROBE_DELAY_MS = 3000;
+/** Keep the Herdr direct attachment briefly across mobile tab/reconnect churn. */
+const HERDR_ATTACH_RELEASE_GRACE_MS = 5000;
 
 /**
  * Ask tmux for the current window geometry of `muxName` so a re-attaching PTY
@@ -387,9 +389,9 @@ export interface ClaudeMessage {
  */
 export class Session extends EventEmitter {
   readonly id: string;
-  readonly workingDir: string;
+  workingDir: string;
   readonly createdAt: number;
-  readonly mode: SessionMode;
+  mode: SessionMode;
 
   // Task description cache (extracted to SessionTaskCache)
   private _taskCache = new SessionTaskCache();
@@ -485,6 +487,31 @@ export class Session extends EventEmitter {
   private _mux: TerminalMultiplexer | null = null;
   private _muxSession: MuxSession | null = null;
   private _useMux: boolean = false;
+  private _interactiveTransportRefs = 0;
+  private _interactiveTransportDetachTimer: NodeJS.Timeout | null = null;
+  private _interactiveTransportAttachPromise: Promise<void> | null = null;
+  private _interactiveTransportRetiring: Promise<void> | null = null;
+  private _terminalTransport: 'detached' | 'connecting' | 'connected' | 'conflict' = 'detached';
+  private _attachmentGeneration = 0;
+
+  get terminalTransport() {
+    return this._mux?.backend === 'herdr' ? this._terminalTransport : undefined;
+  }
+
+  private setTerminalTransport(state: typeof this._terminalTransport): void {
+    if (this._terminalTransport === state) return;
+    this._terminalTransport = state;
+    console.info('[herdr-transport]', {
+      sessionId: this.id,
+      terminalId: this._muxSession?.terminalId,
+      pid: this._pid,
+      generation: this._attachmentGeneration,
+      claims: this._interactiveTransportRefs,
+      state,
+    });
+    this.emit('terminalTransport', state);
+  }
+  private _intentionalTransportDetach = false;
   // Flag to prevent new timers after session is stopped
   private _isStopped: boolean = false;
 
@@ -908,6 +935,88 @@ export class Session extends EventEmitter {
     return this._muxSession?.muxName ?? null;
   }
 
+  /** The runtime that owns the durable terminal. */
+  get runtimeBackend(): 'tmux' | 'herdr' | undefined {
+    return this._useMux && this._muxSession ? this._mux?.backend : undefined;
+  }
+
+  /** Refresh provider-owned identity and lifecycle without taking terminal ownership. */
+  syncMuxRuntime(muxSession: MuxSession): void {
+    this._muxSession = muxSession;
+    this.mode = muxSession.mode;
+    this.workingDir = muxSession.workingDir;
+    if (muxSession.name) this._name = muxSession.name;
+    if (muxSession.providerSessionId) this.adoptClaudeSessionId(muxSession.providerSessionId);
+    if (muxSession.runtimeStatus) this._status = muxSession.runtimeStatus;
+    if (muxSession.runtimeWorking !== undefined) this._isWorking = muxSession.runtimeWorking;
+  }
+
+  /** Acquire Codeman's short-lived direct Herdr terminal attachment. */
+  async retainInteractiveTransport(initialSize?: { cols: number; rows: number }): Promise<void> {
+    if (this._mux?.backend !== 'herdr') return;
+    this._interactiveTransportRefs += 1;
+    if (this._interactiveTransportDetachTimer) {
+      clearTimeout(this._interactiveTransportDetachTimer);
+      this._interactiveTransportDetachTimer = null;
+    }
+    try {
+      await this.startInteractive({ initialSize });
+    } catch (error) {
+      this._interactiveTransportRefs = Math.max(0, this._interactiveTransportRefs - 1);
+      throw error;
+    }
+  }
+
+  /** Release a browser claim; the Herdr terminal itself continues running. */
+  releaseInteractiveTransport(): void {
+    if (this._mux?.backend !== 'herdr') return;
+    this._interactiveTransportRefs = Math.max(0, this._interactiveTransportRefs - 1);
+    this.scheduleInteractiveTransportRelease();
+  }
+
+  private scheduleInteractiveTransportRelease(): void {
+    if (this._interactiveTransportRefs > 0 || this._interactiveTransportDetachTimer || this._isStopped) return;
+    this._interactiveTransportDetachTimer = setTimeout(() => {
+      this._interactiveTransportDetachTimer = null;
+      if (this._interactiveTransportRefs > 0 || !this.ptyProcess) return;
+      void this.retireInteractiveTransport().catch((error) => {
+        console.warn('[Session] Failed to release Herdr terminal attachment:', error);
+      });
+    }, HERDR_ATTACH_RELEASE_GRACE_MS);
+  }
+
+  private retireInteractiveTransport(): Promise<void> {
+    if (this._interactiveTransportRetiring) return this._interactiveTransportRetiring;
+    const retired = this.ptyProcess;
+    if (!retired) return Promise.resolve();
+    this._intentionalTransportDetach = true;
+    const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Herdr attachment did not exit')), 10_000);
+      const listener = retired.onExit(() => {
+        clearTimeout(timeout);
+        listener.dispose();
+        resolve();
+      });
+      try {
+        retired.kill();
+      } catch (error) {
+        clearTimeout(timeout);
+        listener.dispose();
+        reject(error);
+      }
+    });
+    this._interactiveTransportRetiring = completion;
+    void completion.then(
+      () => {
+        if (this._interactiveTransportRetiring === completion) this._interactiveTransportRetiring = null;
+      },
+      () => {
+        /* Keep failed retirement as a barrier: never overlap a live client. */
+      }
+    );
+    return completion;
+  }
+
   /**
    * True when this session's PTY is a tmux client rather than the program itself.
    * Read by the replay-side alt-screen strip, which must apply the same
@@ -1280,6 +1389,13 @@ export class Session extends EventEmitter {
       id: this.id,
       pid: this.pid,
       status: this._status,
+      runtimeBackend: this._mux?.backend,
+      terminalTransport: this.terminalTransport,
+      runtimeAgentKind: this._muxSession?.runtimeAgentKind,
+      terminalId: this._muxSession?.terminalId,
+      paneId: this._muxSession?.paneId,
+      workspaceId: this._muxSession?.workspaceId,
+      providerSessionId: this._muxSession?.providerSessionId,
       workingDir: this.workingDir,
       remote: this._remote,
       docker: this._docker,
@@ -1437,6 +1553,8 @@ export class Session extends EventEmitter {
     respawnPaneOptions: import('./mux-interface.js').RespawnPaneOptions;
     createSessionOptions: import('./mux-interface.js').CreateSessionOptions;
     spawnErrLabel: string;
+    initialSize?: { cols: number; rows: number };
+    takeover?: boolean;
   }): Promise<{ isRestored: boolean }> {
     const mux = this._mux!;
 
@@ -1484,9 +1602,14 @@ export class Session extends EventEmitter {
     // default server, always fails for our socketed sessions, and silently falls back to 120x40.
     const { cols: ptyCols, rows: ptyRows } = IS_TEST_MODE
       ? { cols: DEFAULT_PTY_COLS, rows: DEFAULT_PTY_ROWS }
-      : queryTmuxWindowSize(this._muxSession!.muxName, mux.muxSocket);
+      : (options.initialSize ??
+        mux.getWindowSize?.(this._muxSession!.muxName) ??
+        queryTmuxWindowSize(this._muxSession!.muxName, mux.muxSocket));
+    if (this._isStopped) throw new Error('Session stopped during attachment');
     const attachCommand = IS_TEST_MODE ? process.execPath : mux.getAttachCommand();
-    const attachArgs = IS_TEST_MODE ? ['-e', TEST_PTY_SCRIPT] : mux.getAttachArgs(this._muxSession!.muxName);
+    const attachArgs = IS_TEST_MODE
+      ? ['-e', TEST_PTY_SCRIPT]
+      : mux.getAttachArgs(this._muxSession!.muxName, { takeover: options.takeover });
     try {
       this.ptyProcess = spawnPtyWithHelperRepair(() =>
         pty.spawn(attachCommand, attachArgs, {
@@ -1505,6 +1628,8 @@ export class Session extends EventEmitter {
           ),
         })
       );
+      this._ptyCols = ptyCols;
+      this._ptyRows = ptyRows;
     } catch (spawnErr) {
       console.error(`[Session] Failed to spawn PTY for ${options.spawnErrLabel}:`, spawnErr);
       this.emit('error', `Failed to attach to mux session: ${spawnErr}`);
@@ -1710,7 +1835,40 @@ export class Session extends EventEmitter {
     this.emit('output', data);
   }
 
-  async startInteractive(): Promise<void> {
+  async startInteractive(
+    options: { initialSize?: { cols: number; rows: number }; takeover?: boolean } = {}
+  ): Promise<void> {
+    if (this._mux?.backend !== 'herdr') return this.startInteractiveProcess(options);
+    // All entry points join this operation, including HTTP starts during creation.
+    if (this._interactiveTransportAttachPromise) return this._interactiveTransportAttachPromise;
+    const operation = Promise.resolve().then(async () => {
+      if (this._isStopped) throw new Error('Session stopped');
+      if (this._interactiveTransportRetiring) await this._interactiveTransportRetiring;
+      if (this._terminalTransport === 'conflict') {
+        if (!options.takeover) throw new Error('Terminal controlled elsewhere; reconnect to take control');
+        if (this.ptyProcess) await this.retireInteractiveTransport();
+      }
+      if (this.ptyProcess) return;
+      this.setTerminalTransport('connecting');
+      this._attachmentGeneration += 1;
+      await this.startInteractiveProcess(options);
+      if (this._terminalTransport !== 'conflict' && this.ptyProcess) this.setTerminalTransport('connected');
+    });
+    this._interactiveTransportAttachPromise = operation;
+    try {
+      await operation;
+    } catch (error) {
+      if (this._terminalTransport !== 'conflict') this.setTerminalTransport('detached');
+      throw error;
+    } finally {
+      if (this._interactiveTransportAttachPromise === operation) this._interactiveTransportAttachPromise = null;
+      this.scheduleInteractiveTransportRelease();
+    }
+  }
+
+  private async startInteractiveProcess(
+    options: { initialSize?: { cols: number; rows: number }; takeover?: boolean } = {}
+  ): Promise<void> {
     if (this.ptyProcess) {
       throw new Error('Session already has a running process');
     }
@@ -1840,6 +1998,8 @@ export class Session extends EventEmitter {
             owner: this._owner,
           },
           spawnErrLabel: 'mux attachment',
+          initialSize: options.initialSize,
+          takeover: options.takeover,
         });
 
         // Set claudeSessionId — when resuming, the Claude conversation ID is the resumed one.
@@ -1892,6 +2052,11 @@ export class Session extends EventEmitter {
           }
         }
       } catch (err) {
+        if (this._mux.backend === 'herdr') {
+          console.error('[Session] Failed to attach to Herdr terminal:', err);
+          this._status = 'error';
+          throw err;
+        }
         console.error('[Session] Failed to create mux session, falling back to direct PTY:', err);
         this._useMux = false;
         this._muxSession = null;
@@ -1960,7 +2125,13 @@ export class Session extends EventEmitter {
     this._pid = this.ptyProcess.pid;
     console.log('[Session] Interactive PTY spawned with PID:', this._pid);
 
-    this.ptyProcess.onData((rawData: string) => {
+    const interactivePty = this.ptyProcess;
+    let diagnosticTail = '';
+    interactivePty.onData((rawData: string) => {
+      if (this.ptyProcess !== interactivePty) return;
+      if (this._mux?.backend === 'herdr') {
+        diagnosticTail = (diagnosticTail + rawData).slice(-4096);
+      }
       // Filter out focus escape sequences and Ctrl+L (form feed)
       const data = rawData.replace(FOCUS_ESCAPE_FILTER, '').replace(CTRL_L_PATTERN, ''); // Remove Ctrl+L
       if (!data) return; // Skip if only filtered sequences
@@ -2011,14 +2182,21 @@ export class Session extends EventEmitter {
       }
     });
 
-    this.ptyProcess.onExit(({ exitCode }) => {
+    interactivePty.onExit(({ exitCode }) => {
+      if (this.ptyProcess !== interactivePty) return;
+      if (this._mux?.backend === 'herdr')
+        console.info('[herdr-transport] exit', {
+          sessionId: this.id,
+          pid: interactivePty.pid,
+          generation: this._attachmentGeneration,
+          exitCode,
+        });
       console.log('[Session] Interactive PTY exited with code:', exitCode);
-      // COD-118: record the exit in the circuit breaker BEFORE status bookkeeping.
-      // A clean (0) exit resets the counter; rapid non-zero repeats trip it.
-      const breakerResult = this._ptyExitBreaker.recordExit(exitCode, Date.now());
+      const intentionalTransportDetach = this._intentionalTransportDetach;
+      this._intentionalTransportDetach = false;
       this.ptyProcess = null;
       this._pid = null;
-      this._status = 'idle';
+      this._status = this._muxSession?.runtimeStatus || 'idle';
       this._awaitingIdleConfirmation = false;
       this._activityStreak = null;
       // Clear all timers to prevent memory leaks
@@ -2044,6 +2222,22 @@ export class Session extends EventEmitter {
       if (this._muxSession && this._mux) {
         this._mux.setAttached(this.id, false);
       }
+      // Closing Codeman's direct attach client must not look like the durable
+      // Herdr terminal exited. Keep the Session object and its listeners alive.
+      if (this._mux?.backend === 'herdr') {
+        // Diagnose only an exited client: ordinary terminal content may quote an error.
+        const conflict =
+          exitCode !== 0 &&
+          /herdr: server shut down: (?:terminal attach taken over|terminal attach failed: terminal [^\r\n]+ already has an attached client)/.test(
+            diagnosticTail
+          );
+        this.setTerminalTransport(conflict || this._terminalTransport === 'conflict' ? 'conflict' : 'detached');
+        return;
+      }
+      if (intentionalTransportDetach) return;
+      // COD-118: record genuine exits only. A clean (0) exit resets the counter;
+      // rapid non-zero repeats trip it.
+      const breakerResult = this._ptyExitBreaker.recordExit(exitCode, Date.now());
       // COD-118: if the breaker tripped, surface an error state and block the NEXT
       // respawn so recovery/reconnect callers stop looping. Still emit 'exit' below
       // for normal cleanup. Cleared by an explicit user restart (resetRespawnBreaker()).
@@ -2336,6 +2530,7 @@ export class Session extends EventEmitter {
    * ```
    */
   async startShell(): Promise<void> {
+    if (this._mux?.backend === 'herdr') return this.startInteractive();
     if (this.ptyProcess) {
       throw new Error('Session already has a running process');
     }
@@ -2994,6 +3189,7 @@ export class Session extends EventEmitter {
    * input could disappear while the caller believed it had been delivered.
    */
   write(data: string): boolean {
+    if (this._mux?.backend === 'herdr' && this._terminalTransport !== 'connected') return false;
     this._trackSubmit(data);
     if (!this.ptyProcess) return false;
     this.ptyProcess.write(data);
@@ -3089,6 +3285,7 @@ export class Session extends EventEmitter {
    * ```
    */
   async writeViaMux(data: string): Promise<boolean> {
+    if (this._terminalTransport === 'conflict') return false;
     this._trackSubmit(data);
     if (this._mux && this._muxSession) {
       return this._mux.sendInput(this.id, data);
@@ -3289,6 +3486,16 @@ export class Session extends EventEmitter {
   async stop(killMux: boolean = true): Promise<void> {
     // Set stopped flag first to prevent new timers from being created
     this._isStopped = true;
+    this._interactiveTransportRefs = 0;
+    if (this._mux?.backend === 'herdr') {
+      // Pending creation observes _isStopped before spawning an attachment.
+      await this._interactiveTransportAttachPromise?.catch(() => {});
+      await this.retireInteractiveTransport();
+    }
+    if (this._interactiveTransportDetachTimer) {
+      clearTimeout(this._interactiveTransportDetachTimer);
+      this._interactiveTransportDetachTimer = null;
+    }
 
     this._clearAllTimers();
 
