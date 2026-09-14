@@ -13,11 +13,14 @@ import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, normalize, sep } from 'node:path';
 import { registerExternalAttachment, type AttachmentRegistrationResult } from './attachment-registry.js';
+import type { SessionRemote } from './types/session.js';
 
 export interface GeneratedArtifactRegistrationOptions {
   sessionId: string;
   filePath: string;
   sessionWorkingDir: string;
+  /** Remote (SSH) case: the path lives on the remote host (see attachment-registry). */
+  remote?: SessionRemote;
 }
 
 export async function registerGeneratedArtifactAttachment(
@@ -26,17 +29,28 @@ export async function registerGeneratedArtifactAttachment(
   // Decide trust on the symlink-resolved path. If it can't be resolved, fall
   // back to the strict force-confined policy (registration will 404 a missing
   // file anyway).
-  let forceWorkspaceConfinement = true;
-  try {
-    const resolvedPath = realpathSync(options.filePath);
-    forceWorkspaceConfinement = !isAllowedGeneratedArtifactPath(resolvedPath, options.sessionWorkingDir);
-  } catch {
-    // Keep force confinement.
-  }
+  //
+  // A remote case keeps that strict policy unconditionally: the well-known Codex
+  // artifact directories are anchored at THIS host's home, which says nothing about
+  // a remote home, so only a file inside the remote workspace is trusted here.
+  const resolvedPath = options.remote ? undefined : tryRealpath(options.filePath);
+  const forceWorkspaceConfinement = !resolvedPath
+    ? true
+    : !isAllowedGeneratedArtifactPath(resolvedPath, options.sessionWorkingDir);
   return registerExternalAttachment(options.sessionId, options.filePath, {
     sessionWorkingDir: options.sessionWorkingDir,
     forceWorkspaceConfinement,
+    remote: options.remote,
   });
+}
+
+/** `realpathSync` without the throw — undefined when the path does not resolve. */
+function tryRealpath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Well-known Codex generated-artifact directories, anchored at the user's home. */

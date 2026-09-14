@@ -267,6 +267,14 @@ and it follows the same rule as the launch path: every ssh command line comes fr
 | `GET /api/sessions/:id/file-content` | `cat` into memory, capped by the existing text limit; `edit=1` answers `400` (see below) and `editable` is always `false` |
 | `GET /api/sessions/:id/file-preview` | Non-office files redirect to `file-raw` (which works remotely); docx/pptx answer `400` |
 | `GET /api/sessions/:id/file-thumbnail` | `400` for remote files |
+| `POST /api/sessions/:id/attachments` | Registers an absolute path that lives on the **remote** host (a clicked link pointing outside the case directory) by probing it there |
+| `GET /api/sessions/:id/attachments/:attachmentId/raw` | Streams the registered remote file over ssh, same 200/206/416 contract; `preview` (office) and `thumbnail` answer `400` |
+| `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing` |
+
+⚠️ The attachment route is the one a clicked path takes when it is **outside** the case
+directory (a remote `/tmp` scratchpad capture, a screenshot elsewhere in the home dir):
+the frontend's `_isExternalPreviewPath()` sends every absolute path that is not under
+`workingDir` there, so fixing only `file-raw` would leave exactly that half broken.
 
 Guard order is deliberately **the same as locally**, and the checks are not weakened
 by the transport:
@@ -305,11 +313,16 @@ still has it.
 **Not available over ssh (by choice, not by accident):** editing a file (writes would
 need SFTP; `docs/file-viewer-edit-plan.md` §6), office-document previews and
 generated thumbnails (both need the bytes on the server's disk — no remote file is ever
-spilled onto the server), the file-tree/picker listings, attachment registration for
-paths outside the workspace, and `tail-file`. Those routes are still local-only, so
-with an `sshfs` mount in place they read the mounted copy — the two views can only
-disagree when that mount is stale. Docker cases are unaffected: their workspace is
-bind-mounted at the same absolute path, so local `fs` reads real bytes.
+spilled onto the server), the file-tree/picker listings, and `tail-file`. Those routes
+are still local-only, so with an `sshfs` mount in place they read the mounted copy —
+the two views can only disagree when that mount is stale. Docker cases are unaffected:
+their workspace is bind-mounted at the same absolute path, so local `fs` reads real bytes.
+
+⚠️ A remote record stores the **remote** path, and the same absolute path STRING means a
+different file on each host. What decides which host to read is therefore never the
+path but the SESSION (`session.remote`): a remote session never falls back to local
+`fs`, and a local session never opens an ssh connection — including for attachment
+records, which are keyed to the session that registered them.
 
 ## API
 

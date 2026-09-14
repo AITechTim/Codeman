@@ -1697,10 +1697,12 @@ export class WebServer extends EventEmitter {
             sessionId,
             filePath,
             sessionWorkingDir: session.workingDir,
+            remote: session.remote,
           })
         : await registerExternalAttachment(sessionId, filePath, {
             sessionWorkingDir: session.workingDir,
             forceWorkspaceConfinement: true,
+            remote: session.remote,
           });
     const record = attachmentRegistry.get(sessionId, event.attachmentId);
     if (record) {

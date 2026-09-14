@@ -12,6 +12,14 @@ working in that directory. `GET /api/sessions/:id/file-raw`, `file-content`,
 `buildSshConnectionArgs()` connection the launch uses (`src/remote-files.ts`, one
 `realpath`+`stat` probe per request returning both the file and the workspace root).
 
+Clicked paths that point OUTSIDE the case directory (a remote `/tmp` scratchpad capture,
+a screenshot elsewhere in the remote home) go through the attachment routes, which had
+the same local-`fs` assumption: registration, the by-id `raw` stream, the metadata poll
+and the attachment history list now resolve over ssh as well, so the click-path works
+whether the file sits inside or outside the case. Which host a record is read from
+follows the SESSION, never the path string — the same absolute path means a different
+file on each host, and a remote session never falls back to a local file.
+
 The guards are unchanged in strength: the workspace boundary is still enforced (now
 resolved on the host that can actually resolve it), the sensitive-path blocklist and
 the size cap (`CODEMAN_MAX_DOWNLOAD_BYTES`) still apply before any bytes are read, and
@@ -22,6 +30,5 @@ a misleading 404. Nothing is ever copied to the Codeman host.
 Still not available for remote cases, and now said explicitly instead of 404-ing:
 editing a file (`edit=1` / `PUT` answer 400, the viewer hides its Edit affordance),
 office-document previews and generated thumbnails (both need the bytes on the server's
-disk), the file tree / path picker, attachment registration for paths outside the
-workspace, and `tail-file`. Docker cases are unaffected (their workspace is
-bind-mounted at the same absolute path).
+disk), the file tree / path picker, and `tail-file`. Docker cases are unaffected (their
+workspace is bind-mounted at the same absolute path).

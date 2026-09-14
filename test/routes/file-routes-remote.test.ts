@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import { createRouteTestHarness, type RouteTestHarness } from './_route-test-utils.js';
 import { registerFileRoutes } from '../../src/web/routes/file-routes.js';
+import { attachmentRegistry } from '../../src/attachment-registry.js';
 import { RemoteFileAccessError } from '../../src/remote-files.js';
 import type { RemoteProbe } from '../../src/remote-files.js';
 import type { SessionRemote } from '../../src/types/session.js';
@@ -62,6 +63,7 @@ describe('file routes in a remote (SSH) case', () => {
   beforeEach(async () => {
     harness = await createRouteTestHarness(registerFileRoutes);
     sessionId = harness.ctx._sessionId;
+    harness.ctx._session.attachmentHistory = [];
     // The whole point of the fixture: the workspace is a path on ANOTHER host.
     harness.ctx._session.workingDir = REMOTE_DIR;
     harness.ctx._session.remote = { ...remote };
@@ -76,6 +78,9 @@ describe('file routes in a remote (SSH) case', () => {
   });
 
   afterEach(() => {
+    // The registry is process-global: a record left behind would leak into the next
+    // test's by-id requests.
+    attachmentRegistry.clearSession(sessionId);
     vi.clearAllMocks();
   });
 
@@ -403,6 +408,174 @@ describe('file routes in a remote (SSH) case', () => {
       });
 
       expect(res.statusCode).toBe(502);
+    });
+  });
+  describe('attachments — a file click OUTSIDE the case directory (#415)', () => {
+    const outsidePath = '/tmp/agent-output/shot.png';
+
+    async function publish(path: string): Promise<{ statusCode: number; body: unknown }> {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sessionId}/attachments`,
+        payload: { path, notify: false },
+      });
+      return { statusCode: res.statusCode, body: JSON.parse(res.body) };
+    }
+
+    it('registers an out-of-workspace remote path by probing the remote host', async () => {
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+
+      const res = await publish(outsidePath);
+
+      expect(res.statusCode).toBe(200);
+      const data = (res.body as { data: { attachmentId: string; size: number; fileName: string } }).data;
+      expect(data.attachmentId).toMatch(/^att_/);
+      expect(data.fileName).toBe('shot.png');
+      expect(data.size).toBe(42);
+      // The path is outside the workspace, so a workspace-relative resolution could
+      // never have found it — the probe is what makes this work at all.
+      expect(mockedProbePaths).toHaveBeenCalledWith(expect.objectContaining({ host: '192.0.2.10' }), [
+        outsidePath,
+        REMOTE_DIR,
+      ]);
+    });
+
+    it("serves the registered remote attachment's bytes by id, with range support", async () => {
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+      const published = await publish(outsidePath);
+      const attachmentId = (published.body as { data: { attachmentId: string } }).data.attachmentId;
+
+      // The by-id route re-probes (guard defense-in-depth) before streaming.
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sessionId}/attachments/${attachmentId}/raw`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toBe('image/png');
+      expect(res.body).toBe('remote bytes');
+      expect(mockedCreateReadStream).toHaveBeenCalledWith(expect.anything(), outsidePath, undefined);
+
+      const ranged = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sessionId}/attachments/${attachmentId}/raw`,
+        headers: { range: 'bytes=1-3' },
+      });
+      expect(ranged.statusCode).toBe(206);
+      expect(ranged.headers['content-range']).toBe('bytes 1-3/42');
+    });
+
+    it('reports the remote size in the attachment metadata poll', async () => {
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+      const published = await publish(outsidePath);
+      const attachmentId = (published.body as { data: { attachmentId: string } }).data.attachmentId;
+
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 84), dirProbe]);
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sessionId}/attachments/${attachmentId}`,
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).data.size).toBe(84);
+    });
+
+    it('404s a remote path that does not exist instead of reporting it as unreadable', async () => {
+      mockedProbePaths.mockResolvedValue([null, dirProbe]);
+
+      const res = await publish('/tmp/agent-output/gone.png');
+
+      expect(res.statusCode).toBe(404);
+      expect(JSON.stringify(res.body)).toContain('Attachment file not found');
+    });
+
+    it('reports an unreachable host as 502 for the click path too', async () => {
+      mockedProbePaths.mockRejectedValue(new RemoteFileAccessError('remote host testhost unreachable: timed out'));
+
+      const res = await publish(outsidePath);
+
+      expect(res.statusCode).toBe(502);
+    });
+
+    it('still refuses a blocked remote path (the blocklist is host-agnostic)', async () => {
+      mockedProbePaths.mockResolvedValue([fileProbe('/etc/shadow', 10), dirProbe]);
+
+      const res = await publish('/etc/shadow');
+
+      // 403 from the guard (the same answer the local path gives for a blocked tree).
+      expect(res.statusCode).toBe(403);
+      expect(JSON.stringify(res.body)).toMatch(/blocked/i);
+    });
+
+    it('does not offer office previews or thumbnails for a remote attachment', async () => {
+      mockedProbePaths.mockResolvedValue([fileProbe('/tmp/agent-output/report.docx', 10), dirProbe]);
+      const published = await publish('/tmp/agent-output/report.docx');
+      const attachmentId = (published.body as { data: { attachmentId: string } }).data.attachmentId;
+
+      mockedProbePaths.mockResolvedValue([fileProbe('/tmp/agent-output/report.docx', 10), dirProbe]);
+      const preview = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sessionId}/attachments/${attachmentId}/preview`,
+      });
+      const thumbnail = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${sessionId}/attachments/${attachmentId}/thumbnail`,
+      });
+
+      expect(preview.statusCode).toBe(400);
+      expect(thumbnail.statusCode).toBe(400);
+    });
+
+    it('lists an out-of-workspace remote history entry without marking it missing', async () => {
+      harness.ctx._session.attachmentHistory = [
+        {
+          id: 'hist-1',
+          sessionId,
+          fileName: 'shot.png',
+          extension: 'png',
+          attachmentType: 'image',
+          size: 1,
+          mtimeMs: 1,
+          timestamp: 1,
+          source: 'external',
+          externalPath: outsidePath,
+        },
+      ];
+      mockedProbePaths.mockResolvedValue([fileProbe(outsidePath, 42), dirProbe]);
+
+      const res = await harness.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/attachments` });
+
+      expect(res.statusCode).toBe(200);
+      const [item] = JSON.parse(res.body).data.items;
+      expect(item.missing).toBe(false);
+      expect(item.size).toBe(42);
+      expect(item.attachmentId).toBeTruthy();
+    });
+
+    it('resolves a workspace-relative history entry over ssh', async () => {
+      harness.ctx._session.attachmentHistory = [
+        {
+          id: 'hist-2',
+          sessionId,
+          fileName: 'out.png',
+          extension: 'png',
+          attachmentType: 'image',
+          size: 1,
+          mtimeMs: 1,
+          timestamp: 1,
+          source: 'detected',
+          relativePath: 'out.png',
+        },
+      ];
+      mockedProbePaths.mockResolvedValue([fileProbe(`${REMOTE_DIR}/out.png`, 7), dirProbe]);
+
+      const res = await harness.app.inject({ method: 'GET', url: `/api/sessions/${sessionId}/attachments` });
+
+      const [item] = JSON.parse(res.body).data.items;
+      expect(item.missing).toBe(false);
+      expect(item.size).toBe(7);
+      expect(item.rawUrl).toContain('file-raw');
     });
   });
 });
