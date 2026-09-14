@@ -243,7 +243,7 @@ const PathPicker = {
    * ⚠️ This re-orders the listing the SERVER returned, and the server cuts at
    * FILESYSTEM_PICKER_ENTRY_LIMIT (500) after sorting by name. So in a folder past
    * that limit, "Newest first" is the newest of the first 500 BY NAME, not the newest
-   * in the folder — which is the one case this sort exists for. The status line says
+   * in the folder, which is the one case this sort exists for. The status line says
    * "(first 500 by name)" rather than "(first 500)" so the cut is legible; ordering
    * before the cut would have to happen server-side, and would cost a stat on every
    * entry in the directory rather than on the 500 that are returned.
