@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { basename, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { dataPath } from './config/instance.js';
+import { getCli } from './config/cli-registry/index.js';
 import type {
   CreateSessionOptions,
   MuxSession,
@@ -84,26 +85,22 @@ function agentKind(agent: JsonRecord): string {
 }
 
 function sessionMode(kind: string): SessionMode {
-  switch (kind.toLowerCase()) {
-    case 'claude':
-    case 'opencode':
-    case 'codex':
-    case 'gemini':
-    case 'antigravity':
-    case 'pi':
-    case 'grok':
-      return kind.toLowerCase() as SessionMode;
-    default:
-      return 'shell';
-  }
+  const entry = getCli(kind.toLowerCase());
+  return entry?.enabled ? (entry.id as SessionMode) : 'shell';
+}
+
+function isShellMode(mode: SessionMode): boolean {
+  return getCli(mode)?.kind === 'shell';
 }
 
 function defaultPaneName(pane: JsonRecord, paneId: string, mode: SessionMode, tabLabel?: string): string {
   const explicit = stringValue(pane.label) || stringValue(pane.title) || stringValue(pane.terminal_title_stripped);
   if (explicit) return explicit;
-  if (mode === 'shell' && tabLabel) return tabLabel;
+  const cli = getCli(mode);
+  const shell = cli?.kind === 'shell';
+  if (shell && tabLabel) return tabLabel;
   const cwd = stringValue(pane.foreground_cwd) || stringValue(pane.cwd);
-  if (mode !== 'shell') return `${mode === 'codex' ? 'Codex' : mode} ${paneId}`;
+  if (!shell) return `${cli?.label || mode} ${paneId}`;
   return `${cwd ? basename(cwd) : 'Shell'} ${paneId}`;
 }
 
@@ -370,7 +367,7 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
     // remain automatic context. A stale poll of the pre-rename label is ignored.
     if (label !== mapping.observedPaneLabel && label !== mapping.pendingPaneLabel) {
       if (label) {
-        mapping.name = mode === 'shell' ? label : normalizeAgentName(label, false);
+        mapping.name = isShellMode(mode) ? label : normalizeAgentName(label, false);
         mapping.manualName = mapping.name;
         mapping.nameSource = 'manual';
         mapping.nameVersion = NAME_VERSION;
@@ -386,7 +383,7 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
       this.saveMappings();
     }
     const fallback = defaultPaneName(pane, paneId, mode, tabLabels.get(stringValue(pane.tab_id) || ''));
-    const shellOwned = mode === 'shell' && mapping.nameSource !== 'manual';
+    const shellOwned = isShellMode(mode) && mapping.nameSource !== 'manual';
     const name = shellOwned ? fallback : mapping.name || fallback;
     // Saved Codeman display state is not authoritative over current Herdr tab
     // labels. Mark this mapping current so startup restoration cannot revert it.
@@ -624,7 +621,9 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
   }
 
   async createSession(options: CreateSessionOptions): Promise<MuxSession> {
-    if (options.mode !== 'codex') throw new Error('The Herdr backend currently supports Codex sessions only');
+    if (getCli(options.mode)?.capabilities.transcript !== 'codex-rollout') {
+      throw new Error('The Herdr backend currently supports Codex sessions only');
+    }
     // Workspace list intentionally omits cwd. Pane list carries both cwd and
     // workspace_id, so it is the authoritative way to reuse an existing
     // workspace for another Codeman tab.
@@ -814,19 +813,12 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
     if (source !== 'manual' && mapping.nameVersion === NAME_VERSION) return true;
     if (source === 'manual') {
       mapping.nameSource = 'manual';
-      mapping.manualName = session.mode === 'shell' ? name.trim() : normalizeAgentName(name, false);
+      mapping.manualName = isShellMode(session.mode) ? name.trim() : normalizeAgentName(name, false);
       mapping.agentNameTitle = undefined;
       const occupied = new Map(this.getSessions().map((item) => [item.name || '', item.terminalId || item.muxName]));
-      const canonical =
-        session.mode === 'shell'
-          ? mapping.manualName
-          : this.chooseAgentName(
-              mapping.manualName,
-              sessionId,
-              session.terminalId || session.muxName,
-              occupied,
-              mapping
-            );
+      const canonical = isShellMode(session.mode)
+        ? mapping.manualName
+        : this.chooseAgentName(mapping.manualName, sessionId, session.terminalId || session.muxName, occupied, mapping);
       this.publishName(session, mapping, mapping.manualName, canonical);
       this.saveMappings();
     } else {
