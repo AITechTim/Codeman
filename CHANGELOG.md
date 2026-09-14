@@ -1,5 +1,78 @@
 # aicodeman
 
+## 1.28.2
+
+### Patch Changes
+
+- **Terminal font weight** (#417, from discussion #403). App Settings → Terminal → Font gains two
+  per-device rows, Normal font weight and Bold font weight, each a select from Default plus 100 to 900. Claude Code marks bold with a bare `ESC[1m` and no colour change, so with a family that ships
+  only a regular and a bold face a bold heading reads as body text; setting normal to 300 turns that
+  one small step into an obvious one. Both slots resolve against their own xterm default (an unset
+  bold never inherits normal), apply live to the terminal, both echo overlays and open Agent Teams
+  panes, and the bundled JetBrains Mono `@font-face` is declared over the font's real 100 to 800 axis
+  instead of 400 to 700, without which every weight below 400 rendered identically to 400 on a stock
+  install.
+
+  **Phones up to 599px get the phone layout** (#390, fixes #389). The phone tier's cutoff moves
+  from 430px to 600px in the JS classifier, mobile.css and every test and doc that pins it, so the
+  iPhone Plus and Pro Max sizes, the Pixel Pro and the Z Fold cover display (430 to 460px) get the
+  phone header, the Enter key and the accessory bar instead of the tablet layout. Verified on a real
+  iPhone 17 Pro Max; a Safari page zoom below 100% widens the reported viewport, which is why the
+  cutoff is 600 rather than 480.
+
+  **The plan-usage statusline exporter no longer touches your settings files** (#361, diagnosed in
+  #405). Codeman used to write its exporter into a workspace's `.claude/settings.local.json`, which
+  Claude Code ranks above `~/.claude/settings.json`, so it replaced your own statusline for ANY
+  `claude` run in that directory, including outside Codeman, and rendered the bare word `codeman`
+  when run by hand. The exporter is now passed to `claude` as an ephemeral `--settings` flag when
+  Codeman spawns it and is never written to disk; your own statusline (project-local, project, then
+  `~/.claude/settings.json`) is wrapped and printed through inside Codeman sessions, and a hand-run
+  `claude` sees nothing of Codeman. Workspaces an older Codeman wrote to self-heal the first time a
+  session starts there. Telemetry collection follows the Plan Usage chip setting, read fresh at every
+  Claude session create and respawn; an absent setting means on, and a device writes the switch only
+  when it flips the chip, so a phone (chip off by default) saving its font size can no longer switch
+  collection off for the desktop. The exporter prints nothing when it cannot reach Codeman, the
+  telemetry route answers an unknown session with an empty body, and the footer is empty rather than
+  a brand word. Known limit: sessions inside a Docker case do not feed the chip yet (the flag rides
+  local spawns only; the chip is account-wide, so any local Claude session covers it).
+
+  **`install.sh` and the Docker agent image read the CLI catalogue** (#380). Adding a CLI to
+  `src/config/cli-registry/stock.ts` and running `npm run generate:cli-catalog` wires it into the
+  installer's detection, install menu and closing reminder, and into the agent image's npm layer;
+  each of those was a separate hand-kept list before, and OMP had been missing from the installer's
+  detection entirely. The install menu offers every enabled CLI that can drive a pane (eight, rather
+  than the fixed two), DeepSeek is deliberately withheld because `npm install -g @deepseek-ai/dsh`
+  installs only a launcher with no runnable profile, a wget-only host keeps the entries that never
+  needed curl, and the agent image respects `enabled`. The script stays bash 3.2 compatible and CI
+  now executes it inside a real `bash:3.2` container. Choosing "s" (Skip) in the menu continues to
+  the clone and build instead of aborting.
+
+  **iPhone Duo support** (#407). A visual-viewport resize that changes the WIDTH is the device
+  changing shape and is never read as the virtual keyboard: closing an iPhone Duo (626 to 466pt wide)
+  or rotating any phone used to latch the keyboard layout with no keyboard on screen, sticky until the
+  device was opened again. The seven centred overlays keep their dialogs out of the hinge through the
+  CSS Viewport Segments variables (inert on devices that do not fold), the phone path picker and
+  preview stay flush under 600px, and a shape change with the keyboard up baselines to the layout
+  viewport so the settle event after a rotation no longer closes the keyboard layout. Two Duo device
+  profiles join the test matrix.
+
+  **Codeman is its own Claude Code plugin marketplace.** `/plugin marketplace add Ark0N/Codeman`
+  followed by `/plugin install codeman@codeman` installs the codeman agent skill as a plugin, from
+  `plugins/codeman/` (a mirror of `skills/codeman/` kept byte-identical by a test), which is a small
+  separate directory on purpose: a plugin root carrying a `package.json` gets an `npm install` on
+  every installer's machine. A Claude Code holding both the plugin and a user-level or per-case copy
+  lists the skill twice; pick one route.
+
+  Housekeeping: the maintainer's Telegram PR bot moved out of this repository (it is a client of the
+  HTTP API like any other), the COM flow gained a Discussions announcement step, and the changelog's
+  Thanks sections were backfilled for 1.22.0 to 1.28.1.
+
+  ### Thanks
+  - @irisitymichaelgrundberg for the font-weight analysis in #403 that this release implements, and the statusline diagnosis in #405
+  - @JDProfresh for the phone breakpoint fix (#390)
+  - @timkjr for moving the statusline exporter off disk (#361)
+  - @opticon454 for driving the installer and the agent image from the CLI catalogue (#380)
+
 ## 1.28.1
 
 ### Patch Changes
@@ -28,7 +101,6 @@
   ### Thanks
 
   1.28.1 is a same-day follow-on to 1.28.0, so the thanks for this pair belong here too:
-
   - **@shenlvkang-collab** for the path picker's typed-path jump and name/date sort (#399), and for the care in the edges: the retry is bounded to one parent level, a typo keeps the listing you had instead of resetting to the root, and a full file path lands in its folder with the entry already selected.
   - **@irisitymichaelgrundberg** for Claude truecolor in panes (#409), and above all for flagging the one reading they could not prove: that suppressing truecolor may have made Claude's block collapse into the background rather than fixing anything. That paragraph is why this got measured instead of taken on trust, and the measurement changed the changelog.
   - **@timkjr** for trapping Ctrl+Z in agent sessions (#404), for finding that Caps Lock flips `ev.key` to `'Z'` without setting `shiftKey` so a plain `=== 'z'` check misses exactly the keystroke the guard exists for, and for stating up front that an agent CLI already holds its tty with ISIG off rather than overselling the fix.
@@ -209,7 +281,6 @@
   ### Thanks
 
   1.26.0 carries no contributor PRs of its own. It lands the day after 1.25.0, so the thanks for that pair belong here too:
-
   - @mtiller for the reverse-proxy base URL (#381).
   - @dignfei for attaching cases to running containers (#357).
   - @shenlvkang-collab for the response viewer fix (#369), the first-hand conversation hook (#367) and the phone Add Case fix (#368).
@@ -311,7 +382,6 @@
   ### Thanks
 
   1.24.4 is a same-day follow-on to 1.24.3, so the thanks for that pair belong here too:
-
   - @opticon454 for #349, and for a write-up that made an infrastructure PR quick to review
 
 ## 1.24.3
@@ -397,7 +467,6 @@
   ### Thanks
 
   1.24.2 is a hotfix on top of 1.24.1, so the thanks for that pair belong here too:
-
   - @opticon454 for #350, with a reproduction that made this a confirmation rather than a hunt
   - @timkjr for reporting #352, and for finding it while verifying Docker support for someone else's PR
 
@@ -503,7 +572,6 @@
   ### Thanks
 
   1.23.0 carries no contributor PRs of its own. It lands the day after 1.22.0, so the thanks for that pair belong here too:
-
   - **@aakhter** built both halves of the new tab experience: the owner-scoped, server-authoritative tab-layout foundation with recipient-safe SSE publication and an unusually deep test suite (#335), and the resizable vertical session rail with accessible pointer/keyboard sizing and careful FitAddon handoff (#334). Fifth and sixth merged PRs, and the layout work also fixed real multi-user ordering leaks along the way.
 
 ## 1.22.0
@@ -519,7 +587,6 @@
 - Fix the file preview's dead pop-out control: a real detach button now opens the previewed file in a browser tab (raw route for PDFs/images/media/text, converted-PDF preview for docx/pptx) and the copy button reports when a preview has no text to copy instead of silently doing nothing. Review-driven hardening for the new tab features: PUT /api/session-order drops unknown ids again instead of rejecting the whole write (a session deleted inside the browser's debounce window could silently lose the user's reorder), a failed mux restore no longer blocks explicit session/webview deletion for the process lifetime (the automated stale sweep stays fail-closed), and the vertical rail gains the axis-awareness the sidebar-only predicates missed: correct drag-reorder insertion, active-tab scroll-into-view, floating windows anchored beside rail tabs, connector redraws on rail scroll, server-seeded orientation applied on first load, a pre-paint stamp so vertical mode no longer flashes through the header strip, and a 12px session-name default matching the sidebar's historical size so untouched installs are not restyled.
 
   ### Thanks
-
   - **@aakhter** built both halves of the new tab experience: the owner-scoped, server-authoritative tab-layout foundation with recipient-safe SSE publication and an unusually deep test suite (#335), and the resizable vertical session rail with accessible pointer/keyboard sizing and careful FitAddon handoff (#334). Fifth and sixth merged PRs, and the layout work also fixed real multi-user ordering leaks along the way.
 
 ## 1.21.0
