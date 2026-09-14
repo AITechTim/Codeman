@@ -18066,3 +18066,136 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
     transition: none;
   }
 }
+
+/* ============================================================
+   === Folding devices: keep dialogs off the hinge ===
+   Apple's "Designing for iPhone Duo" calls the band a partly-open
+   display folds through a RESERVED REGION: content avoids covering
+   it, and system components (alerts, sheets, context menus) move
+   aside for it. On the web that region is described by the CSS
+   Viewport Segments media features and env() variables, which report
+   two segments only while a foldable is actually bent. Flat, open
+   or closed, it is one segment and everything below is inert.
+
+   Codeman's centred overlays are all `position: fixed; inset: 0`
+   flex-centring boxes, so their dialog lands dead on the hinge in
+   book pose (a vertical fold) or tabletop pose (a horizontal one).
+   The fix shrinks the CONTENT box with padding rather than the box
+   itself, so each overlay's backdrop still covers the whole viewport
+   and still swallows taps on the far side of the fold. Shrinking
+   the box would leave the trailing segment unshaded and live.
+
+   ⚠️ Each rule re-states the overlay's OWN gutter, because a
+   later `padding-right` longhand beats the earlier `padding`
+   shorthand it is composing with and would otherwise erase it.
+   test/foldable-layout.test.ts reads both numbers out of this file
+   and fails if they drift apart, and simulates the cascade at every
+   breakpoint so a base gutter overridden by a later @media block (the
+   phone path picker below) needs its own zero-base restatement.
+
+   ⚠️ Physical sides, not logical ones: dialogs go in the LEFT
+   segment (and the TOP one in tabletop pose) in every language. The
+   HIG keeps Duo's side controls on the same physical edge in RTL
+   because they are aligned with the hardware, and a dialog that
+   changed sides with the text direction would fight that.
+   ============================================================ */
+
+:root {
+  /* Width of the trailing strip to leave clear so a centred dialog cannot sit
+     under a vertical hinge, and the matching bottom strip for a horizontal one.
+     0px on every non-folding device, and on a foldable held flat. */
+  --fold-inline-end: 0px;
+  --fold-block-end: 0px;
+}
+
+@media (horizontal-viewport-segments: 2) {
+  :root {
+    --fold-inline-end: calc(100vw - env(viewport-segment-right 0 0, 100vw));
+  }
+}
+
+@media (vertical-viewport-segments: 2) {
+  :root {
+    --fold-block-end: calc(100vh - env(viewport-segment-bottom 0 0, 100vh));
+  }
+}
+
+/* No gutter of their own. */
+.modal,
+.file-preview-overlay {
+  padding-right: var(--fold-inline-end);
+  padding-bottom: var(--fold-block-end);
+}
+
+/* The palette is a .modal, so the generic rule above covers it everywhere
+   EXCEPT the 600-768px band, where mobile.css (loaded after this file) pads
+   it with the SHORTHAND `10vh 0.75rem 0`: that shorthand beats the generic
+   rule on both sides, so this compound rule (0,2,0) restates that band's own
+   gutters, 0.75rem at the side and none at the bottom, plus the fold strips.
+   Scoped to the same band on purpose: unscoped, it ADDED 0.75rem on every
+   other width, where the palette has no side gutter to compose with, and
+   pushed the shell 6px off centre (measured at 393, 900 and 1400). */
+@media (max-width: 768px) and (min-width: 600px) {
+  .modal.command-palette-modal {
+    padding-right: calc(0.75rem + var(--fold-inline-end));
+    padding-bottom: var(--fold-block-end);
+  }
+}
+
+.path-picker-overlay {
+  padding-right: calc(16px + var(--fold-inline-end));
+  padding-bottom: calc(16px + var(--fold-block-end));
+}
+
+.path-preview-overlay {
+  padding-right: calc(18px + var(--fold-inline-end));
+  padding-bottom: calc(18px + var(--fold-block-end));
+}
+
+/* Under 600px both dialogs are flush sheets: their `@media (max-width: 600px)`
+   rules drop the gutter to 0 (borderless right and bottom edges, the picker
+   docked to the bottom). The two rules above sit later in the file at the same
+   specificity, so on their own they put a 16px and 18px gutter back on every
+   phone, fold or no fold (measured at 393 and 500: dialog edges floating 16px
+   off the screen edge). Restate the fold strip on a ZERO base here. */
+@media (max-width: 600px) {
+  .path-picker-overlay {
+    padding-right: var(--fold-inline-end);
+    padding-bottom: var(--fold-block-end);
+  }
+
+  .path-preview-overlay {
+    padding-right: var(--fold-inline-end);
+    padding-bottom: var(--fold-block-end);
+  }
+}
+
+.offline-overlay {
+  padding-right: calc(20px + var(--fold-inline-end));
+  padding-bottom: calc(20px + var(--safe-area-bottom) + var(--fold-block-end));
+}
+
+.solo-gone-overlay {
+  padding-right: calc(24px + var(--fold-inline-end));
+  padding-bottom: calc(24px + var(--fold-block-end));
+}
+
+/* Top-anchored, so only the trailing side and the bottom stop matter. */
+.paste-overlay {
+  padding-right: var(--fold-inline-end);
+  padding-bottom: var(--fold-block-end);
+}
+
+/* The response viewer is a bottom sheet, so a vertical hinge running through it
+   is fine, since it is a wide surface like the terminal and inset dialogs are what
+   the fold guidance is about. A horizontal hinge is not: in tabletop pose the
+   sheet would climb out of the bottom segment and fold away mid-transcript.
+   ⚠️ mobile.css carries an identical twin at its end: its 430px block sets
+   `max-height: 92dvh` at the same specificity and loads later, so this copy
+   alone loses on a phone-width foldable. test/foldable-layout.test.ts pins
+   the two values equal. */
+@media (vertical-viewport-segments: 2) {
+  .response-viewer {
+    max-height: min(88vh, env(viewport-segment-height 0 1, 88vh));
+  }
+}
