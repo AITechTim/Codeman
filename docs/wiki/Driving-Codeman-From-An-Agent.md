@@ -16,6 +16,7 @@ instead of pasting endpoint documentation into prompts.
 | How          | Command                                                     | Scope                                                       |
 | ------------ | ----------------------------------------------------------- | ----------------------------------------------------------- |
 | Skills CLI   | `npx skills add Ark0N/Codeman --skill codeman -g`            | Global, any skills-aware agent.                              |
+| Claude Code plugin | `/plugin marketplace add Ark0N/Codeman`, then `/plugin install codeman@codeman` | Global, through Claude Code's plugin manager. `/plugin update codeman` follows releases. |
 | Bundled CLI  | `codeman skill install`                                      | Global, at `~/.claude/skills/codeman`.                       |
 | Bundled CLI  | `codeman skill install --case <name>`                        | One case.                                                    |
 | Web UI       | **App Settings → Agents & CLIs → Claude → Agent Skill**      | Injects into each case when a Claude session is created. Off by default. |

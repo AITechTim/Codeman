@@ -646,6 +646,7 @@ Codeman 默认用 `--dangerously-skip-permissions` 启动会话，因此 Web UI 
 > **捷径：装上打包好的智能体技能。** 下面这一整套（外加多工作会话的实战配方）已经作为 Claude Code 技能随仓库发布在 [`skills/codeman`](skills/codeman/SKILL.md)，会话内部的智能体不必等你把文档粘进提示词就能驱动 Codeman。三种获取方式：
 >
 > - `npx skills add Ark0N/Codeman --skill codeman -g`：全局安装，任何支持技能的智能体都能用
+> - Claude Code 插件：`/plugin marketplace add Ark0N/Codeman`，然后 `/plugin install codeman@codeman`：通过 Claude Code 自带的插件管理器全局安装，`/plugin update codeman` 跟随新版本
 > - `codeman skill install`（全局）或 `codeman skill install --case <name>`：给那些从 npm 安装、从未克隆过仓库的用户；`codeman skill uninstall` 可撤销
 > - **App Settings → Agent Skill**（`agentSkillEnabled`，默认关闭）：开启后，Codeman 会在每次于某个 case 中创建 Claude 会话时把技能注入该 case；case 里用户自己写的 `skills/codeman` 永远不会被覆盖
 >

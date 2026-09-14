@@ -36,7 +36,7 @@
     "check:public-assets": "node scripts/check-public-assets.mjs",
     "capture:subagents": "node scripts/capture-subagent-screenshots.mjs",
     "changeset": "changeset",
-    "version-packages": "changeset version && npm install --package-lock-only && node scripts/check-lockfile-sync.mjs",
+    "version-packages": "changeset version && node scripts/sync-plugin-version.mjs && npm install --package-lock-only && node scripts/check-lockfile-sync.mjs",
     "check:lockfile": "node scripts/check-lockfile-sync.mjs",
     "knip": "npx --yes knip@latest --config config/knip.json",
     "release": "changeset publish",
