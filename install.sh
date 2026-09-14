@@ -452,8 +452,9 @@ dsh_banner_probe() {
 # DeepSeek stays a hand-written special case ON PURPOSE: the registry expresses
 # its identity check as `discovery.identity.regex`, a JavaScript regex, and
 # translating that into a `grep` pattern at install time is a transformation
-# nobody should be performing on a security-adjacent check. The parity test pins
-# that the registry still demands "DeepSeek Harness", so an upstream banner
+# nobody should be performing on a security-adjacent check. Instead
+# test/install-sh-invariants.test.ts pins the grep below against the registry's
+# `discovery.identity.regex`, so the two cannot drift apart: an upstream banner
 # change fails a test instead of silently mis-detecting here.
 _cli_candidate_ok() {
     case "$1" in

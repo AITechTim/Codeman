@@ -34,9 +34,12 @@ must not change what is inside an image tagged `codeman/agent:base`, or two mach
 that tag hold different images and every cache decision downstream is a lie. Each entry's
 `enabled` flag IS honoured, so a CLI that ships disabled is never baked in.
 
-Five CLIs keep hand-written layers, because the registry cannot express what makes them
-special (as a REGISTRY field now — `discovery.install.agentImageLayer` in `stock.ts` — rather
-than an id-keyed table duplicated between the two producers of the image's build args):
+Five CLIs keep hand-written layers, for two different reasons that are easy to conflate.
+`antigravity`, `grok` and `omp` declare no `npmPackage` at all, so they never enter the shared
+npm layer and each gets a vendor-installer layer instead. `pi` and `deepseek` ARE on npm but
+carry `discovery.install.agentImageLayer` in `stock.ts` (a REGISTRY field, rather than an
+id-keyed table duplicated between the two producers of the image's build args), which pulls
+them out of the shared layer because a plain `npm install -g` is not enough for them:
 
 | CLI | Why it is not in the shared npm layer |
 | ------------- | ------------------------------------------------------------------------------------- |

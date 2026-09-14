@@ -156,9 +156,9 @@ Three rules, and the middle one is why the embed matters:
 
 That is mechanical rather than a promise. `CLI_INSTALL_CMD_TRUSTED` is written only from the
 generated block and is the only array the installer ever runs or displays — there is no second
-array a refresh could rewrite, because there is no refresh. `test/install-sh-invariants.test.ts`
-asserts as much: the embedded commands are exactly the registry's, and nothing in `install.sh`
-`eval`s.
+array a refresh could rewrite, because there is no refresh. `test/cli-catalog-sync.test.ts`
+asserts that the embedded commands are exactly the registry's, and
+`test/install-sh-invariants.test.ts` that nothing in `install.sh` `eval`s.
 
 ### bash 3.2
 
@@ -181,7 +181,7 @@ A module-level const freezes at first import, and the failure is asymmetric: a C
 1. Add a `CliEntry` to `stock.ts`.
 2. Run `npm run generate:cli-catalog` and commit **both** artifacts (`config/clis.stock.json` and `install.sh`). The installer's detection, its install menu, its reminder text and the Docker agent image all follow from that one step — this is what makes upstream `b6d0f1fa` ("wire OMP into install.sh's CLI detection, it had none") impossible rather than merely fixed.
 3. Add a golden spawn-command pin to `test/cli-registry-spawn-golden.test.ts`, a row to `test/cli-capability-predicates.test.ts`, its remote/docker commands to `test/location-overlay-commands.test.ts`, and its search paths to `test/install-sh-detection-parity.test.ts`.
-4. Only if it cannot install with a plain `npm install -g <pkg>`: give it a layer in `docker/agent.Dockerfile` and a reason in `AGENT_IMAGE_SPECIAL_CASES` (`scripts/lib/cli-catalog.mjs`). The coverage test requires both, so an exclusion cannot quietly become an omission.
+4. Only if it cannot install with a plain `npm install -g <pkg>`: give it a layer in `docker/agent.Dockerfile` and set `discovery.install.agentImageLayer: { kind: 'dedicated', reason }` on its entry in `stock.ts`. `test/docker-agent-image-coverage.test.ts` requires both, so an exclusion cannot quietly become an omission. An entry with no `npmPackage` needs only the Dockerfile layer, since it never enters the shared npm layer in the first place.
 5. That is usually all. If you find yourself wanting to add an `if` somewhere, the guard test will tell you — and the answer is a capability field, or a named profile if it genuinely needs to run code.
 
 ## See also

@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { STOCK_CLIS } from '../src/config/cli-registry/stock.js';
 
 const INSTALL_SH = fileURLToPath(new URL('../install.sh', import.meta.url));
 const SOURCE = readFileSync(INSTALL_SH, 'utf-8');
@@ -164,6 +165,23 @@ describe('install.sh runtime safety', () => {
 
   it('still sets the strict flags it has always run under', () => {
     expect(SOURCE).toMatch(/^set -euo pipefail$/m);
+  });
+});
+
+describe('install.sh DeepSeek identity probe', () => {
+  it('greps for the same banner the registry identity regex demands', () => {
+    // dsh_banner_probe is the ONE hand-written identity check left in the script (the
+    // registry's is a JavaScript regex, deliberately not translated into grep at install
+    // time). The two are pinned to each other here so an upstream banner change fails
+    // this test instead of mis-detecting on one side only.
+    const grepLine = CODE_LINES.find((line) => line.includes('grep -qi "DeepSeek Harness"'));
+    expect(grepLine, 'the dsh banner grep is gone or its literal changed').toBeDefined();
+
+    const deepseek = STOCK_CLIS.find((entry) => entry.id === 'deepseek');
+    const identity = deepseek?.discovery.identity;
+    expect(identity, 'the deepseek entry no longer declares an identity probe').toBeDefined();
+    expect(identity?.arg).toBe('--help');
+    expect(new RegExp(identity!.regex, 'i').test('DeepSeek Harness')).toBe(true);
   });
 });
 
