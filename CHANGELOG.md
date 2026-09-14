@@ -25,6 +25,14 @@
   comma-grouped rather than wrapped in `:is()`, so each arm keeps its own (0,2,0)
   specificity and `mobile.css`'s matching overrides still win on source order.
 
+  ### Thanks
+
+  1.28.1 is a same-day follow-on to 1.28.0, so the thanks for this pair belong here too:
+
+  - **@shenlvkang-collab** for the path picker's typed-path jump and name/date sort (#399), and for the care in the edges: the retry is bounded to one parent level, a typo keeps the listing you had instead of resetting to the root, and a full file path lands in its folder with the entry already selected.
+  - **@irisitymichaelgrundberg** for Claude truecolor in panes (#409), and above all for flagging the one reading they could not prove: that suppressing truecolor may have made Claude's block collapse into the background rather than fixing anything. That paragraph is why this got measured instead of taken on trust, and the measurement changed the changelog.
+  - **@timkjr** for trapping Ctrl+Z in agent sessions (#404), for finding that Caps Lock flips `ev.key` to `'Z'` without setting `shiftKey` so a plain `=== 'z'` check misses exactly the keystroke the guard exists for, and for stating up front that an agent CLI already holds its tty with ISIG off rather than overselling the fix.
+
 ## 1.28.0
 
 ### Minor Changes
