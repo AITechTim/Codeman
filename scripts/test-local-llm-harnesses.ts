@@ -401,8 +401,8 @@ async function baselineCheck(
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = await res.json();
-    const ids: string[] = (body.data ?? []).map((m: { id: string }) => m.id);
+    const body = (await res.json()) as { data?: Array<{ id: string }> };
+    const ids: string[] = (body.data ?? []).map((m) => m.id);
     console.log(`GET /v1/models -> ${ids.length ? ids.join(', ') : '(empty list)'}`);
     if (!discoveredModel && ids.length) discoveredModel = ids[0];
   } catch (err) {
@@ -436,7 +436,7 @@ async function baselineCheck(
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    const body = await res.json();
+    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const reply: string = body.choices?.[0]?.message?.content ?? '';
     if (!reply.trim()) throw new Error('empty reply');
     console.log(`POST /v1/chat/completions -> "${reply.trim().slice(0, 200)}"`);
@@ -619,8 +619,8 @@ async function main(): Promise<void> {
   // an enabled agent CLI) — it's the `unsupported` capability check in runHarness that
   // skips it, not an exclusion here.
   const allEntries = enabledClis().filter((e) => e.kind === 'agent');
-  const byId = new Map(allEntries.map((e) => [e.id, e]));
-  const ids = opts.only ?? [...byId.keys()];
+  const byId = new Map<string, CliEntry>(allEntries.map((e) => [e.id as string, e]));
+  const ids: string[] = opts.only ?? [...byId.keys()];
   const unknownIds = ids.filter((id) => !byId.has(id));
   if (unknownIds.length) {
     console.error(`${TAG} unknown harness id(s): ${unknownIds.join(', ')}`);

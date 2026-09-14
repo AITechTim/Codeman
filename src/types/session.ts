@@ -558,6 +558,29 @@ export interface SessionAttachmentHistoryItem {
 /**
  * Current state of a session
  */
+/** The public half of a session's custom-model selection (on the wire, in `SessionState`). */
+export interface CustomModelSelection {
+  endpointId: string;
+  modelId: string;
+  label?: string;
+}
+
+/**
+ * The full custom-model selection a session keeps: the public selection plus the
+ * bookkeeping `Session.setCustomModel()` needs to UNDO it later without guessing what
+ * it once wrote. Persisted to state.json only as the disk-only `__customModel` field
+ * (never broadcast); the injected env VALUES are not in here at all, since they carry
+ * the endpoint's API key, and are re-derived from the endpoint store on recovery.
+ */
+export interface CustomModelBookkeeping extends CustomModelSelection {
+  /** Env keys the selection injected into the session's envOverrides / tmux session. */
+  envKeys: string[];
+  /** Isolated per-session config directory written for a `configDir`-kind CLI. */
+  configDir?: string;
+  /** Value forced onto the CLI's `model` launch param (pi/omp `custom/<id>`, grok's block name). */
+  launchModel?: string;
+}
+
 export interface SessionState {
   /** Unique session identifier */
   id: string;
@@ -678,12 +701,14 @@ export interface SessionState {
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort?: EffortLevel;
   /**
-   * Custom Model Endpoint Profiles (deployment_plan.md): the custom OpenAI-compatible
-   * endpoint (local or cloud) this session's CLI is currently pointed at, if any.
-   * Undefined = the harness's native cloud default. No secrets here — the endpoint's
-   * base URL/api key live only in Session._envOverrides, never in this public state.
+   * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): the custom
+   * OpenAI-compatible endpoint (local or cloud) this session's CLI is currently pointed
+   * at, if any. Undefined = the harness's native cloud default. No secrets here — the
+   * endpoint's base URL/api key live only in Session._envOverrides, never in this public
+   * state. The internal half (which env keys were injected, which config dir was
+   * written) is {@link CustomModelBookkeeping}, persisted disk-only like `__envOverrides`.
    */
-  customModel?: { endpointId: string; modelId: string; label?: string };
+  customModel?: CustomModelSelection;
   /** Sanitized per-session attachment history. */
   attachmentHistory?: SessionAttachmentHistoryItem[];
   /**

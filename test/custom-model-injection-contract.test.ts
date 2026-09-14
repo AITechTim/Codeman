@@ -1,6 +1,6 @@
 /**
  * @fileoverview Contract tests for Custom Model Endpoint Profiles
- * (deployment_plan.md chunk 7): for every CLI with a `customModelInjection`
+ * (docs/custom-model-endpoints-plan.md chunk 7): for every CLI with a `customModelInjection`
  * capability, build the real injection via `buildCustomModelInjection()`,
  * then replay those exact values through an HTTP request shaped the way that
  * CLI is documented to send it, against the in-process mock server
@@ -8,7 +8,7 @@
  * request at the injected base URL, with the injected API key in the
  * expected header, and the injected model id in the body.
  *
- * LIMITATION (stated here and in deployment_plan.md, not left implicit): this
+ * LIMITATION (stated here and in docs/custom-model-endpoints-plan.md, not left implicit): this
  * proves "if the CLI honors its documented env/config contract, it will hit
  * the right endpoint with the right model." It does NOT prove the real CLI
  * binary actually reads that env var / config file the way its docs say —
@@ -148,7 +148,7 @@ describe('custom-model-injection contract (mock server)', () => {
   // SDK appends the path itself. Whether each of these TWO CLIs' own OpenAI-compatible
   // client expects the var to already include /v1 (the common OpenAI-SDK convention) or
   // appends it itself is genuinely CLI-specific and UNVERIFIED (see the confidence table
-  // in deployment_plan.md) — these tests model the common OpenAI-SDK convention (base_url
+  // in docs/custom-model-endpoints-plan.md) — these tests model the common OpenAI-SDK convention (base_url
   // ends in /v1) since that's the more likely behavior for an OpenAI-compatible client,
   // but that assumption should be corrected here the moment it's checked against a real
   // binary. (grok WAS in this group too, until live-testing showed the whole `env` recipe

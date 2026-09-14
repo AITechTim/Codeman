@@ -35,6 +35,26 @@ function expectRejected(mutate: (entry: Record<string, unknown>) => void, becaus
   expect(result.success, `expected rejection: ${because}`).toBe(false);
 }
 
+describe('customModelInjection.launchModel', () => {
+  it('rejects a template with characters the argv engine would have to quote', () => {
+    expectRejected((e) => {
+      const caps = e.capabilities as Record<string, unknown>;
+      caps.customModelInjection = { ...(caps.customModelInjection as object), launchModel: 'custom/{modelId} --yolo' };
+    }, 'a space in the launch-model template');
+    expectRejected((e) => {
+      const caps = e.capabilities as Record<string, unknown>;
+      caps.customModelInjection = { ...(caps.customModelInjection as object), launchModel: '' };
+    }, 'an empty launch-model template');
+  });
+
+  it('accepts the placeholder form the stock entries use', () => {
+    const entry = baseEntry();
+    const caps = entry.capabilities as Record<string, unknown>;
+    caps.customModelInjection = { ...(caps.customModelInjection as object), launchModel: 'custom/{modelId}' };
+    expect(CliEntrySchema.safeParse(entry).success).toBe(true);
+  });
+});
+
 describe('the shipped catalog', () => {
   it('validates every stock entry exactly as shipped', () => {
     // If this fails, the catalog cannot load at all — every other test here is downstream.

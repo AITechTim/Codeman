@@ -1,10 +1,26 @@
 /**
  * @fileoverview Route tests for Custom Model Endpoint Profiles CRUD + discovery.
+ *
+ * Discovery is mocked at `webviewFetch()` (webview-egress.ts), NOT at the global
+ * `fetch`: the route deliberately goes through the guarded undici dispatcher whose
+ * lookup hook refuses a name that resolves into a link-local / cloud-metadata range,
+ * so a global-fetch stub that still satisfied these tests would mean the guard had
+ * been bypassed.
  * Port: N/A (app.inject, no real port needed)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { registerCustomModelRoutes } from '../../src/web/routes/custom-model-routes.js';
+import { webviewFetch } from '../../src/web/webview-egress.js';
 import { createRouteTestHarness } from './_route-test-utils.js';
+
+vi.mock('../../src/web/webview-egress.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/web/webview-egress.js')>(
+    '../../src/web/webview-egress.js'
+  );
+  return { ...actual, webviewFetch: vi.fn() };
+});
+
+const fetchMock = vi.mocked(webviewFetch);
 
 async function setup() {
   return createRouteTestHarness(registerCustomModelRoutes);
@@ -12,7 +28,7 @@ async function setup() {
 
 describe('custom model endpoint CRUD', () => {
   afterEach(() => {
-    vi.unstubAllGlobals();
+    fetchMock.mockReset();
   });
 
   it('starts empty', async () => {
@@ -88,18 +104,18 @@ describe('custom model endpoint CRUD', () => {
       payload: { id: 'ep1', label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'k' },
     });
 
-    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      expect(url).toBe('http://localhost:8080/v1/models');
+    fetchMock.mockImplementation(async (url: URL, init?: RequestInit) => {
+      expect(url.href).toBe('http://localhost:8080/v1/models');
       const headers = init?.headers as Record<string, string>;
       // Exactly ONE auth header — never both (a real server hung when sent both).
       expect(headers.Authorization).toBe('Bearer k');
       expect(headers['api-key']).toBeUndefined();
       return new Response(JSON.stringify({ data: [{ id: 'qwen3' }, { id: 'llama3' }] }), { status: 200 });
     });
-    vi.stubGlobal('fetch', fetchMock);
 
     const res = await app.inject({ method: 'POST', url: '/api/model-endpoints/ep1/discover-models' });
     expect(res.json().data.models).toEqual(['qwen3', 'llama3']);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // Data dir is shared across this WHOLE test file (one temp HOME per file, not per
     // test — test/setup.ts), so find by id rather than assuming index 0.
@@ -117,13 +133,12 @@ describe('custom model endpoint CRUD', () => {
       payload: { id: 'ep-azure', label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'k', authStyle: 'api-key' },
     });
 
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (_url: URL, init?: RequestInit) => {
       const headers = init?.headers as Record<string, string>;
       expect(headers['api-key']).toBe('k');
       expect(headers.Authorization).toBeUndefined();
       return new Response(JSON.stringify({ data: [] }), { status: 200 });
     });
-    vi.stubGlobal('fetch', fetchMock);
 
     await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-azure/discover-models' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -136,16 +151,46 @@ describe('custom model endpoint CRUD', () => {
       url: '/api/model-endpoints',
       payload: { id: 'ep-err', label: 'A', baseUrl: 'http://localhost:8080' },
     });
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        throw new Error('connect ECONNREFUSED');
-      })
+    // undici's shape: a bare `fetch failed` with the real reason one level down.
+    fetchMock.mockRejectedValue(
+      new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED 127.0.0.1:8080') })
     );
 
     const res = await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-err/discover-models' });
     expect(res.json().success).toBe(false);
     expect(res.json().errorCode).toBe('OPERATION_FAILED');
     expect(res.json().error).toContain('ECONNREFUSED');
+  });
+
+  it('names the egress refusal when the endpoint resolves into a blocked range', async () => {
+    const { app } = await setup();
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-meta', label: 'A', baseUrl: 'http://models.example:8080' },
+    });
+    const { WebviewEgressBlockedError } = await vi.importActual<typeof import('../../src/web/webview-egress.js')>(
+      '../../src/web/webview-egress.js'
+    );
+    fetchMock.mockRejectedValue(
+      new TypeError('fetch failed', { cause: new WebviewEgressBlockedError('resolves to 169.254.169.254') })
+    );
+
+    const res = await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-meta/discover-models' });
+    expect(res.json().success).toBe(false);
+    expect(res.json().error).toMatch(/refused.*169\.254\.169\.254/);
+  });
+
+  it('refuses a baseUrl with embedded credentials or a non-http scheme at save time', async () => {
+    const { app } = await setup();
+    for (const baseUrl of ['http://user:pw@host:8080', 'ftp://host/models', 'http://169.254.169.254']) {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/model-endpoints',
+        payload: { id: 'bad', label: 'A', baseUrl },
+      });
+      expect(res.json().success, baseUrl).toBe(false);
+      expect(res.json().errorCode, baseUrl).toBe('INVALID_INPUT');
+    }
   });
 });

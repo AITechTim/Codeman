@@ -1738,21 +1738,34 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Key validation is strict (`/^[A-Z_][A-Z0-9_]*$/`) as defense-in-depth against
    * shell-metachar injection even if upstream schema check is bypassed.
    */
-  private applyEnvOverrides(muxName: string, envOverrides?: Record<string, string>): void {
+  private applyEnvOverrides(muxName: string, envOverrides?: Record<string, string>, unsetKeys?: string[]): void {
+    const VALID_KEY = /^[A-Z_][A-Z0-9_]*$/;
     // Legacy cleanup: pre-0.7.2 set CLAUDE_CODE_EFFORT_LEVEL via setenv, which persists
     // on the tmux session and hard-locks /effort switching in every respawned pane.
     // Effort now flows as a `--settings` soft default (see buildEffortSettingsFlag),
     // so unconditionally unset the stale var before applying current overrides.
-    try {
-      execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} -u CLAUDE_CODE_EFFORT_LEVEL`, {
-        timeout: EXEC_TIMEOUT_MS,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch {
-      /* Non-critical — var may not exist */
+    //
+    // The caller's own unsets ride the same path, and run BEFORE the overrides are
+    // (re)applied: a key that is both unset and present in `envOverrides` ends up set,
+    // so a stale unset can never clobber a live value. Removing a key from the map is
+    // not enough on its own — `setenv` persists at the tmux-session level and is
+    // inherited by `respawn-pane`, measured: `setenv FOO bar` survived two successive
+    // `respawn-pane -k`. Clearing a custom-model selection is what needs this.
+    for (const key of ['CLAUDE_CODE_EFFORT_LEVEL', ...(unsetKeys ?? [])]) {
+      if (!VALID_KEY.test(key)) {
+        console.warn(`[TmuxManager] Skipping invalid env unset key: ${JSON.stringify(key)}`);
+        continue;
+      }
+      try {
+        execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} -u ${key}`, {
+          timeout: EXEC_TIMEOUT_MS,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch {
+        /* Non-critical — var may not exist */
+      }
     }
     if (!envOverrides) return;
-    const VALID_KEY = /^[A-Z_][A-Z0-9_]*$/;
     for (const [key, value] of Object.entries(envOverrides)) {
       if (!value) continue; // Skip empty — nothing to set
       if (!VALID_KEY.test(key)) {
@@ -2208,6 +2221,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       ompConfig,
       resumeSessionId,
       envOverrides,
+      unsetEnvKeys,
       effort,
       remote,
       docker,
@@ -2269,8 +2283,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       );
       this._configureStatusLineUserCommand(muxName, userStatusLineCommand);
 
-      // Re-apply user env overrides before respawn so the new shell inherits them.
-      this.applyEnvOverrides(muxName, envOverrides);
+      // Re-apply user env overrides before respawn so the new shell inherits them,
+      // dropping the ones the caller retired first (see applyEnvOverrides).
+      this.applyEnvOverrides(muxName, envOverrides, unsetEnvKeys);
 
       // -c /tmp + cd bounce — see createSession() for rationale (stale FUSE state).
       const launchCmd = remote || docker ? fullCmd : `cd ${JSON.stringify(workingDir)} && ${fullCmd}`;

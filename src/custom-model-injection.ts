@@ -1,6 +1,6 @@
 /**
  * @fileoverview Pure builder for the Custom Model Endpoint Profiles feature
- * (deployment_plan.md): turns a CLI registry entry's
+ * (docs/custom-model-endpoints-plan.md): turns a CLI registry entry's
  * `capabilities.customModelInjection` declaration, a configured endpoint,
  * and a chosen model id into the concrete env vars / config-file content
  * that would redirect that CLI's session at the endpoint.
@@ -20,7 +20,7 @@
  * Chat-Completions server (llama.cpp, llama-swap, most local setups) does
  * NOT implement the Responses API — so codex may still fail at the
  * PROTOCOL level even with a correctly-shaped config file. That gap is
- * real and current, not a stale warning; see deployment_plan.md. The rest
+ * real and current, not a stale warning; see docs/custom-model-endpoints-plan.md. The rest
  * (gemini/pi/grok/deepseek/omp) have their ONE-SHOT INVOCATION flags
  * confirmed against real installed binaries' own `--help` output, but
  * their custom-endpoint env/config conventions remain web-researched,
@@ -42,6 +42,8 @@ export interface EnvInjection {
   kind: 'env';
   /** Ready to merge into a session's envOverrides. */
   envOverrides: Record<string, string>;
+  /** See {@link ConfigDirInjection.launchModel}. */
+  launchModel?: string;
 }
 
 export interface ConfigDirInjection {
@@ -57,6 +59,13 @@ export interface ConfigDirInjection {
    * or the config points at a credential that was never actually set.
    */
   extraEnv?: Record<string, string>;
+  /**
+   * The value the CLI's `model` launch param must carry for it to SELECT the injected
+   * provider (pi/omp: `custom/<modelId>`; grok: the `[model.<name>]` block name). Absent
+   * when the config alone selects the model. Rendered from the registry entry's
+   * `customModelInjection.launchModel` template, never hand-built per CLI.
+   */
+  launchModel?: string;
 }
 
 export interface UnsupportedInjection {
@@ -93,22 +102,36 @@ export function buildCustomModelInjection(
         [cap.apiKeyVar]: apiKey,
       };
       for (const modelVar of cap.modelVars) envOverrides[modelVar] = modelId;
-      return { kind: 'env', envOverrides };
+      return withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
     }
 
     case 'configContentEnv': {
       const content = renderConfigContent(cap.template, endpoint, modelId, apiKey);
-      return { kind: 'env', envOverrides: { [cap.envVar]: content } };
+      return withLaunchModel({ kind: 'env', envOverrides: { [cap.envVar]: content } }, cap.launchModel, modelId);
     }
 
     case 'configDir': {
       const { content, extraEnv } = renderConfigFile(cap.template, endpoint, modelId, apiKey);
-      return { kind: 'configDir', dirEnvVar: cap.dirEnvVar, files: [{ relPath: cap.fileName, content }], extraEnv };
+      return withLaunchModel(
+        { kind: 'configDir', dirEnvVar: cap.dirEnvVar, files: [{ relPath: cap.fileName, content }], extraEnv },
+        cap.launchModel,
+        modelId
+      );
     }
 
     case 'unsupported':
       return { kind: 'unsupported' };
   }
+}
+
+/** Render a `launchModel` template (`{modelId}` = the chosen id) onto an injection result. */
+function withLaunchModel<T extends EnvInjection | ConfigDirInjection>(
+  result: T,
+  template: string | undefined,
+  modelId: string
+): T {
+  if (!template) return result;
+  return { ...result, launchModel: template.split('{modelId}').join(modelId) };
 }
 
 function renderConfigContent(

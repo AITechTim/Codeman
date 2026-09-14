@@ -67,6 +67,10 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
+import { getCli } from '../config/cli-registry/registry.js';
+import { readCustomModelHosts } from '../custom-model-hosts.js';
+import { applyCustomModelInjection, customModelConfigDir, removeConfigDir } from '../custom-model-injection-apply.js';
+import type { CustomModelBookkeeping } from '../types/session.js';
 import { registerGeneratedArtifactAttachment } from '../generated-artifact-attachments.js';
 import {
   buildDetectedAttachmentHistoryItem,
@@ -1181,6 +1185,34 @@ export class WebServer extends EventEmitter {
     });
   }
 
+  /**
+   * Recovery half of Custom Model Endpoint Profiles: the env values a selection injects
+   * are never persisted (they carry the API key), so they are computed again from the
+   * endpoint store, through the SAME apply path the route uses. Undefined when the
+   * endpoint is gone or the CLI is unregistered: the bookkeeping is still restored so
+   * the selection can be cleared, and the pane keeps running on tmux's retained env.
+   */
+  private async _rebuildCustomModelEnv(
+    session: Session,
+    saved: CustomModelBookkeeping
+  ): Promise<Record<string, string> | undefined> {
+    const entry = getCli(session.mode);
+    if (!entry) return undefined;
+    const endpoint = (await readCustomModelHosts(getDataDir())).find((h) => h.id === saved.endpointId);
+    if (!endpoint) {
+      console.warn(
+        `[WebServer] custom-model endpoint ${saved.endpointId} no longer exists; selection kept for clearing`
+      );
+      return undefined;
+    }
+    try {
+      return applyCustomModelInjection(entry, endpoint, saved.modelId, session.id)?.envOverrides;
+    } catch (err) {
+      console.warn('[WebServer] Failed to rebuild custom-model env on recovery:', err);
+      return undefined;
+    }
+  }
+
   /** Persists full session state including respawn config to state.json */
   private _persistSessionStateNow(session: Session): void {
     // See session-manager.updateSessionState: __envOverrides is an internal disk-only
@@ -1190,10 +1222,14 @@ export class WebServer extends EventEmitter {
     // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
     // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
+    // __customModel keeps the selection's bookkeeping (injected env KEYS, config dir,
+    // launch model; never the values) so recovery can restore and later clear it.
+    const customModel = session.getCustomModelForPersist();
     const state = {
       ...base,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
+      ...(customModel ? { __customModel: customModel } : {}),
     } as SessionState;
     const controller = this.respawnControllers.get(session.id);
     if (controller) {
@@ -1396,6 +1432,9 @@ export class WebServer extends EventEmitter {
       // come back to a loader whose file we deleted.
       if (killMux) {
         void removeAgentSessionPreamble(sessionId);
+        // The per-session custom-model config dir carries the endpoint's API key (pi and
+        // omp embed it literally); it must not outlive the session it was written for.
+        removeConfigDir(customModelConfigDir(sessionId));
       }
       await session.stop(killMux);
       this.sessions.delete(sessionId);
@@ -2853,6 +2892,7 @@ export class WebServer extends EventEmitter {
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
             const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
+            const savedCustomModel = (savedState as { __customModel?: CustomModelBookkeeping })?.__customModel;
             // Prefer the private (externalPath-bearing) history; fall back to the
             // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =
@@ -2914,6 +2954,16 @@ export class WebServer extends EventEmitter {
               // when both tabs are on screen.
               parentSessionId: savedState?.parentSessionId,
             });
+
+            // Custom-model selection survives the restart. The tmux session still carries
+            // the injected `setenv`s (that is what kept the pane on the endpoint across the
+            // restart), but `_envOverrides` is rebuilt from a persist that deliberately
+            // excludes them, so re-derive the values from the endpoint store and re-write
+            // the isolated config dir; an endpoint that has since been deleted still gets
+            // the bookkeeping restored, which is what a later clear needs to unset.
+            if (savedCustomModel) {
+              session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+            }
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name
             if (savedState?.name && muxSession.name !== savedState.name) {

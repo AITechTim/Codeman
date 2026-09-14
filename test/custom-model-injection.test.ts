@@ -9,7 +9,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { getCli } from '../src/config/cli-registry/index.js';
-import { buildCustomModelInjection, withV1Suffix, type CustomModelEndpoint } from '../src/custom-model-injection.js';
+import {
+  buildCustomModelInjection,
+  withV1Suffix,
+  GROK_CUSTOM_MODEL_NAME,
+  type CustomModelEndpoint,
+} from '../src/custom-model-injection.js';
 
 const endpoint: CustomModelEndpoint = {
   id: 'ep1',
@@ -154,5 +159,30 @@ describe('buildCustomModelInjection', () => {
   it('shell: unsupported', () => {
     const result = buildCustomModelInjection(entryOrThrow('shell'), endpoint, 'qwen3');
     expect(result).toEqual({ kind: 'unsupported' });
+  });
+});
+
+describe('launchModel (the model launch param that selects the injected provider)', () => {
+  it('pi and omp get --model custom/<modelId>: the config file alone leaves them on their default provider', () => {
+    for (const id of ['pi', 'omp']) {
+      const result = buildCustomModelInjection(entryOrThrow(id), endpoint, 'qwen3.5-0.8b');
+      if (result.kind !== 'configDir') throw new Error('unreachable');
+      expect(result.launchModel, id).toBe('custom/qwen3.5-0.8b');
+    }
+  });
+
+  it('grok gets the [model.<name>] block name, pinned to the constant the config template writes', () => {
+    const result = buildCustomModelInjection(entryOrThrow('grok'), endpoint, 'qwen3');
+    if (result.kind !== 'configDir') throw new Error('unreachable');
+    expect(result.launchModel).toBe(GROK_CUSTOM_MODEL_NAME);
+    expect(result.files[0].content).toContain(`[model.${GROK_CUSTOM_MODEL_NAME}]`);
+  });
+
+  it('CLIs whose config selects the model on its own declare none', () => {
+    for (const id of ['claude', 'opencode', 'codex', 'gemini', 'deepseek']) {
+      const result = buildCustomModelInjection(entryOrThrow(id), endpoint, 'qwen3');
+      if (result.kind === 'unsupported') throw new Error('unreachable');
+      expect(result.launchModel, id).toBeUndefined();
+    }
   });
 });

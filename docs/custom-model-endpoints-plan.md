@@ -2,7 +2,7 @@
 
 ## Context
 
-Devvyn pays for Claude Code but also runs a capable local model behind an
+The author pays for Claude Code but also runs a capable local model behind an
 OpenAI-compatible server (llama.cpp) — and wants the same mechanism to work
 against a **cloud** OpenAI-compatible endpoint too (e.g. Azure AI Foundry's
 OpenAI-compatible inference endpoint, OpenRouter, a self-hosted gateway).
@@ -60,15 +60,15 @@ also notable for already wiring up DeepSeek Harness and Claude Code as
 coding agents against that local server itself, which is effectively the
 same "point a Codeman-supported harness at a local endpoint" idea this
 feature is generalizing — worth using as a real-world reference/test target
-once chunk 5 (session integration) exists, alongside Devvyn's own llama.cpp
+once chunk 5 (session integration) exists, alongside the author's own llama.cpp
 box.
 
 Each harness has its own (different-shaped) mechanism for pointing at a
 custom OpenAI-compatible base URL + model — env vars for Claude, a JSON
-config blob for opencode, a TOML file for Codex, etc. Devvyn gave the
+config blob for opencode, a TOML file for Codex, etc. The author gave the
 starting recipes for those three; the rest (Gemini, Pi, Grok, DeepSeek, OMP,
 Antigravity) were researched for this plan and are flagged by confidence
-below. A real end-to-end pass against Devvyn's own llama-swap server
+below. A real end-to-end pass against the author's own llama-swap server
 (`scripts/test-local-llm-harnesses.ts`, inside a `codeman/agent:llm-test`
 Docker image with all 9 CLIs installed) then confirmed **claude and
 opencode work end-to-end**, corrected a real Codex config.toml schema bug
@@ -89,7 +89,7 @@ The feature must be:
   or a model discovered from one of the configured custom endpoints.
 - Picking a custom-endpoint model for an **already-running session restarts
   that session's CLI process** with the injected env/config pointed at that
-  endpoint (confirmed with Devvyn — these harnesses read endpoint config at
+  endpoint (confirmed with the maintainer — these harnesses read endpoint config at
   process start, not per-turn, so a live hot-swap isn't possible).
 - **New sessions always default back to the harness's native cloud backend.**
   A custom-endpoint selection is a per-session override, not a sticky global
@@ -269,7 +269,7 @@ mode, same as remote/docker hosts.
 
 ## Mock-server validation strategy (CI-runnable, no real CLI binaries needed)
 
-Spawning nine real CLI binaries in CI isn't realistic, and neither Devvyn's
+Spawning nine real CLI binaries in CI isn't realistic, and neither the author's
 llama.cpp box nor a real cloud subscription can be a CI dependency. So the
 injection _logic_ gets a tier of automated coverage that sits between the
 pure unit tests and the live manual checks in Verification:
@@ -342,7 +342,7 @@ pure unit tests and the live manual checks in Verification:
    Codeman's UI entirely, and is DYNAMIC (reads `enabledClis()` + calls the
    real `buildCustomModelInjection()`, so a future registry change is picked
    up automatically with zero edits to the script). Already run to
-   completion against Devvyn's llama-swap server (`http://10.10.11.241:8080`,
+   completion against the author's llama-swap server (a LAN address,
    inside a `codeman/agent:llm-test` Docker image with all 9 CLI binaries):
    claude/opencode/pi/grok/omp **PASS**, codex **FAILs as expected**
    (Responses-API protocol gap, not a bug), gemini/deepseek **UNCONFIRMED**

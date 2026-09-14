@@ -1,8 +1,11 @@
 /**
  * @fileoverview Read/write-array store for user-configured custom OpenAI-compatible
- * model endpoints (local or cloud — deployment_plan.md). Same shape as
- * `remote-hosts.ts` / `webview-store.ts`: `~/.codeman/custom-model-hosts.json`
- * holding a plain array, read/written whole.
+ * model endpoints (local or cloud — docs/custom-model-endpoints-plan.md). Same
+ * shape as `remote-hosts.ts` / `webview-store.ts`: `~/.codeman/custom-model-hosts.json`
+ * holding a plain array, read/written whole. The file can hold API keys, so it is
+ * written 0600 via tmp+rename like `intents.json` (`mode` on `writeFile` applies only
+ * to a file being created; the rename is what keeps an existing file's bytes and
+ * mode from ever being observable half-written or world-readable).
  */
 
 import { existsSync, mkdirSync } from 'node:fs';
@@ -55,5 +58,8 @@ export async function readCustomModelHosts(configDir: string): Promise<CustomMod
 
 export async function writeCustomModelHosts(configDir: string, hosts: CustomModelHost[]): Promise<void> {
   if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
-  await fs.writeFile(customModelHostsPath(configDir), JSON.stringify(hosts, null, 2));
+  const target = customModelHostsPath(configDir);
+  const tmp = `${target}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(hosts, null, 2), { mode: 0o600 });
+  await fs.rename(tmp, target);
 }

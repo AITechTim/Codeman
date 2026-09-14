@@ -228,7 +228,7 @@ const CLAUDE: CliEntry = {
     privilegedParams: [],
     // ANTHROPIC_* is NOT in allowedPrefixes/allowedKeys above (deliberately — see the
     // allowedPrefixes comment nearby), so these are unreachable via plain envOverrides
-    // today; listed here only so the dedicated custom-model route (deployment_plan.md
+    // today; listed here only so the dedicated custom-model route (docs/custom-model-endpoints-plan.md
     // chunk 5) clamps them for a non-granted multi-user owner the same way every other
     // CLI's injection vars are clamped, the day that route widens who can set them.
     privilegedEnvKeys: [
@@ -239,7 +239,7 @@ const CLAUDE: CliEntry = {
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
     ],
     gates: { nameFlag: { minVersion: '2.1.224', failClosed: true } },
-    // Custom Model Endpoint Profiles (deployment_plan.md) — verified by hand against a real
+    // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — verified by hand against a real
     // llama.cpp server. Claude reads these at process start only, so switching requires a
     // respawn, never a live hot-swap.
     customModelInjection: {
@@ -781,6 +781,10 @@ const PI: CliEntry = {
       dirEnvVar: 'HOME',
       fileName: '.pi/agent/models.json',
       template: 'pi-models-json',
+      // Writing models.json is not enough: without `--model custom/<id>` pi stays on its
+      // own default provider and fails with "No API key found for the selected model"
+      // (confirmed live). `custom` is the provider name pi-models-json declares.
+      launchModel: 'custom/{modelId}',
     },
     // HOME is not `PI_`-prefixed, so unlike the old (wrong) PI_CONFIG_DIR guess this was
     // never reachable via the generic envOverrides allowlist at all — listed here anyway,
@@ -895,6 +899,10 @@ const GROK: CliEntry = {
       dirEnvVar: 'GROK_HOME',
       fileName: 'config.toml',
       template: 'grok-toml',
+      // The `[model.<name>]` block the grok-toml template writes; `--model <name>` is what
+      // selects it (GROK_CUSTOM_MODEL_NAME in custom-model-injection.ts, pinned equal by
+      // test/custom-model-injection.test.ts so the two cannot drift).
+      launchModel: 'codeman-custom',
     },
     // GROK_HOME already matches the GROK_ allowedPrefix above, so it was ALREADY
     // reachable via plain envOverrides before this feature existed — same reasoning
@@ -1189,6 +1197,9 @@ const OMP: CliEntry = {
       dirEnvVar: 'HOME',
       fileName: '.omp/agent/models.yml',
       template: 'omp-models-yml',
+      // Same as pi: omp's own default model has no credential, so without an explicit
+      // `--model custom/<id>` it never reaches the injected provider at all.
+      launchModel: 'custom/{modelId}',
     },
   },
   overlays: {

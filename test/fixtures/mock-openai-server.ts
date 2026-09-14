@@ -1,6 +1,6 @@
 /**
  * @fileoverview In-process fake OpenAI/Anthropic-compatible HTTP server for the
- * Custom Model Endpoint Profiles contract tests (deployment_plan.md chunk 7).
+ * Custom Model Endpoint Profiles contract tests (docs/custom-model-endpoints-plan.md chunk 7).
  *
  * No external deps — plain `node:http`. Captures every request it receives
  * (method, path, headers, parsed JSON body) so a test can assert the injected

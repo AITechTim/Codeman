@@ -330,21 +330,42 @@ export class MockSession extends EventEmitter {
     this.color = c;
   });
 
-  /** Custom Model Endpoint Profiles (deployment_plan.md) */
+  /** Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) */
   customModel: { endpointId: string; modelId: string; label?: string } | undefined = undefined;
-  private _mockCustomModelConfigDir: string | undefined;
+  remote: unknown = undefined;
+  docker: unknown = undefined;
+  private _mockCustomModel:
+    | {
+        endpointId: string;
+        modelId: string;
+        label?: string;
+        envKeys: string[];
+        configDir?: string;
+        launchModel?: string;
+      }
+    | undefined;
   setCustomModel = vi.fn(
     (
-      next: { endpointId: string; modelId: string; label?: string; envKeys: string[]; configDir?: string } | undefined,
+      next:
+        | {
+            endpointId: string;
+            modelId: string;
+            label?: string;
+            envKeys: string[];
+            configDir?: string;
+            launchModel?: string;
+          }
+        | undefined,
       _envOverrides?: Record<string, string>
-    ): string | undefined => {
-      const previous = this._mockCustomModelConfigDir;
-      this._mockCustomModelConfigDir = next?.configDir;
+    ): { removedEnvKeys: string[]; previousConfigDir: string | undefined } => {
+      const previous = this._mockCustomModel;
+      this._mockCustomModel = next;
       this.customModel = next ? { endpointId: next.endpointId, modelId: next.modelId, label: next.label } : undefined;
-      return previous;
+      return { removedEnvKeys: previous?.envKeys ?? [], previousConfigDir: previous?.configDir };
     }
   );
   restartCli = vi.fn(async () => true);
+  getCustomModelForPersist = vi.fn(() => this._mockCustomModel);
 
   /** Stub for sendInput */
   sendInput = vi.fn();

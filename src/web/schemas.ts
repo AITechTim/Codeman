@@ -739,29 +739,6 @@ export const RemoteHostSchema = z.object({
   commands: RemoteCommandOverridesSchema,
 });
 
-// Custom Model Endpoint Profiles (deployment_plan.md) — a user-configured custom
-// OpenAI-compatible endpoint, local (llama.cpp) or cloud (Azure AI Foundry, etc.).
-export const CustomModelHostSchema = z.object({
-  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
-  label: z.string().min(1).max(100),
-  baseUrl: z.string().url().max(2048),
-  apiKey: z.string().max(4096).optional(),
-  // No 'both': live-tested against a real server, sending both auth header
-  // conventions on one request reliably HANGS it — see custom-model-hosts.ts.
-  authStyle: z.enum(['bearer', 'api-key']).optional(),
-  models: z.array(z.string().max(200)).max(200).optional(),
-  lastDiscoveredAt: z.string().max(64).optional(),
-});
-
-/** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */
-export const CustomModelSelectionSchema = z.union([
-  z.object({
-    endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
-    modelId: z.string().min(1).max(200),
-  }),
-  z.object({ clear: z.literal(true) }),
-]);
-
 export const RemoteCaseLinkSchema = z.object({
   name: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid case name format'),
   hostId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid remote host id'),
@@ -1261,7 +1238,7 @@ export const SettingsUpdateSchema = z
      */
     readMyMindEnabled: z.boolean().optional(),
     /**
-     * Custom Model Endpoint Profiles (deployment_plan.md): the toolbar picker that lets a
+     * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): the toolbar picker that lets a
      * session point at a user-configured custom OpenAI-compatible endpoint (local or
      * cloud) instead of its native cloud backend. SYNCED, default OFF — endpoint entry,
      * discovery, and the extra toolbar surface are all opt-in.
@@ -1918,3 +1895,29 @@ export const WebviewUpdateSchema = WebviewBaseSchema.partial();
 
 /** POST /api/webviews/probe: reachability + framing check for the editor's Test button. */
 export const WebviewProbeSchema = z.object({ url: webviewUrlSchema });
+
+// Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — a
+// user-configured custom OpenAI-compatible endpoint, local (llama.cpp) or cloud
+// (Azure AI Foundry, etc.). Lives below `webviewUrlSchema` because `baseUrl` IS that
+// schema: http(s) only, a real hostname, no embedded credentials, and the link-local /
+// cloud-metadata refusal, the same bar a saved dashboard URL has to clear.
+export const CustomModelHostSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+  label: z.string().min(1).max(100),
+  baseUrl: webviewUrlSchema,
+  apiKey: z.string().max(4096).optional(),
+  // No 'both': live-tested against a real server, sending both auth header
+  // conventions on one request reliably HANGS it — see custom-model-hosts.ts.
+  authStyle: z.enum(['bearer', 'api-key']).optional(),
+  models: z.array(z.string().max(200)).max(200).optional(),
+  lastDiscoveredAt: z.string().max(64).optional(),
+});
+
+/** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */
+export const CustomModelSelectionSchema = z.union([
+  z.object({
+    endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+    modelId: z.string().min(1).max(200),
+  }),
+  z.object({ clear: z.literal(true) }),
+]);

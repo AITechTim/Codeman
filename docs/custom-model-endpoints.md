@@ -9,7 +9,7 @@ services (Azure AI Foundry's OpenAI-compatible endpoint, OpenRouter, a
 company gateway) — anything answering `GET /v1/models` and
 `POST /v1/chat/completions` in the standard shape. Design doc, per-CLI
 recipe confidence table, and security reasoning:
-[`deployment_plan.md`](../deployment_plan.md).
+[`custom-model-endpoints-plan.md`](custom-model-endpoints-plan.md).
 
 > **Status**: backend is implemented and tested (registry capability, the
 > injection engine, the endpoint store + discovery route, the session
@@ -21,7 +21,10 @@ recipe confidence table, and security reasoning:
 ## Turning it on
 
 App Settings → Agents & CLIs → **Custom Model Endpoints** (synced setting
-`customModelEndpointsEnabled`, default **OFF**). The API equivalent:
+`customModelEndpointsEnabled`, default **OFF**). Until the toolbar picker
+lands, nothing reads this setting: the HTTP routes below work whether it is
+on or off, and it exists now only so the picker has a switch to hang off
+when it ships. The API equivalent:
 
 ```bash
 curl -sk -X PUT https://localhost:3000/api/settings \
@@ -38,9 +41,14 @@ curl -sk -X POST https://localhost:3000/api/model-endpoints \
 ```
 
 `apiKey` is optional (most local servers don't check it). `authStyle`
-(`bearer` | `api-key` | `both`, default `both`) controls which auth header
-convention discovery uses — `both` works whether the endpoint is llama.cpp
-(ignores the header) or a cloud gateway like Azure (wants `api-key`).
+(`bearer` | `api-key`, default `bearer`) controls which auth header
+convention discovery uses: `bearer` is `Authorization: Bearer <key>`
+(llama.cpp, OpenAI-compatible servers, most gateways), `api-key` is the
+`api-key: <key>` header Azure AI Foundry wants. There is deliberately no
+"send both" option: measured against a real llama-swap server, a request
+carrying both headers hung indefinitely. `baseUrl` must be `http(s)`, carry
+no embedded credentials, and may not point at a link-local or cloud-metadata
+address; discovery re-checks the address the name actually resolves to.
 
 Discover its available models:
 
@@ -63,16 +71,35 @@ curl -sk -X POST https://localhost:3000/api/sessions/<sessionId>/custom-model \
 ```
 
 This computes the CLI-specific env vars / config for that session's mode
-(see the recipe table in `deployment_plan.md`) and **restarts the session's
+(see the recipe table in `custom-model-endpoints-plan.md`) and **restarts the session's
 CLI process in place** — same pane, same tmux session, fresh env. That
 restart is necessary, not incidental: every supported harness reads its
 endpoint config at process start, not per-turn, so there is no live
-hot-swap. Clear back to the harness's native cloud default with:
+hot-swap. A Claude session is relaunched with `--resume <conversation> ||
+--session-id <id>`, so it continues the conversation it was on; pi, omp and
+grok are relaunched with the `--model` value that selects the injected
+provider (`custom/<modelId>` for pi and omp, `codeman-custom` for grok),
+since for those three the config file alone does not switch the model.
+**Remote (SSH) and Docker sessions are refused** (400) for now: their restart
+reattaches the durable remote/in-container tmux rather than relaunching the
+agent, so the selection would report success and change nothing.
+
+Clear back to the harness's native cloud default with:
 
 ```bash
 curl -sk -X POST https://localhost:3000/api/sessions/<sessionId>/custom-model \
   -H 'Content-Type: application/json' -d '{"clear": true}'
 ```
+
+Clearing also removes the env vars the selection injected from the tmux
+session (they persist there and would otherwise be inherited by the
+relaunched CLI) and deletes the per-session config directory
+(`~/.codeman/custom-model-configs/<sessionId>`, written 0600 because pi and
+omp embed the API key in it). That directory is also removed when the
+session is deleted. The selection survives a Codeman restart: the endpoint
+id, model and injected key NAMES are persisted, the values are re-derived
+from the endpoint store on recovery, and the pane keeps running against the
+endpoint in between because tmux retains its environment.
 
 **New sessions always default back to the harness's native backend.** A
 custom-endpoint selection is a per-session choice, never a sticky global
@@ -101,7 +128,7 @@ automatically). Results:
   gets a consistent `HTTP_404`. Root cause not identified; best-effort only.
 - **Antigravity** — no known custom-endpoint mechanism at all; unsupported.
 
-See the confidence table in `deployment_plan.md` for the full detail behind
+See the confidence table in `custom-model-endpoints-plan.md` for the full detail behind
 each result. `scripts/test-local-llm-harnesses.ts` is the standalone script
 used to check a harness against a real endpoint outside the web UI
 entirely; see its own `--help` for usage.
@@ -115,6 +142,6 @@ non-granted multi-user owner cannot set one directly via the generic
 `envOverrides` API field — only through this feature's own route, which
 computes the value from an admin-configured, SSRF-guarded endpoint rather
 than trusting arbitrary client input. See the "Multi-user security
-hardening" section of `deployment_plan.md` for the full reasoning; several
+hardening" section of `custom-model-endpoints-plan.md` for the full reasoning; several
 of these were reachable via the generic `envOverrides` field even before
 this feature existed, and building this surfaced and closed that gap.

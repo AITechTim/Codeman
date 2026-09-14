@@ -261,6 +261,19 @@ const echoSchema = z
   })
   .strict();
 
+/**
+ * `capabilities.customModelInjection.launchModel`: the `model` launch-param value that
+ * selects the injected provider, with `{modelId}` standing for the chosen id. Bounded to
+ * the characters the `model`/`model-pi` token patterns accept plus the placeholder braces,
+ * so a template can never smuggle a token the argv engine would have to quote.
+ */
+const launchModelTemplate = z
+  .string()
+  .min(1)
+  .max(120)
+  .regex(/^[a-zA-Z0-9._\-/:{}]+$/)
+  .optional();
+
 const capabilitiesSchema = z
   .object({
     external: z.boolean(),
@@ -326,6 +339,7 @@ const capabilitiesSchema = z
           // Empty is valid: deepseek's model routing is a profile-composition concern, not
           // an env var, so it declares baseUrl/apiKey injection with no model var at all.
           modelVars: z.array(envName).max(8),
+          launchModel: launchModelTemplate,
         })
         .strict(),
       z
@@ -333,6 +347,7 @@ const capabilitiesSchema = z
           kind: z.literal('configContentEnv'),
           envVar: envName,
           template: z.literal('opencode-json'),
+          launchModel: launchModelTemplate,
         })
         .strict(),
       z
@@ -341,6 +356,7 @@ const capabilitiesSchema = z
           dirEnvVar: envName,
           fileName: z.string().min(1).max(80),
           template: z.enum(['codex-toml', 'pi-models-json', 'omp-models-yml', 'grok-toml']),
+          launchModel: launchModelTemplate,
         })
         .strict(),
       z.object({ kind: z.literal('unsupported') }).strict(),

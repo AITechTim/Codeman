@@ -460,7 +460,7 @@ export interface CliCapabilities {
   /**
    * How this CLI is pointed at a user-supplied custom OpenAI-compatible
    * endpoint (local, e.g. llama.cpp, or cloud, e.g. Azure AI Foundry) — the
-   * Custom Model Endpoint Profiles feature (`deployment_plan.md`). Declared
+   * Custom Model Endpoint Profiles feature (`docs/custom-model-endpoints-plan.md`). Declared
    * per entry, never branched on id, same as every other capability here.
    *
    * `env`: plain env vars (claude's `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/
@@ -478,7 +478,7 @@ export interface CliCapabilities {
    * because those env vars are not grok's real custom-endpoint mechanism at
    * all. The real one is a `[model.<name>]` block in a `config.toml` under
    * `GROK_HOME` (verified against xAI's own docs), same shape as codex/pi/
-   * omp — this is why the confidence table in deployment_plan.md exists:
+   * omp — this is why the confidence table in docs/custom-model-endpoints-plan.md exists:
    * "researched" web docs can still be plausible-sounding and wrong.
    *
    * Every env var name this introduces that can redirect a session's
@@ -486,15 +486,26 @@ export interface CliCapabilities {
    * `DEEPSEEK_BASE_URL` — a non-granted multi-user owner redirecting a
    * session to their own endpoint is a credential-exfiltration path, not
    * just a mischief redirect.
+   *
+   * `launchModel` is the value the entry's own `model` launch param must carry
+   * for the CLI to SELECT the injected provider, as a template where
+   * `{modelId}` is the chosen model id. Writing the config file is not enough
+   * for pi and omp (`--model custom/<id>`, or the CLI stays on its own default
+   * provider and reports "No API key found for the selected model") or for
+   * grok (`--model codeman-custom`, the `[model.<name>]` block the config
+   * declares). Absent = the config alone selects the model (claude's env vars,
+   * opencode's blob, codex's top-level `model` key). Applied by the session's
+   * respawn options through the entry's `legacyConfigField`, never by id.
    */
   customModelInjection:
-    | { kind: 'env'; baseUrlVar: string; apiKeyVar: string; modelVars: string[] }
-    | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json' }
+    | { kind: 'env'; baseUrlVar: string; apiKeyVar: string; modelVars: string[]; launchModel?: string }
+    | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json'; launchModel?: string }
     | {
         kind: 'configDir';
         dirEnvVar: string;
         fileName: string;
         template: 'codex-toml' | 'pi-models-json' | 'omp-models-yml' | 'grok-toml';
+        launchModel?: string;
       }
     | { kind: 'unsupported' };
 }

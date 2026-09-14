@@ -853,6 +853,52 @@ describe('TmuxManager (unit)', () => {
         nonTestManager.destroy();
       }
     });
+
+    it('unsets retired env keys on the tmux session BEFORE re-applying the live overrides', async () => {
+      // `tmux setenv` persists at the session level and is inherited by `respawn-pane`, so
+      // a key that merely disappears from envOverrides comes back in the relaunched CLI
+      // (measured: `setenv FOO bar` survived two `respawn-pane -k`). Clearing a custom-model
+      // selection names the keys to drop; a key both dropped and re-set must end up SET.
+      const NonTestTmuxManager = await importWithTmuxCommandsEnabled();
+      const nonTestManager = new NonTestTmuxManager();
+      nonTestManager.registerSession({
+        sessionId: 'respawn5678',
+        muxName: 'codeman-abcd5678',
+        pid: 1000,
+        createdAt: Date.now(),
+        workingDir: '/tmp',
+        mode: 'shell',
+        attached: false,
+      });
+
+      try {
+        const pid = await nonTestManager.respawnPane({
+          sessionId: 'respawn5678',
+          workingDir: '/tmp',
+          mode: 'shell',
+          envOverrides: { CLAUDE_CODE_KEEP: '1', ANTHROPIC_API_KEY: 'again' },
+          unsetEnvKeys: ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'not-a-key; rm -rf /'],
+        });
+        expect(pid).toBe(4242);
+
+        const setenvCalls = mockedExecSync.mock.calls
+          .map(([cmd]) => cmd)
+          .filter((cmd): cmd is string => typeof cmd === 'string' && cmd.includes(" setenv -t 'codeman-abcd5678'"));
+        const unsetBase = setenvCalls.findIndex((cmd) => cmd.endsWith(' -u ANTHROPIC_BASE_URL'));
+        const unsetKey = setenvCalls.findIndex((cmd) => cmd.endsWith(' -u ANTHROPIC_API_KEY'));
+        const setKeep = setenvCalls.findIndex((cmd) => cmd.includes(' CLAUDE_CODE_KEEP '));
+        const setKey = setenvCalls.findIndex((cmd) => cmd.includes(' ANTHROPIC_API_KEY ') && !cmd.includes(' -u '));
+        expect(unsetBase).toBeGreaterThanOrEqual(0);
+        expect(unsetKey).toBeGreaterThanOrEqual(0);
+        expect(setKeep).toBeGreaterThan(unsetBase);
+        // Re-set AFTER its own unset, so the live value wins.
+        expect(setKey).toBeGreaterThan(unsetKey);
+        // The shell-metachar key never reaches tmux at all.
+        expect(setenvCalls.some((cmd) => cmd.includes('rm -rf'))).toBe(false);
+      } finally {
+        nonTestManager.destroy();
+      }
+    });
   });
 });
 
