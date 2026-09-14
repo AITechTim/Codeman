@@ -11,14 +11,17 @@ cp docker/.env.example docker/.env
 bash docker/Start-Codeman.sh
 ```
 
-On PowerShell, use the following command instead.
+On PowerShell, use the following commands instead. Running Compose from inside `docker/` with no `-f` lets it discover `docker-compose.override.yml` on its own (see [Local customisation](#local-customisation)); naming the file with `-f docker/docker-compose.yaml` from the repository root silently drops the override unless it is named too.
 
 ```powershell
 Copy-Item docker/.env.example docker/.env
-docker compose --env-file docker/.env -f docker/docker-compose.yaml up --build -d
+Set-Location docker
+docker compose --env-file .env up --build -d
 ```
 
 Every required value is defined and explained in `.env.example`. `GEMINI_API_KEY` is intentionally optional and may remain blank.
+
+The container starts as root so `entrypoint.sh` can correct the ownership of a bind source the Docker daemon created (it creates a missing one as `root:root`), then drops to `PUID:PGID` with `setpriv` before the server starts, so Codeman itself never runs privileged. That drop needs `cap_add: [CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID]` against the file's `cap_drop: ALL`; a compose file written elsewhere (Unraid's Compose Manager, a hand-written unit) must carry the same additions, and the entrypoint names them when they are missing. A directory owned by neither root nor `PUID:PGID` is never re-owned: it is probed for writability as the runtime account and refused with a clear message if that fails. Setting `user:` in Compose skips the whole step.
 
 On Linux, `Start-Codeman.sh` stops with an error when required paths are missing. It creates the application-data directory when safe, detects its numeric owner as `PUID:PGID`, and detects `DOCKER_SOCKET_GID` from the configured Docker socket. It rejects a root-owned application-data directory because Codeman and its local CLI sessions must remain unprivileged.
 
@@ -68,16 +71,9 @@ Add the domain with `CODEMAN_ALLOWED_HOSTS` in `.env`:
 CODEMAN_ALLOWED_HOSTS='codeman.example.com,.internal.example.com'
 ```
 
-`docker-compose.yaml` does not forward this variable into the container - it
-only passes through the environment keys it explicitly lists, and this is not
-one of them. Forward it yourself in `docker-compose.override.yml`:
-
-```yaml
-services:
-  codeman:
-    environment:
-      CODEMAN_ALLOWED_HOSTS: ${CODEMAN_ALLOWED_HOSTS}
-```
+`docker-compose.yaml` forwards it into the container (Compose only passes
+through the environment keys it explicitly lists, and this is one of them, with
+an empty default so the line is optional in `.env`).
 
 See the application's own `docs/wiki/Remote-Access.md` for the full allowlist
 format and the tunnel providers it accepts by default.

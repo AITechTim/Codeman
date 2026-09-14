@@ -33,11 +33,13 @@ On Linux, run the stack with the start script. It determines `PUID` and `PGID` f
 bash docker/Start-Codeman.sh
 ```
 
-On other platforms, run Compose directly. `PUID` and `PGID` default to `1000:1000`; set them in `docker/.env` when the application-data directory has a different owner.
+On other platforms, run Compose directly. `PUID` and `PGID` default to `1000:1000`; set them in `docker/.env` when the application-data directory has a different owner. Naming the file with `-f` disables Compose's own discovery of `docker/docker-compose.override.yml`, so add a second `-f` for it when you keep one (see `docker/README.md`, Local customisation).
 
 ```sh
 docker compose --env-file docker/.env -f docker/docker-compose.yaml up --build -d
 ```
+
+The container starts as root, corrects the ownership of a bind source the daemon had to create, and drops to `PUID:PGID` with `setpriv` before Codeman starts; the capabilities that needs are declared in `docker/docker-compose.yaml` and named by the entrypoint when a compose file written elsewhere lacks them.
 
 Open `http://localhost:3000` and sign in with the username and password from `docker/.env`.
 
