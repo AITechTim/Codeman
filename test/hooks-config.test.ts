@@ -17,6 +17,7 @@ import {
   rmSync,
   symlinkSync,
   statSync,
+  readdirSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { SETTINGS_PATH } from '../src/web/route-helpers.js';
@@ -1401,6 +1402,20 @@ describe('resolveStatusLineCliCommand', () => {
     const stat = statSync(cmd!);
     expect(stat.mode & 0o111).not.toBe(0); // executable
     expect(readFileSync(cmd!, 'utf-8')).toContain('CODEMAN_STATUSLINE_EXPORTER_V');
+  });
+
+  it('refreshes a stale exporter script atomically: executable on arrival, no temp file left behind', async () => {
+    const scriptPath = (await resolveStatusLineCliCommand(testDir, true))!;
+    // Simulate a script an older build wrote (different marker suffix).
+    writeFileSync(scriptPath, '#!/bin/sh\n# CODEMAN_STATUSLINE_EXPORTER_V0\necho stale\n');
+    chmodSync(scriptPath, 0o644);
+
+    const again = await resolveStatusLineCliCommand(testDir, true);
+    expect(again).toBe(scriptPath);
+    expect(readFileSync(scriptPath, 'utf-8')).not.toContain('echo stale');
+    expect(statSync(scriptPath).mode & 0o111).not.toBe(0);
+    const siblings = readdirSync(join(scriptPath, '..')).filter((f) => f.startsWith('statusline-exporter.sh.'));
+    expect(siblings).toEqual([]);
   });
 
   it('never overrides a real, hand-authored statusLine', async () => {

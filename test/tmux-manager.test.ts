@@ -99,6 +99,32 @@ describe('TmuxManager (unit)', () => {
     });
   });
 
+  describe('statusline user-command env', () => {
+    // A tmux setenv survives respawn-pane, so the absence of a user statusline
+    // must UNSET the variable rather than leave a stale one for the exporter
+    // to wrap.
+    it('unsets CODEMAN_USER_STATUSLINE_CMD when the user has no statusline', () => {
+      mockedExecSync.mockClear();
+      (
+        manager as unknown as { _configureStatusLineUserCommand: (m: string, c?: string) => void }
+      )._configureStatusLineUserCommand('codeman-abc', undefined);
+      const cmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
+      expect(cmds.some((c) => c.includes("setenv -t 'codeman-abc' -u CODEMAN_USER_STATUSLINE_CMD"))).toBe(true);
+    });
+
+    it('sets CODEMAN_USER_STATUSLINE_CMD, shell-escaped, when the user has one', () => {
+      mockedExecSync.mockClear();
+      (
+        manager as unknown as { _configureStatusLineUserCommand: (m: string, c?: string) => void }
+      )._configureStatusLineUserCommand('codeman-abc', `printf '%s' "$1" | jq -r .model`);
+      const cmds = mockedExecSync.mock.calls.map((c) => String(c[0]));
+      const setCmd = cmds.find((c) => c.includes('CODEMAN_USER_STATUSLINE_CMD'));
+      expect(setCmd).toBeDefined();
+      expect(setCmd).not.toContain(' -u ');
+      expect(setCmd).toContain("setenv -t 'codeman-abc' CODEMAN_USER_STATUSLINE_CMD ");
+    });
+  });
+
   describe('Codex command builder', () => {
     it('controls decorative TUI animation through Codex config', () => {
       expect(buildCodexCommand({ animations: false })).toBe('codex --config tui.animations=false');

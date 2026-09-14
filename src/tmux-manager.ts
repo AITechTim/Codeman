@@ -1850,16 +1850,24 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * same reasoning that made the exporter script itself necessary (see
    * ensureStatusLineExporterScript's doc comment). Only this ONE line needs
    * shellescape(); the stored value itself is opaque to tmux from then on.
+   *
+   * With NO user command the variable is UNSET rather than left alone: a tmux
+   * setenv survives respawn-pane, so a user who deleted their own statusline
+   * would otherwise keep getting the stale one wrapped (and lose Codeman's
+   * footer print-through) until the tmux session was recreated. Same shape as
+   * the CLAUDE_CODE_EFFORT_LEVEL cleanup in applyEnvOverrides.
    */
   private _configureStatusLineUserCommand(muxName: string, command: string | undefined): void {
-    if (!command) return;
+    const setOrUnset = command
+      ? `CODEMAN_USER_STATUSLINE_CMD ${shellescape(command)}`
+      : '-u CODEMAN_USER_STATUSLINE_CMD';
     try {
-      execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} CODEMAN_USER_STATUSLINE_CMD ${shellescape(command)}`, {
+      execSync(`${this.tmux()} setenv -t ${shellescape(muxName)} ${setOrUnset}`, {
         timeout: EXEC_TIMEOUT_MS,
         stdio: 'ignore',
       });
     } catch {
-      // Non-critical — the exporter just falls back to the plain "codeman" marker.
+      // Non-critical: the exporter prints its own footer, or nothing.
     }
   }
 

@@ -2174,7 +2174,12 @@ export class Session extends EventEmitter {
       }
       try {
         // Pass --session-id to use the SAME ID as the Codeman session
-        // This ensures subagents can be directly matched to the correct tab
+        // This ensures subagents can be directly matched to the correct tab.
+        // No plan-usage statusLine exporter on this path: the ephemeral
+        // `--settings` injection (resolveStatusLineCliCommand, hooks-config.ts)
+        // is wired into the tmux spawn builders only, so a direct-PTY session
+        // has no Claude telemetry in the header chip. Documented in
+        // architecture-invariants (Plan-usage chip); tmux is the supported path.
         const args = buildInteractiveArgs(
           this.id,
           this._claudeMode,

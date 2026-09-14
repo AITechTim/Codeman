@@ -1023,8 +1023,14 @@ export async function ensureStatusLineExporterScript(): Promise<string> {
     // Doesn't exist yet.
   }
   if (current !== desired) {
-    await writeFile(scriptPath, desired);
-    await chmod(scriptPath, 0o755);
+    // Temp file + rename: live sessions execute this script on every statusline
+    // render, and a truncate-then-write (plus a chmod AFTER the write) opened two
+    // windows in which Claude Code could run an empty or non-executable file.
+    // rename() swaps the complete, already-executable file in atomically.
+    const tmpPath = `${scriptPath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tmpPath, desired);
+    await chmod(tmpPath, 0o755);
+    await rename(tmpPath, scriptPath);
   }
   return scriptPath;
 }
