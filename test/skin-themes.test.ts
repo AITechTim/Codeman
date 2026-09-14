@@ -32,6 +32,35 @@ function luminance(hex: string): number {
   return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
 }
 
+/** Parse the `rgba(r,g,b,a)` form the palettes use for the selection layer. */
+function rgba(value: string): { rgb: [number, number, number]; alpha: number } {
+  const match = value.match(/^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)$/);
+  if (!match) throw new Error(`Expected an rgba() color, got ${value}`);
+  return {
+    rgb: [Number(match[1]), Number(match[2]), Number(match[3])],
+    alpha: Number(match[4]),
+  };
+}
+
+/**
+ * What xterm actually paints: `selectionBackgroundOpaque = blend(background, selection)`.
+ * Comparing the raw rgba string against the background says nothing, since a 0.2-alpha
+ * layer over a near-white surface is still near-white.
+ */
+function blendOverHex(base: string, layer: string): string {
+  const [br, bg, bb] = hexRgb(base);
+  const { rgb, alpha } = rgba(layer);
+  const mix = (b: number, l: number) => Math.round(b * (1 - alpha) + l * alpha);
+  return `#${[mix(br, rgb[0]), mix(bg, rgb[1]), mix(bb, rgb[2])].map((c) => c.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Largest per-channel distance, in 0-255 units. */
+function channelDelta(first: string, second: string): number {
+  const a = hexRgb(first);
+  const b = hexRgb(second);
+  return Math.max(...a.map((channel, index) => Math.abs(channel - b[index])));
+}
+
 function contrastRatio(first: string, second: string): number {
   const [lighter, darker] = [luminance(first), luminance(second)].sort((a, b) => b - a);
   return (lighter + 0.05) / (darker + 0.05);
@@ -68,6 +97,42 @@ describe('Codeman light skins', () => {
     for (const skin of LIGHT_SKINS) {
       const theme = terminal.themes[skin];
       expect(contrastRatio(theme.background, theme.foreground), skin).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  // Issue #360. xterm renamed this key in v5 and an ITheme is a plain object, so the
+  // old `selection` key was silently dropped and every skin fell back to xterm's own
+  // default of rgba(255,255,255,0.3). Nobody noticed on the dark skins, where white at
+  // 30% is roughly what the palettes asked for anyway; on the light ones it made the
+  // highlight invisible, which reads as "selecting text does nothing".
+  it('names the selection layer the way xterm 6 does, and keeps it visible', () => {
+    const XTERM_DEFAULT_SELECTION = 'rgba(255, 255, 255, 0.3)';
+    const themeBlock = terminalSource.slice(
+      terminalSource.indexOf('const CODEMAN_XTERM_THEMES = {'),
+      terminalSource.indexOf('const CODEMAN_LIGHT_SKINS')
+    );
+    // The renderer only knows this spelling (xterm.js >= 5, and package.json pins ^6);
+    // a palette key it does not know is dropped without an error, so the name IS the fix.
+    // Asserted against package.json rather than the bundle, which is gitignored and only
+    // exists after an install step.
+    expect(JSON.parse(readFileSync(resolve('package.json'), 'utf8')).dependencies['@xterm/xterm']).toMatch(
+      /\^?[6-9]\./
+    );
+    expect(themeBlock).not.toMatch(/\bselection: '/);
+
+    for (const [skin, theme] of Object.entries(terminal.themes)) {
+      expect(theme.selectionBackground, skin).toBeDefined();
+      const painted = blendOverHex(theme.background, theme.selectionBackground);
+      expect(channelDelta(theme.background, painted), skin).toBeGreaterThanOrEqual(16);
+    }
+
+    // And the half that proves the rename was the fix rather than a tidy-up: on the
+    // light skins xterm's own fallback lands under that floor (about 3/255), so those
+    // palettes were declaring a selection colour nothing ever read.
+    for (const skin of LIGHT_SKINS) {
+      const background = terminal.themes[skin].background;
+      const fallback = blendOverHex(background, XTERM_DEFAULT_SELECTION);
+      expect(channelDelta(background, fallback), skin).toBeLessThan(16);
     }
   });
 
