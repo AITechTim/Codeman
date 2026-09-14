@@ -156,8 +156,8 @@ There is no dedicated help button in the mobile UI. Help is accessible via:
 
 | Breakpoint | Class | Description |
 |------------|-------|-------------|
-| < 430px | `device-mobile` | Phone - most features hidden/simplified |
-| 430-768px | `device-tablet` | Tablet - intermediate layout |
+| < 600px | `device-mobile` | Phone - most features hidden/simplified |
+| 600-768px | `device-tablet` | Tablet - intermediate layout |
 | > 768px | `device-desktop` | Desktop - full features |
 
 Touch devices also get `touch-device` class regardless of screen size.
