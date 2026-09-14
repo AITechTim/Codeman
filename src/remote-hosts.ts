@@ -147,8 +147,14 @@ export function remoteSshTarget(host: Pick<RemoteHost, 'username' | 'host'>): st
  * POSIX single-quote shell-escaping (end-quote, escaped-quote, restart-quote).
  * Mirrors the helper in tmux-manager.ts so a value with spaces/metachars stays a
  * single shell token. Used here for identity paths and `-o KEY=VALUE` options.
+ *
+ * EXPORTED for `remote-files.ts` (#415, remote file access): that module wraps a
+ * remote shell command in the ssh line built by `buildSshConnectionArgs()`, so it
+ * needs the same escaping discipline for the remote command itself and for every
+ * path interpolated into it. A third private copy of this function is exactly how
+ * two escaping implementations drift apart.
  */
-function shellescape(str: string): string {
+export function shellescape(str: string): string {
   return "'" + str.replace(/'/g, "'\\''") + "'";
 }
 

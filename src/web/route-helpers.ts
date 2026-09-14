@@ -88,11 +88,43 @@ export function validateSessionFilePath(
   } catch {
     return null;
   }
-  const relativePath = relative(resolvedWorkingDir, resolvedPath);
+  return confineToRoot(resolvedWorkingDir, resolvedPath);
+}
+
+/**
+ * The lexical half of {@link validateSessionFilePath}: same containment rule, but
+ * WITHOUT touching the filesystem.
+ *
+ * Needed for remote-SSH cases (`src/remote-files.ts`), where `workingDir` is an
+ * absolute path on the REMOTE host and any local `realpathSync` fails by
+ * construction — which is how every file-raw/file-content request in a remote case
+ * used to end up as a 404 before a single byte was read. The caller follows this
+ * pre-check with a remote realpath + the same containment rule, so escapes are
+ * refused exactly as they are locally; what changes is only WHICH filesystem
+ * resolves the symlinks.
+ *
+ * A lexical check alone would follow nothing, so it must never be the last word for
+ * a path that can contain a symlink — it is the cheap reject in front of the real
+ * (local or remote) resolution, not a replacement for it.
+ */
+export function validateSessionFilePathLexical(
+  sessionWorkingDir: string,
+  filePath: string
+): { resolvedPath: string; relativePath: string } | null {
+  return confineToRoot(resolve(sessionWorkingDir), resolve(sessionWorkingDir, filePath));
+}
+
+/**
+ * Shared containment rule: `candidate` must sit inside `root` (both already
+ * canonical for their filesystem). `relative()` is the whole test — a `..` or an
+ * absolute result means the candidate escaped.
+ */
+function confineToRoot(root: string, candidate: string): { resolvedPath: string; relativePath: string } | null {
+  const relativePath = relative(root, candidate);
   if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
     return null;
   }
-  return { resolvedPath, relativePath };
+  return { resolvedPath: candidate, relativePath };
 }
 
 // Maximum hook data size (prevents oversized SSE broadcasts)
