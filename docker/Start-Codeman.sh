@@ -64,26 +64,13 @@ if [[ -z "$cases_path" ]]; then
   exit 1
 fi
 
-# Pre-creating this here, exactly like CODEMAN_APPDATA_PATH above, means Compose
-# never has to materialise a missing bind source itself - which it does as
-# root:root - so the in-container entrypoint's chown never has to run for this
-# path at all. Unlike appdata, an EXISTING cases directory is left exactly as
-# it is: the README explicitly allows pointing this at a normal projects
-# directory the host account already owns, so no ownership check happens here.
-if [[ ! -d "$cases_path" ]]; then
-  if [[ "$EUID" == '0' ]]; then
-    printf 'Error: Refusing to create CODEMAN_CASES_PATH as root: %s\n' "$cases_path" >&2
-    printf 'Create it as the unprivileged account that should run Codeman, then retry.\n' >&2
-    exit 1
-  fi
-  mkdir -p -- "$cases_path"
-fi
+# `stat -c` is GNU, `stat -f` is BSD/macOS; the bind sources live on the Docker
+# host, so both need to work.
+owner_of() {
+  stat -c '%u:%g' -- "$1" 2>/dev/null || stat -f '%u:%g' "$1" 2>/dev/null
+}
 
-if owner_ids=$(stat -c '%u:%g' -- "$appdata_path" 2>/dev/null); then
-  :
-elif owner_ids=$(stat -f '%u:%g' "$appdata_path" 2>/dev/null); then
-  :
-else
+if ! owner_ids=$(owner_of "$appdata_path"); then
   printf 'Error: Cannot determine the owner of CODEMAN_APPDATA_PATH: %s\n' "$appdata_path" >&2
   exit 1
 fi
@@ -95,6 +82,34 @@ if [[ "$PUID" == '0' ]]; then
   printf 'Error: CODEMAN_APPDATA_PATH is owned by root: %s\n' "$appdata_path" >&2
   printf 'Change the directory ownership to the unprivileged account that should run Codeman.\n' >&2
   exit 1
+fi
+
+# Pre-creating this here, exactly like CODEMAN_APPDATA_PATH above, means Compose
+# never has to materialise a missing bind source itself - which it does as
+# root:root - so the in-container entrypoint's chown never has to run for this
+# path at all. It happens AFTER PUID/PGID are known (they come from the appdata
+# directory just above) so the new directory can be given that exact owner: a
+# plain `mkdir -p` lands as the invoking user's uid and PRIMARY gid, and on a
+# host set up the way the README suggests (`chown -R 99:100 <appdata>`) that gid
+# is not PGID, which the container would then refuse to run on. Unlike appdata,
+# an EXISTING cases directory is left exactly as it is: the README explicitly
+# allows pointing this at a normal projects directory the host account already
+# owns, and the container checks that it is WRITABLE as PUID:PGID rather than
+# who owns it.
+if [[ ! -d "$cases_path" ]]; then
+  mkdir -p -- "$cases_path"
+  if [[ "$(owner_of "$cases_path")" != "$PUID:$PGID" ]]; then
+    # As root this always succeeds; as a member of PGID a chgrp does; anyone
+    # else gets the clear error here, where the fix is obvious, rather than a
+    # restart loop from the container.
+    if ! chown -- "$PUID:$PGID" "$cases_path" 2>/dev/null; then
+      printf 'Error: created CODEMAN_CASES_PATH (%s) but could not make it %s:%s (the owner of CODEMAN_APPDATA_PATH).\n' \
+        "$cases_path" "$PUID" "$PGID" >&2
+      printf 'Run `chown %s:%s %s` as root, or create the directory as that account, then retry.\n' \
+        "$PUID" "$PGID" "$cases_path" >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [[ -z "$docker_socket" || ! -S "$docker_socket" ]]; then
@@ -201,8 +216,9 @@ fi
 # volume already in use — but a `docker compose build` triggered from outside
 # it (this script, after a `git pull`) does: the container comes back up
 # looking unchanged. Detect that here and clear just the affected volume(s) so
-# `--build` below actually takes effect. Best-effort: with no sha256 tool this
+# the build below actually takes effect. Best-effort: with no sha256 tool this
 # quietly does nothing, same as the environment-gate block above.
+volumes_to_refresh=()
 if [[ -n "$dockerfile_sha" ]]; then
   repo_head=$(git_head_commit "$repo_path" || true)
   lockfile_sha=$(sha256_of "$repo_path/package-lock.json" 2>/dev/null || true)
@@ -214,45 +230,80 @@ if [[ -n "$dockerfile_sha" ]]; then
     prev_lockfile_sha=$(sed -n 's/.*"lockfileSha256": *"\([^"]*\)".*/\1/p' "$source_state_file")
   fi
 
-  volumes_to_refresh=()
   [[ -n "$repo_head" && "$repo_head" != "$prev_head" ]] && volumes_to_refresh+=('codeman-dist')
   [[ -n "$lockfile_sha" && "$lockfile_sha" != "$prev_lockfile_sha" ]] && volumes_to_refresh+=('codeman-node-modules')
+fi
 
-  if [[ ${#volumes_to_refresh[@]} -gt 0 ]]; then
-    # Runs even on this script's very first invocation against an EXISTING
-    # deployment, deliberately: that deployment's volumes may already be
-    # stale (there was no earlier version of this check to have caught it),
-    # and clearing an already-empty or nonexistent volume is a harmless
-    # no-op, so there is no fresh-install case this needs to avoid.
-    printf 'Source changed since the last start; refreshing: %s\n' "${volumes_to_refresh[*]}"
-    "${compose_command[@]}" down
-    # `com.docker.compose.volume` is the volume KEY, not a project-qualified
-    # name - a second stack on the same host (a beta instance started with a
-    # different COMPOSE_PROJECT_NAME, say) that also declares a volume keyed
-    # `codeman-dist` shares that label, and `head -n1` would pick whichever
-    # the daemon happens to list first. Scope the lookup to THIS stack's own
-    # resolved project name so it can only ever match this stack's volume.
-    project_name=$(
-      "${compose_command[@]}" config --format json 2>/dev/null |
-        sed -n 's/^  "name": "\(.*\)",\{0,1\}$/\1/p' | head -n1
+if [[ ${#volumes_to_refresh[@]} -eq 0 ]]; then
+  exec "${compose_command[@]}" up --build -d
+fi
+
+# Runs even on this script's very first invocation against an EXISTING
+# deployment, deliberately: that deployment's volumes may already be stale
+# (there was no earlier version of this check to have caught it), and clearing
+# an already-empty or nonexistent volume is a harmless no-op, so there is no
+# fresh-install case this needs to avoid.
+printf 'Source changed since the last start; refreshing: %s\n' "${volumes_to_refresh[*]}"
+
+# Build BEFORE taking the stack down: the image build is the slow part and needs
+# no container stopped, so the deployment is offline only for the recreate.
+"${compose_command[@]}" build
+
+# `com.docker.compose.volume` is the volume KEY, not a project-qualified name -
+# a second stack on the same host (a beta instance started with a different
+# COMPOSE_PROJECT_NAME, say) that also declares a volume keyed `codeman-dist`
+# shares that label, and `head -n1` would pick whichever the daemon happens to
+# list first. Scope the lookup to THIS stack's own resolved project name so it
+# can only ever match this stack's volume. The name is read from the resolved
+# config's top-level `name` key, indentation-agnostic (the formatting is not a
+# contract), and the FIRST `name` in the output is the project's: nested ones
+# (a network's `name:`) come later. `--format json` needs Compose v2.3+.
+project_name=$(
+  "${compose_command[@]}" config --format json 2>/dev/null |
+    sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1
+)
+
+"${compose_command[@]}" down
+
+# Track whether the volumes were actually cleared. The marker below is written
+# ONLY on success: with an unresolvable project name the label filter would
+# match nothing, nothing would be removed, and a marker recording the new HEAD
+# would stop this check from ever firing again while the stale volume kept
+# serving old code. A failed removal likewise leaves the marker alone, so the
+# next start retries, and the stack is brought back up regardless rather than
+# left down.
+refreshed=1
+if [[ -z "$project_name" ]]; then
+  # The documented reset (docs/docker-self-update.md): both volumes re-seed from
+  # the image by a plain copy, so clearing the extra one costs a copy, not data.
+  printf 'Warning: could not resolve the Compose project name; clearing both build-artefact volumes with `down --volumes` instead.\n' >&2
+  "${compose_command[@]}" down --volumes || refreshed=0
+else
+  for key in "${volumes_to_refresh[@]}"; do
+    volume_name=$(
+      docker volume ls -q \
+        --filter "label=com.docker.compose.volume=$key" \
+        --filter "label=com.docker.compose.project=$project_name" |
+        head -n1
     )
-    for key in "${volumes_to_refresh[@]}"; do
-      volume_name=$(
-        docker volume ls -q \
-          --filter "label=com.docker.compose.volume=$key" \
-          --filter "label=com.docker.compose.project=$project_name" |
-          head -n1
-      )
-      [[ -n "$volume_name" ]] && docker volume rm -- "$volume_name"
-    done
-  fi
+    if [[ -n "$volume_name" ]] && ! docker volume rm -- "$volume_name"; then
+      printf 'Warning: could not remove volume %s; it will be retried on the next start.\n' "$volume_name" >&2
+      refreshed=0
+    fi
+  done
+fi
 
+if [[ "$refreshed" == '1' ]]; then
   printf '{\n  "headCommit": "%s",\n  "lockfileSha256": "%s"\n}\n' \
     "$repo_head" "$lockfile_sha" >"$source_state_file.tmp"
   mv -- "$source_state_file.tmp" "$source_state_file"
   if [[ "$EUID" == '0' ]]; then
     chown -- "$PUID:$PGID" "$source_state_file"
   fi
+else
+  printf 'Warning: the build-artefact volumes were NOT refreshed; the container may serve stale code until the next successful start.\n' >&2
 fi
 
-exec "${compose_command[@]}" up --build -d
+# Already built above, so no --build here: a second build would only re-check
+# the cache.
+exec "${compose_command[@]}" up -d
