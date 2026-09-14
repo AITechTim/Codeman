@@ -173,7 +173,10 @@ layers cooperate so a dashboard talking to its own backend just works:
    path it does not serve) and answers a static page that does nothing but tell
    the owning tab which path was lost; the tab remounts the frame inside the
    prefix at that path. It never counts as a failed login, so a dev server that
-   reloads on every save cannot rate-limit its user out of Codeman.
+   reloads on every save cannot rate-limit its user out of Codeman. The landing
+   page is the one served path that gets the same answer: it masks to exactly
+   `/`, and a reload there is admitted as long as the request carries no Codeman
+   credentials, which a sandboxed frame never does.
 
 On top of that, the proxy answers those requests with CORS headers. That sounds
 wrong for same-host requests, but a sandboxed iframe has an *opaque* origin, so the
@@ -187,6 +190,16 @@ then every API call fails, which looks like the dashboard being broken.
   EventSource, normal markup, the DOM sinks a page uses to build markup at runtime,
   and `url()` inside stylesheets. Something that constructs requests by an unusual
   route can still slip through. Symptom: the page renders but a panel stays empty.
+- **A root-absolute `url()` inside an inline `<style>` is not rescued.** Masking the
+  page's URL (layer 5) trades away the `Referer` safety net of layer 4 for
+  requests the shim cannot see, and only HTML is rewritten server-side. An
+  external stylesheet is fine: a `url()` it references is fetched with the
+  stylesheet's own URL as `Referer`, which is still inside the prefix. A
+  root-absolute `url(/img.png)` written directly into a `<style>` block in the
+  document has the masked document as its `Referer`, so it 404s where the
+  fallback used to rescue it. Symptom: one background image missing while
+  everything else renders. Narrow, and a `url()` the page sets from script is
+  still covered by layer 3.
 - **Root-absolute `location` navigation is recovered, not prevented.** `Location`
   is unforgeable, so `location.href = '/login'` or `location.reload()` really does
   leave the prefix; the frame comes back through the recovery hop in layer 6 above,
