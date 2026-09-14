@@ -148,7 +148,13 @@ import { getLatestPlanUsage, setLatestCodexPlanUsage } from './plan-usage-latest
 import { telemetrySignature } from '../usage-telemetry.js';
 import { readCodexPlanUsage, resolveCodexBinaryPath } from '../utils/codex-cli-resolver.js';
 import type { ScheduledRun } from './ports/index.js';
-import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
+import {
+  registerAuthMiddleware,
+  registerSecurityHeaders,
+  registerHostGuard,
+  isLostWebviewRootFrame,
+  sendLostWebviewFramePage,
+} from './middleware/auth.js';
 import { isMultiUserMode } from '../config/multiuser.js';
 import { bootstrapInitialAdmin, hasUsers, resolveClaudeModeForUsername } from '../user-store.js';
 import { installRouteErrorHandler } from './route-error-handler.js';
@@ -181,7 +187,7 @@ import {
   registerTabLayoutRoutes,
   tryWebviewRefererFallback,
 } from './routes/index.js';
-import { isLostWebviewFrameNavigation, lostWebviewFramePage, LOST_FRAME_PAGE_CSP } from './webview-proxy.js';
+import { isLostWebviewFrameNavigation } from './webview-proxy.js';
 import { CronService } from '../cron/cron-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -805,7 +811,14 @@ export class WebServer extends EventEmitter {
 
     // Security headers + CORS
     registerSecurityHeaders(this.app, this.https, this.basePath);
-    this.app.get('/', async (_req, reply) => {
+    this.app.get('/', async (req, reply) => {
+      // A web-tab frame that reloaded on its dashboard's landing page. The proxy's
+      // runtime shim maps `/webview/<cap>/` to exactly `/`, so that reload asks for
+      // Codeman's own root as an iframe navigation, and it used to get the app
+      // shell rendered inside the web tab. Only the credential-free form is taken
+      // (nothing in Codeman frames its root; the sandboxed frame has no cookie and
+      // no Authorization); under a password the auth hook has answered it already.
+      if (isLostWebviewRootFrame(req)) return sendLostWebviewFramePage(reply);
       return reply
         .header('Cache-Control', 'no-cache')
         .type('text/html; charset=utf-8')
@@ -981,11 +994,7 @@ export class WebServer extends EventEmitter {
       // that navigated itself off its proxy prefix: the runtime shim masks the
       // prefix so the page's router sees its own path, and a reload of that page
       // lands here. The unauthenticated form is answered in the auth middleware.
-      if (!req.url.startsWith('/api') && isLostWebviewFrameNavigation(req)) {
-        reply.header('content-security-policy', LOST_FRAME_PAGE_CSP);
-        reply.header('cache-control', 'no-store');
-        return reply.type('text/html; charset=utf-8').send(lostWebviewFramePage());
-      }
+      if (!req.url.startsWith('/api') && isLostWebviewFrameNavigation(req)) return sendLostWebviewFramePage(reply);
       if (req.url.startsWith('/api')) {
         return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, notFound));
       }

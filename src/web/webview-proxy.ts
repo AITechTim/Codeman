@@ -734,7 +734,9 @@ export const LOST_FRAME_PAGE_CSP = `default-src 'none'; script-src 'sha256-${LOS
  * no capability anywhere on it: no prefix in the path, no cookie in an
  * opaque-origin frame, and a Referer that names the masked page. Such a request
  * is recognisable by shape alone: a top-level navigation of an `<iframe>`
- * (`Sec-Fetch-Dest`), asking for HTML, for a path Codeman does not serve.
+ * (`Sec-Fetch-Dest`), asking for HTML, for a path Codeman does not serve. The
+ * one served path that still qualifies is `/` itself, which the callers admit
+ * only when the request carries no credentials (see carriesAuthCredentials).
  *
  * The answer is `lostWebviewFramePage()`, a static page whose only content is a
  * `postMessage` to the parent naming the path; the Codeman tab that owns the
@@ -752,6 +754,31 @@ export function isLostWebviewFrameNavigation(req: {
   if (mode !== undefined && mode !== 'navigate') return false;
   const accept = req.headers.accept;
   return typeof accept === 'string' && accept.includes('text/html');
+}
+
+/**
+ * Whether a request carries something Codeman's auth would recognise: the
+ * session cookie, or an `Authorization` header (Basic auth, which a browser
+ * re-sends on every request to the realm once it has been accepted).
+ *
+ * `/` is the one lost-frame path a registered route also serves (the app shell),
+ * so the route table cannot tell a landing-page reload of a proxied dashboard
+ * (the runtime shim maps `/webview/<cap>/` to exactly `/`) from a genuine
+ * navigation. Credentials can: nothing in Codeman frames its own root, and a
+ * sandboxed web-tab frame is opaque-origin and carries neither, so an `<iframe>`
+ * navigation of `/` with NEITHER credential can only be that frame. A framed
+ * `/` that does carry credentials is left to the shell.
+ */
+export function carriesAuthCredentials(
+  headers: Record<string, string | string[] | undefined>,
+  sessionCookieName: string
+): boolean {
+  const authorization = headers.authorization;
+  if (Array.isArray(authorization) ? authorization.length > 0 : (authorization ?? '').trim() !== '') return true;
+  const cookie = headers.cookie;
+  const cookies = Array.isArray(cookie) ? cookie.join('; ') : cookie;
+  if (typeof cookies !== 'string' || cookies === '') return false;
+  return cookies.split(';').some((part) => part.trim().startsWith(`${sessionCookieName}=`));
 }
 
 /** The static page that hands a lost frame back to its owning tab. */

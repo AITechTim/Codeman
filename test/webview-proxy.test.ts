@@ -28,6 +28,7 @@ import {
   stripFrameAncestors,
   upstreamWebSocketUrl,
   isLostWebviewFrameNavigation,
+  carriesAuthCredentials,
   lostWebviewFramePage,
   LOST_FRAME_PAGE_CSP,
 } from '../src/web/webview-proxy.js';
@@ -815,5 +816,17 @@ describe('lost-frame recovery', () => {
     expect(LOST_FRAME_PAGE_CSP).toContain("default-src 'none'");
     // The page must never carry a Referer that would leak anything about the tab.
     expect(page).toContain('name="referrer" content="no-referrer"');
+  });
+
+  it('tells a credential-free request (a sandboxed frame reloading on /) from one that could authenticate', () => {
+    const has = (headers: Record<string, string | string[] | undefined>) =>
+      carriesAuthCredentials(headers, 'codeman_session');
+    expect(has({})).toBe(false);
+    expect(has({ cookie: 'theme=dark; codeman_sessions=lookalike' })).toBe(false);
+    expect(has({ authorization: '' })).toBe(false);
+    expect(has({ cookie: 'codeman_session=abc' })).toBe(true);
+    expect(has({ cookie: 'theme=dark; codeman_session=abc' })).toBe(true);
+    expect(has({ cookie: ['theme=dark', 'codeman_session=abc'] })).toBe(true);
+    expect(has({ authorization: 'Basic YWRtaW46eA==' })).toBe(true);
   });
 });

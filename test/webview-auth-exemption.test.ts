@@ -257,7 +257,7 @@ describe('a lost web-tab frame', () => {
   });
 
   it('never for a path Codeman actually serves, and never for a plain navigation', async () => {
-    expect((await app.inject({ method: 'GET', url: '/', headers: lostFrame })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/webviewfoo/bar', headers: lostFrame })).statusCode).toBe(401);
     expect((await app.inject({ method: 'GET', url: '/api/sessions/abc', headers: lostFrame })).statusCode).toBe(401);
     expect((await app.inject({ method: 'GET', url: '/about' })).statusCode).toBe(401);
     expect(
@@ -272,5 +272,50 @@ describe('a lost web-tab frame', () => {
     }
     // A genuinely unauthenticated request afterwards is still a plain 401, not a 429.
     expect((await app.inject({ method: 'GET', url: '/static/app.js' })).statusCode).toBe(401);
+  });
+
+  /**
+   * The landing page. The shim maps `/webview/<cap>/` to exactly `/`, so a reload
+   * there asks for Codeman's ROOT as an iframe navigation, and `/` is a registered
+   * route (the app shell), which the route-table fence cannot tell from a real
+   * navigation. It used to answer 401 inside the frame (or the shell itself on a
+   * passwordless install), with no recovery message and the failed-frame panel
+   * cleared because the document loaded fine. Credentials are the separator:
+   * nothing in Codeman frames its own root, and the sandboxed frame carries none.
+   */
+  describe('a reload on the dashboard landing page', () => {
+    it('gets the recovery page when the iframe navigation of / carries no credentials', async () => {
+      for (const url of ['/', '/?tab=2']) {
+        const res = await app.inject({ method: 'GET', url, headers: lostFrame });
+        expect(res.statusCode, url).toBe(200);
+        expect(res.body, url).toContain('codeman:webview-lost');
+        expect(res.headers['content-security-policy']).toContain("default-src 'none'");
+      }
+    });
+
+    it('is the shell, or the usual 401, once a session cookie or Authorization header is present', async () => {
+      const ok = `Basic ${Buffer.from(`admin:${PASSWORD}`).toString('base64')}`;
+      const shell = await app.inject({ method: 'GET', url: '/', headers: { ...lostFrame, authorization: ok } });
+      expect(shell.statusCode).toBe(200);
+      expect(shell.body).toBe('app shell');
+      const wrong = `Basic ${Buffer.from('admin:nope').toString('base64')}`;
+      expect(
+        (await app.inject({ method: 'GET', url: '/', headers: { ...lostFrame, authorization: wrong } })).statusCode
+      ).toBe(401);
+      const cookie = 'codeman_session=stale; other=1';
+      expect((await app.inject({ method: 'GET', url: '/', headers: { ...lostFrame, cookie } })).statusCode).toBe(401);
+    });
+
+    it('is still a 401 for a top-level navigation of /, and for a frame asking for JSON', async () => {
+      expect((await app.inject({ method: 'GET', url: '/' })).statusCode).toBe(401);
+      expect(
+        (await app.inject({ method: 'GET', url: '/', headers: { ...lostFrame, 'sec-fetch-dest': 'document' } }))
+          .statusCode
+      ).toBe(401);
+      expect(
+        (await app.inject({ method: 'GET', url: '/', headers: { ...lostFrame, accept: 'application/json' } }))
+          .statusCode
+      ).toBe(401);
+    });
   });
 });
