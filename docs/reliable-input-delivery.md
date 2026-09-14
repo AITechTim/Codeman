@@ -50,8 +50,17 @@ each `(clientId, seq)` at most once, so a resend can't type the prompt twice.
   last-applied is seen. A replayed/lower seq returns `false`. Bounded MRU map
   (`MAX_INPUT_DEDUP_CLIENTS = 256`).
 - **WS route** (`ws-routes.ts`) — parses optional `cid`/`seq` on `{t:'i'}`; applies
-  via `shouldApplyInput` (skips a duplicate, still ACKs with `{t:'ia',seq}` so the
-  client drops it). Untagged frames apply unconditionally (no behavior change).
+  via `shouldApplyInput`. An applied frame is ACKed with `{t:'ia',seq}`; a duplicate is
+  ACKed as `{t:'ia',seq,dup:true,last:<watermark>}`, where `last` is the server's
+  highest applied seq for that `clientId` (`Session.lastInputSeq`). The client drops
+  the record either way, and on `dup` it lifts its own counter to `last` first and
+  re-sends a FIRST-attempt record (a retry being called a duplicate is the mechanism
+  working: the original landed). Without `last`, a tab killed between a send and the
+  persisted counter write came back counting BELOW the server's watermark, and every
+  later keystroke was dropped-but-ACKed: a silently dead terminal a reload could not
+  fix, since the stale counter was restored from localStorage too. The client now
+  persists the counter synchronously on every send for the same reason. Untagged
+  frames apply unconditionally (no behavior change).
 - **POST route** (`/api/sessions/:id/input`) — optional `seq`/`clientId` in
   `SessionInputWithLimitSchema`; a deduped duplicate returns 200 without writing
   (the 200 is the client's ACK). `curl`/legacy callers omit the fields and always
