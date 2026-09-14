@@ -206,6 +206,15 @@
     and nothing ever deleted them (236 orphans on a working machine); the sweep keeps
     every live session's file and only takes orphans older than seven days.
 
+  ### Thanks
+
+  1.26.0 carries no contributor PRs of its own. It lands the day after 1.25.0, so the thanks for that pair belong here too:
+
+  - @mtiller for the reverse-proxy base URL (#381).
+  - @dignfei for attaching cases to running containers (#357).
+  - @shenlvkang-collab for the response viewer fix (#369), the first-hand conversation hook (#367) and the phone Add Case fix (#368).
+  - @opticon454 for the case picker default (#383).
+
 ## 1.25.0
 
 ### Minor Changes
@@ -299,6 +308,12 @@
   case, which without the plugin falls back to the classic builder Docker has deprecated.
   `docker-compose` is not copied; Codeman never shells out to it.
 
+  ### Thanks
+
+  1.24.4 is a same-day follow-on to 1.24.3, so the thanks for that pair belong here too:
+
+  - @opticon454 for #349, and for a write-up that made an infrastructure PR quick to review
+
 ## 1.24.3
 
 ### Patch Changes
@@ -378,6 +393,13 @@
   Also included: a CLAUDE.md audit against the tree, correcting counted drift (route
   modules, handler counts, frontend module count and app.js size, install.sh size) and
   documenting several subsystems that had no entry.
+
+  ### Thanks
+
+  1.24.2 is a hotfix on top of 1.24.1, so the thanks for that pair belong here too:
+
+  - @opticon454 for #350, with a reproduction that made this a confirmation rather than a hunt
+  - @timkjr for reporting #352, and for finding it while verifying Docker support for someone else's PR
 
 ## 1.24.1
 
