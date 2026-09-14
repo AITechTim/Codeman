@@ -14,11 +14,11 @@
  *   auto-detects MIME type (opus/webm/mp4), and supports custom key terms for dev vocabulary.
  *
  * - VoiceInput — High-level voice input controller. Toggle mode: tap mic to start, tap
- *   again to stop. Auto-stops after 3s silence. Shows floating preview overlay with recording
+ *   again to confirm. Listens through pauses. Shows a floating preview overlay with recording
  *   indicator, level meter (AnalyserNode), and elapsed timer. Two insert modes: "direct"
  *   (inject into local echo overlay or PTY) and "compose" (editable textarea overlay).
  *   Includes a temporary green Send button that replaces the settings gear icon after voice input.
- *   Web Speech API has auto-retry (up to 2x) for premature onend and iOS Safari stability check.
+ *   Web Speech restarts ordinary browser-ended recognition sessions without ending dictation.
  *
  * @globals {object} ClaudeVoiceProvider
  * @globals {object} DeepgramProvider
@@ -49,7 +49,8 @@ const DeepgramProvider = {
   _ws: null,
   _mediaRecorder: null,
   _stream: null,
-  _silenceTimeout: null,
+  _closed: false,
+  _finalized: false,
   _keepAliveInterval: null,
   _onResult: null,
   _onError: null,
@@ -71,10 +72,16 @@ const DeepgramProvider = {
       return;
     }
     try {
-      this._stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true }
       });
+      if (this._closed || this._finalized) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      this._stream = stream;
     } catch (err) {
+      if (this._closed) return;
       const msg = err.name === 'NotAllowedError'
         ? 'Microphone access denied. Check browser settings.'
         : 'Microphone error: ' + err.message;
@@ -134,6 +141,7 @@ const DeepgramProvider = {
     }
 
     this._ws.onopen = () => {
+      if (this._closed || this._finalized) return;
       // 5. Send KeepAlive every 8s to prevent Deepgram from closing idle connections
       // (covers the gap before MediaRecorder produces its first chunk)
       this._keepAliveInterval = setInterval(() => {
@@ -153,8 +161,7 @@ const DeepgramProvider = {
           const transcript = alt.transcript || '';
           if (transcript) {
             const isFinal = data.is_final === true;
-            this._onResult?.(transcript, isFinal);
-            this._resetSilenceTimeout();
+            this._onResult?.(transcript, isFinal, data.start == null ? null : `${data.start}:${data.duration}`);
           }
         }
       } catch (_e) {
@@ -201,7 +208,6 @@ const DeepgramProvider = {
     };
 
     this._mediaRecorder.start(250); // Send chunks every 250ms
-    this._resetSilenceTimeout();
   },
 
   _stopRecording() {
@@ -214,44 +220,48 @@ const DeepgramProvider = {
     }
   },
 
-  _resetSilenceTimeout() {
-    clearTimeout(this._silenceTimeout);
-    this._silenceTimeout = setTimeout(() => {
-      this.stop();
-    }, 3000);
+  /** Stop capture, flush the last recorder chunk, then request final transcripts. */
+  stop() {
+    if (this._finalized || this._closed) return;
+    this._finalized = true;
+    const ws = this._ws;
+    const finalize = () => {
+      if (this._closed) return;
+      if (ws?.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (_e) { this._onEnd?.(); }
+      } else {
+        this._onEnd?.();
+      }
+    };
+    if (this._mediaRecorder?.state === 'recording') {
+      // MediaRecorder dispatches its last dataavailable before stop.
+      this._mediaRecorder.onstop = finalize;
+      this._stopRecording();
+    } else {
+      this._stopRecording();
+      finalize();
+    }
   },
 
-  stop() {
-    clearTimeout(this._silenceTimeout);
-    this._silenceTimeout = null;
+  /** Hard cancellation, also used after the controller's finalization deadline. */
+  _cleanup() {
+    this._closed = true;
     clearInterval(this._keepAliveInterval);
     this._keepAliveInterval = null;
-    this._stopRecording();
-    // Detach WS handlers before closing to prevent stale onclose from
-    // killing a subsequent recording that starts before the close completes
-    if (this._ws) {
-      this._ws.onclose = null;
-      this._ws.onmessage = null;
-      this._ws.onerror = null;
-      if (this._ws.readyState === WebSocket.OPEN) {
-        try { this._ws.close(1000); } catch (_e) { /* ignore */ }
-      }
-      this._ws = null;
+    if (this._mediaRecorder) {
+      this._mediaRecorder.ondataavailable = null;
+      this._mediaRecorder.onstop = null;
     }
-    // Save onEnd before nulling — must notify VoiceInput when silence timeout
-    // triggers stop internally (VoiceInput.onEnd guards with isRecording check)
-    const onEnd = this._onEnd;
-    this._onResult = null;
-    this._onError = null;
-    this._onEnd = null;
-    onEnd?.();
-  },
-
-  _cleanup() {
-    this.stop();
-    this._mediaRecorder = null;
-    this._stream = null;
-    this._selectedMime = null;
+    this._stopRecording();
+    if (this._ws) {
+      this._ws.onopen = this._ws.onclose = this._ws.onmessage = this._ws.onerror = null;
+      if (this._ws.readyState < WebSocket.CLOSING) {
+        try { this._ws.close(1000); } catch (_e) { /* already closed */ }
+      }
+    }
+    this._ws = null;
+    this._onResult = this._onError = this._onEnd = null;
+    this._mediaRecorder = this._stream = null;
   }
 };
 
@@ -279,14 +289,11 @@ const ClaudeVoiceProvider = {
   _workletNode: null,
   _sourceNode: null,
   _scriptNode: null,
-  _silenceTimeout: null,
+  _closed: false,
   _onResult: null,
   _onError: null,
   _onEnd: null,
   _finalized: false,
-
-  /** How long without any transcript before the recording gives up on its own. */
-  SILENCE_MS: 6000,
 
   /**
    * Start streaming.
@@ -304,10 +311,16 @@ const ClaudeVoiceProvider = {
       return;
     }
     try {
-      this._stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true }
       });
+      if (this._closed || this._finalized) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      this._stream = stream;
     } catch (err) {
+      if (this._closed) return;
       const msg = err.name === 'NotAllowedError'
         ? 'Microphone access denied. Check browser settings.'
         : 'Microphone error: ' + err.message;
@@ -331,14 +344,15 @@ const ClaudeVoiceProvider = {
     this._ws.binaryType = 'arraybuffer';
 
     this._ws.onopen = () => {
+      if (this._closed || this._finalized) return;
       // Capture starts only once the socket is up: PCM buffered before that would
       // be the oldest audio, and dropping it keeps the transcript aligned with what
       // the user hears themselves saying.
       this._startCapture().catch((err) => {
+        if (this._closed || this._finalized) return;
         this._onError?.('Microphone capture failed: ' + err.message);
         this.stop();
       });
-      this._resetSilenceTimeout();
     };
 
     this._ws.onmessage = (event) => {
@@ -349,7 +363,6 @@ const ClaudeVoiceProvider = {
         return;
       }
       if (msg.t === 'transcript' && msg.text) {
-        this._resetSilenceTimeout();
         this._onResult?.(msg.text, msg.final === true);
       } else if (msg.t === 'error') {
         this._onError?.(msg.message || 'Voice transcription failed');
@@ -390,11 +403,14 @@ const ClaudeVoiceProvider = {
     // Ask for 16 kHz directly so the browser resamples; Safari may hand back its
     // own rate, which _pcmFromFloat32 then downsamples to match.
     this._audioContext = new Ctx({ sampleRate: 16000 });
-    if (this._audioContext.state === 'suspended') await this._audioContext.resume();
+    const context = this._audioContext;
+    if (context.state === 'suspended') await context.resume();
+    if (this._closed || this._finalized) return;
     this._sourceNode = this._audioContext.createMediaStreamSource(this._stream);
 
     if (this._audioContext.audioWorklet) {
-      await this._audioContext.audioWorklet.addModule(this._workletUrl());
+      await context.audioWorklet.addModule(this._workletUrl());
+      if (this._closed || this._finalized) return;
       this._workletNode = new AudioWorkletNode(this._audioContext, 'pcm-frame-processor');
       this._workletNode.port.onmessage = (event) => this._sendAudio(event.data);
       this._sourceNode.connect(this._workletNode);
@@ -426,9 +442,8 @@ const ClaudeVoiceProvider = {
    * file together**, or the browser keeps serving the old worklet.
    */
   _workletUrl() {
-    const src = document.querySelector('script[src*="voice-input.js"]')?.getAttribute('src') || '';
-    const q = src.indexOf('?');
-    return 'voice-pcm-worklet.js' + (q === -1 ? '' : src.slice(q));
+    const src = document.querySelector('script[src*="voice-input"]')?.getAttribute('src') || '';
+    return 'voice-pcm-worklet.js?v=' + encodeURIComponent(src);
   },
 
   /** Float32 [-1,1] at any rate -> Int16 PCM at 16 kHz (nearest-neighbour decimation). */
@@ -453,19 +468,12 @@ const ClaudeVoiceProvider = {
     }
   },
 
-  _resetSilenceTimeout() {
-    clearTimeout(this._silenceTimeout);
-    this._silenceTimeout = setTimeout(() => this.stop(), this.SILENCE_MS);
-  },
-
   /**
    * Ask for the final transcript and let the server close the socket. Capture stops
    * immediately, but the WebSocket stays open: the last (and usually best) transcript
    * arrives AFTER the audio does, so closing here would throw away the utterance.
    */
   stop() {
-    clearTimeout(this._silenceTimeout);
-    this._silenceTimeout = null;
     if (this._finalized) return;
     this._finalized = true;
     this._stopCapture();
@@ -510,15 +518,15 @@ const ClaudeVoiceProvider = {
 
   /** Hard stop: drop the socket without waiting for a final transcript. */
   _cleanup() {
+    this._closed = true;
     this._finalized = true;
-    clearTimeout(this._silenceTimeout);
-    this._silenceTimeout = null;
     this._stopCapture();
     if (this._ws) {
+      this._ws.onopen = null;
       this._ws.onclose = null;
       this._ws.onmessage = null;
       this._ws.onerror = null;
-      if (this._ws.readyState === WebSocket.OPEN) {
+      if (this._ws.readyState < WebSocket.CLOSING) {
         try { this._ws.close(1000); } catch (_e) { /* ignore */ }
       }
       this._ws = null;
@@ -532,7 +540,7 @@ const ClaudeVoiceProvider = {
 /**
  * VoiceInput - Speech-to-text with Claude (this server's Claude Code login),
  * Deepgram Nova-3, or the Web Speech API.
- * Toggle mode: tap mic to start, tap again to stop. Auto-stops after silence.
+ * Toggle mode: tap mic to start, tap again to confirm. Final results drain before insertion.
  * Shows interim transcription in a floating preview overlay.
  * Inserts final text into the active session (user presses Enter to submit).
  */
@@ -540,20 +548,25 @@ const VoiceInput = {
   recognition: null,
   isRecording: false,
   supported: false,
-  silenceTimeout: null,
-  previewEl: null,
-  _lastTranscript: '',
-  _stabilityTimer: null,
+  _state: 'idle',
+  _generation: 0,
+  _targetSessionId: null,
+  _provider: null,
+  _activeProvider: null,
   _accumulatedFinal: '',
-  _activeProvider: null, // 'deepgram' | 'webspeech' | null
-  _recordingStartedAt: 0, // timestamp when recording started
-  _retryCount: 0, // auto-retry counter for premature Web Speech API ends
-  _hasReceivedResult: false, // whether any speech result came in this session
-  _durationInterval: null, // timer for updating elapsed time display
-  _analyser: null, // AudioContext analyser for level meter
-  _analyserSource: null, // MediaStreamSource for level meter
-  _audioContext: null, // AudioContext for level meter
-  _levelAnimFrame: null, // rAF handle for level meter
+  _interim: '',
+  _webSpeechPrefix: '',
+  _retryCount: 0,
+  _recognitionStartedAt: 0,
+  _restartTimer: null,
+  _finalizeTimer: null,
+  previewEl: null,
+  _recordingStartedAt: 0,
+  _durationInterval: null,
+  _analyser: null,
+  _analyserSource: null,
+  _audioContext: null,
+  _levelAnimFrame: null,
 
   init() {
     this._initRecognition();
@@ -636,343 +649,260 @@ const VoiceInput = {
     }
   },
 
-  /** Try to create a SpeechRecognition instance */
+  /** A new recognition instance isolates events from previous recording cycles. */
   _initRecognition() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    this.supported = !!SR;
-    if (!this.supported) return;
-
-    this.recognition = new SR();
-    this.recognition.continuous = true;
-    this.recognition.interimResults = true;
-    this.recognition.lang = 'en-US';
-    this.recognition.maxAlternatives = 1;
-
-    this.recognition.onresult = (e) => this._onWebSpeechResult(e);
-    this.recognition.onerror = (e) => this._onWebSpeechError(e);
-    this.recognition.onend = () => this._onWebSpeechEnd();
+    this.supported = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   },
 
   toggle() {
-    if (this.isRecording) {
-      this.stop();
-    } else {
-      this.start();
-    }
+    if (this._state === 'finalizing') return;
+    if (this.isRecording) this.stop();
+    else this.start();
   },
 
   start() {
-    if (this.isRecording) return;
+    if (this._state !== 'idle') return;
     if (!app.activeSessionId) {
       app.showToast('No active session', 'warning');
       return;
     }
-    this._retryCount = 0;
-
     const provider = this._resolveProvider();
-    if (provider === 'claude') {
-      this._startClaude();
-    } else if (provider === 'deepgram') {
-      this._startDeepgram();
-    } else {
-      this._startWebSpeech();
-    }
-  },
-
-  _startClaude() {
-    if (!this._claudeAvailable()) {
-      const reason = this._claudeStatus?.reason;
-      app.showToast(
-        reason === 'expired'
-          ? 'Claude login expired on the server. Run a Claude session to refresh it.'
-          : reason === 'no-credentials'
-            ? 'No Claude Code login found on the server. Sign in there with `claude`.'
-            : 'Claude voice is off. Enable it in Settings > Voice.',
-        'warning'
-      );
-      // Re-probe so a setting flipped on another device is picked up by the next press.
+    if (provider === 'claude' && !this._claudeAvailable()) {
+      app.showToast(ClaudeVoiceProvider._unavailableMessage(this._claudeStatus?.reason || 'disabled'), 'warning');
       this.refreshClaudeStatus();
       return;
     }
-
-    const cfg = this._getDeepgramConfig();
-    this.isRecording = true;
-    this._activeProvider = 'claude';
-    this._accumulatedFinal = '';
-    this._lastTranscript = '';
-    this._hasReceivedResult = false;
-    this._recordingStartedAt = Date.now();
-    this._updateButtons('recording');
-    this._showPreview('Listening...', 'claude');
-    this._startDurationTimer();
-
-    const keyterms = (cfg.keyterms || DEFAULT_VOICE_KEYTERMS)
-      .split(',').map(t => t.trim()).filter(Boolean);
-
-    ClaudeVoiceProvider.start({
-      // The upstream endpoint wants a bare language tag; the Deepgram picker's
-      // 'en-US' style narrows to its base, and 'multi' means auto-detect.
-      language: (cfg.language || 'en-US').split('-')[0],
-      keyterms,
-      onStream: (stream) => this._startLevelMeter(stream),
-      onResult: (text, isFinal) => {
-        if (!this.isRecording) return;
-        this._hasReceivedResult = true;
-        // Each frame is the WHOLE running transcript, so replace rather than append.
-        this._accumulatedFinal = text;
-        if (isFinal) {
-          this._hidePreview();
-          this._insertText(text);
-          this.stop();
-        } else {
-          this._showPreview(text, 'claude');
-        }
-      },
-      onError: (msg) => {
-        const wasRecording = this.isRecording;
-        this.stop();
-        if (wasRecording) app.showToast(msg, 'error');
-      },
-      onEnd: () => {
-        if (this.isRecording) {
-          if (this._accumulatedFinal) this._insertText(this._accumulatedFinal);
-          this.stop();
-        }
-      }
-    });
-
-    if (navigator.vibrate) navigator.vibrate(50);
-  },
-
-  _startDeepgram() {
-    const cfg = this._getDeepgramConfig();
-    this.isRecording = true;
-    this._activeProvider = 'deepgram';
-    this._accumulatedFinal = '';
-    this._lastTranscript = '';
-    this._hasReceivedResult = false;
-    this._recordingStartedAt = Date.now();
-    this._updateButtons('recording');
-    this._showPreview('Listening...', 'deepgram');
-    this._startDurationTimer();
-
-    const keyterms = (cfg.keyterms || DEFAULT_VOICE_KEYTERMS)
-      .split(',').map(t => t.trim()).filter(Boolean);
-
-    DeepgramProvider.start({
-      apiKey: cfg.apiKey,
-      language: cfg.language || 'en-US',
-      keyterms,
-      onStream: (stream) => {
-        this._startLevelMeter(stream);
-      },
-      onResult: (text, isFinal) => {
-        if (!this.isRecording) return;
-        this._hasReceivedResult = true;
-        if (isFinal) {
-          this._accumulatedFinal += text;
-          this._hidePreview();
-          this._insertText(this._accumulatedFinal);
-          this.stop();
-        } else {
-          const display = this._accumulatedFinal + text;
-          this._showPreview(display, 'deepgram');
-        }
-      },
-      onError: (msg) => {
-        const wasRecording = this.isRecording;
-        this.stop();
-        if (wasRecording) app.showToast(msg, 'error');
-      },
-      onEnd: () => {
-        if (this.isRecording) {
-          if (this._accumulatedFinal) {
-            this._insertText(this._accumulatedFinal);
-          }
-          this.stop();
-        }
-      }
-    });
-
-    // Haptic feedback on mobile
-    if (navigator.vibrate) navigator.vibrate(50);
-  },
-
-  _startWebSpeech() {
-    // Lazy-init: retry if recognition was cleaned up or not available at page load
-    if (!this.recognition) this._initRecognition();
-    if (!this.supported) {
-      if (!this._shouldUseDeepgram()) {
-        app.showToast('Voice input not available. Configure Deepgram in Settings > Voice.', 'warning');
-      } else {
-        app.showToast('Voice input not supported in this browser', 'warning');
-      }
+    this._initRecognition();
+    if (provider === 'webspeech' && !this.supported) {
+      app.showToast('Voice input not available. Configure a provider in Settings > Voice.', 'warning');
       return;
     }
+
+    const generation = ++this._generation;
+    this._targetSessionId = app.activeSessionId;
+    this._state = 'recording';
     this.isRecording = true;
-    this._activeProvider = 'webspeech';
-    this._accumulatedFinal = '';
-    this._lastTranscript = '';
-    this._hasReceivedResult = false;
+    this._activeProvider = provider;
+    this._accumulatedFinal = this._interim = this._webSpeechPrefix = '';
+    this._retryCount = 0;
     this._recordingStartedAt = Date.now();
+    this._hideVoiceSendBtn();
     this._updateButtons('recording');
-    this._showPreview('Listening...');
+    this._showPreview('Listening...', provider);
     this._startDurationTimer();
-    try {
-      this.recognition.start();
-    } catch (e) {
-      // InvalidStateError = already started — ignore. Other errors = genuine failure.
-      if (e.name !== 'InvalidStateError') {
-        this.stop();
-        app.showToast('Voice input failed to start: ' + e.message, 'error');
-        return;
-      }
+    const cfg = this._getDeepgramConfig();
+    if (provider === 'webspeech') {
+      // SpeechRecognition owns the mic. A second getUserMedia stream for a
+      // cosmetic level meter can contend with the recognizer on phones.
+      this._startRecognition(generation);
+    } else {
+      // Single-use instances keep late permission/socket callbacks isolated.
+      this._provider = Object.create(provider === 'claude' ? ClaudeVoiceProvider : DeepgramProvider);
+      const segments = new Set();
+      this._provider.start({
+        apiKey: cfg.apiKey,
+        language: provider === 'claude' ? (cfg.language || 'en-US').split('-')[0] : cfg.language || 'en-US',
+        keyterms: (cfg.keyterms || DEFAULT_VOICE_KEYTERMS).split(',').map(t => t.trim()).filter(Boolean),
+        onStream: stream => {
+          if (this._accept(generation) && this.isRecording) this._startLevelMeter(stream);
+        },
+        onResult: (text, isFinal, segmentId) => {
+          if (!this._accept(generation)) return;
+          if (provider === 'claude') {
+            // Claude supplies the whole running transcript, not deltas.
+            this._accumulatedFinal = text;
+            this._interim = '';
+          } else if (isFinal) {
+            if (segmentId != null && segments.has(segmentId)) return;
+            if (segmentId != null) segments.add(segmentId);
+            this._accumulatedFinal = this._join(this._accumulatedFinal, text);
+            this._interim = '';
+          } else {
+            this._interim = text;
+          }
+          this._previewTranscript();
+        },
+        onError: message => {
+          if (this._accept(generation)) this._finish({ review: true, message });
+        },
+        onEnd: () => {
+          if (!this._accept(generation)) return;
+          this._finish(this.isRecording
+            ? { review: true, message: 'Voice recording ended. Your transcript is available for review.' }
+            : {});
+        },
+      });
     }
-    this._resetSilenceTimeout();
-    // Get mic stream for level meter (non-blocking — level meter is cosmetic)
-    navigator.mediaDevices?.getUserMedia({ audio: true }).then(stream => {
-      if (this.isRecording && this._activeProvider === 'webspeech') {
-        this._webSpeechStream = stream;
-        this._startLevelMeter(stream);
-      } else {
-        stream.getTracks().forEach(t => t.stop());
-      }
-    }).catch(() => { /* level meter just won't show */ });
-    // Haptic feedback on mobile
     if (navigator.vibrate) navigator.vibrate(50);
   },
 
+  _accept(generation) {
+    return generation === this._generation && this._state !== 'idle';
+  },
+
+  _join(first, second) {
+    return [first.trim(), second.trim()].filter(Boolean).join(' ');
+  },
+
+  _transcript() {
+    return this._join(this._accumulatedFinal, this._interim);
+  },
+
+  _previewTranscript() {
+    const text = this._transcript();
+    this._showPreview(this._state === 'finalizing' ? `Finishing… ${text}` : text, this._activeProvider);
+  },
+
+  _startRecognition(generation) {
+    if (!this._accept(generation) || !this.isRecording) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recognition = new SR();
+    this.recognition = recognition;
+    // Android's continuous bridge promotes provisional results to finals,
+    // so revised phrases can be appended again. Use single-phrase recognition
+    // there; onend below restarts capture until the user confirms. Never dedup
+    // by transcript text: speaking the same words twice is legitimate input.
+    const android = navigator.userAgentData?.platform === 'Android' || /Android/i.test(navigator.userAgent || '');
+    recognition.continuous = !android;
+    recognition.interimResults = true;
+    const language = this._getDeepgramConfig().language;
+    recognition.lang = language && language !== 'multi' ? language : 'en-US';
+    recognition.maxAlternatives = 1;
+    const current = () => this._accept(generation) && this.recognition === recognition;
+    recognition.onresult = event => {
+      if (!current()) return;
+      let finalText = '';
+      let interim = '';
+      // Results are a snapshot for this recognition cycle. Rebuild it so result
+      // revisions and repeated resultIndex values cannot duplicate words.
+      for (const result of Array.from(event.results)) {
+        if (result.isFinal) finalText = this._join(finalText, result[0].transcript);
+        else interim = this._join(interim, result[0].transcript);
+      }
+      this._accumulatedFinal = this._join(this._webSpeechPrefix, finalText);
+      this._interim = interim;
+      this._retryCount = 0;
+      this._previewTranscript();
+    };
+    recognition.onerror = event => {
+      if (!current()) return;
+      if (event.error === 'no-speech' || (event.error === 'aborted' && this._state === 'finalizing')) return;
+      const messages = {
+        'not-allowed': 'Microphone access denied. Check browser settings.',
+        'service-not-allowed': 'Speech recognition is not allowed. Check browser settings.',
+        network: 'Voice input requires an internet connection.',
+      };
+      this._finish({ review: true, message: messages[event.error] || 'Voice input error: ' + event.error });
+    };
+    recognition.onend = () => {
+      if (!current()) return;
+      this.recognition = null;
+      if (this._state === 'finalizing') {
+        this._finish();
+        return;
+      }
+      this._webSpeechPrefix = this._transcript();
+      this._accumulatedFinal = this._webSpeechPrefix;
+      this._interim = '';
+      // Ordinary browser endpoints can happen throughout a long dictation.
+      // Bound only repeated immediate failures, not the number of phrases.
+      this._retryCount = Date.now() - this._recognitionStartedAt < 1000 ? this._retryCount + 1 : 0;
+      if (this._retryCount > 2) {
+        this._finish({ review: true, message: 'The browser could not keep voice input running. Please try again.' });
+        return;
+      }
+      this._restartTimer = setTimeout(() => this._startRecognition(generation), 250);
+    };
+    this._recognitionStartedAt = Date.now();
+    try {
+      recognition.start();
+    } catch (error) {
+      this._finish({ review: true, message: 'Voice input failed to start: ' + error.message });
+    }
+  },
+
+  /** Confirm: release capture but keep accepting the last transcription events. */
   stop() {
-    if (!this.isRecording) return;
+    if (this._state !== 'recording') return;
+    this._state = 'finalizing';
     this.isRecording = false;
-    clearTimeout(this.silenceTimeout);
-    clearTimeout(this._stabilityTimer);
-    this.silenceTimeout = null;
-    this._stabilityTimer = null;
-    this._retryCount = 0;
+    clearTimeout(this._restartTimer);
+    this._restartTimer = null;
+    this._stopDurationTimer();
+    this._stopLevelMeter();
+    this._updateButtons('finalizing');
+    this._previewTranscript();
+    const generation = this._generation;
+    this._finalizeTimer = setTimeout(() => {
+      if (this._accept(generation)) this._finish();
+    }, 5000);
+    if (this._activeProvider === 'webspeech') {
+      if (!this.recognition) this._finish();
+      else {
+        try { this.recognition.stop(); } catch (_e) { this._finish(); }
+      }
+    } else {
+      this._provider?.stop();
+    }
+    if (navigator.vibrate) navigator.vibrate([30, 50, 30]);
+  },
+
+  /** One terminal transition owns insertion; cleanup invalidates all callbacks. */
+  _finish({ review = false, message = '' } = {}) {
+    if (this._state === 'idle') return;
+    const text = this._transcript();
+    const target = this._targetSessionId;
+    this._release();
+    if (message) app.showToast(message, 'warning');
+    if (text) {
+      if (review || target !== app.activeSessionId) this._showComposeOverlay(text, target);
+      else this._insertText(text, target);
+    } else if (!message) {
+      app.showToast('No speech recognized. Please try again.', 'warning');
+    }
+  },
+
+  _release() {
+    ++this._generation;
+    this._state = 'idle';
+    this.isRecording = false;
+    clearTimeout(this._restartTimer);
+    clearTimeout(this._finalizeTimer);
+    this._restartTimer = this._finalizeTimer = null;
+    if (this.recognition) {
+      this.recognition.onresult = this.recognition.onerror = this.recognition.onend = null;
+      try { this.recognition.abort(); } catch (_e) { /* already ended */ }
+      this.recognition = null;
+    }
+    this._provider?._cleanup();
+    this._provider = null;
+    this._activeProvider = null;
     this._stopDurationTimer();
     this._stopLevelMeter();
     this._updateButtons('idle');
     this._hidePreview();
-
-    if (this._activeProvider === 'claude') {
-      // Finalize, don't hang up: the last transcript arrives after the audio does.
-      ClaudeVoiceProvider.stop();
-    } else if (this._activeProvider === 'deepgram') {
-      DeepgramProvider.stop();
-    } else if (this._activeProvider === 'webspeech') {
-      try {
-        this.recognition?.stop();
-      } catch (_e) {
-        // Already stopped — ignore
-      }
-      // Stop the mic stream we opened for the level meter
-      if (this._webSpeechStream) {
-        this._webSpeechStream.getTracks().forEach(t => t.stop());
-        this._webSpeechStream = null;
-      }
-    }
-    this._activeProvider = null;
-
-    // Haptic feedback on mobile
-    if (navigator.vibrate) navigator.vibrate([30, 50, 30]);
   },
 
-  _onWebSpeechResult(event) {
-    if (!this.isRecording) return;
-    this._hasReceivedResult = true;
-    this._resetSilenceTimeout();
-    let interim = '';
-    let finalText = '';
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const transcript = event.results[i][0].transcript;
-      if (event.results[i].isFinal) {
-        finalText += transcript;
-      } else {
-        interim += transcript;
-      }
-    }
-
-    if (finalText) {
-      this._accumulatedFinal += finalText;
-      this._hidePreview();
-      this._insertText(this._accumulatedFinal);
-      this.stop();
-    } else if (interim) {
-      const display = this._accumulatedFinal + interim;
-      this._showPreview(display);
-      // iOS Safari workaround: isFinal is always false.
-      // Detect when interim results stop changing for 750ms → treat as final.
-      this._iosStabilityCheck(interim);
-    }
-  },
-
-  _onWebSpeechError(event) {
-    // During auto-retry, 'aborted' and 'no-speech' errors are expected — ignore them
-    if (this._retryCount > 0 && (event.error === 'aborted' || event.error === 'no-speech')) return;
-
-    const wasRecording = this.isRecording;
-    this.stop();
-    if (!wasRecording) return;
-
-    switch (event.error) {
-      case 'not-allowed':
-        app.showToast('Microphone access denied. Check browser settings.', 'error');
-        break;
-      case 'no-speech':
-        // Silent — auto-stop is enough feedback
-        break;
-      case 'network':
-        app.showToast('Voice input requires internet connection.', 'error');
-        break;
-      case 'aborted':
-        // User cancelled — no message needed
-        break;
-      default:
-        app.showToast('Voice input error: ' + event.error, 'error');
-    }
-  },
-
-  _onWebSpeechEnd() {
-    // Recognition ended (browser auto-stopped or we called stop())
-    if (!this.isRecording) return;
-
-    const elapsed = Date.now() - this._recordingStartedAt;
-    // Web Speech API often fires onend prematurely on the first attempt (< 500ms, no results).
-    // Auto-retry up to 2 times to avoid the "needs two clicks" problem.
-    if (elapsed < 500 && !this._hasReceivedResult && this._retryCount < 2) {
-      this._retryCount++;
-      try {
-        this.recognition.start();
-      } catch (_e) {
-        // If restart fails, fall through to stop
-        if (this._accumulatedFinal) this._insertText(this._accumulatedFinal);
-        this.stop();
-      }
+  _insertText(text, targetSessionId = app.activeSessionId) {
+    if (!targetSessionId || !text.trim()) return;
+    if (targetSessionId !== app.activeSessionId) {
+      this._showComposeOverlay(text.trim(), targetSessionId);
       return;
     }
-
-    // Genuine end — finalize any accumulated text
-    if (this._accumulatedFinal) {
-      this._insertText(this._accumulatedFinal);
-    }
-    this.stop();
-  },
-
-  _insertText(text) {
-    if (!app.activeSessionId || !text.trim()) return;
     const trimmed = text.trim();
     const mode = this._getDeepgramConfig().insertMode || 'direct';
 
     if (mode === 'compose') {
       // If a compose overlay is already open, populate its textarea instead of recreating
-      const existingTextarea = document.querySelector('.voice-compose-overlay .paste-textarea');
+      const existingOverlay = document.querySelector('.voice-compose-overlay');
+      const existingTextarea = existingOverlay?.dataset.sessionId === targetSessionId
+        ? existingOverlay.querySelector('.paste-textarea') : null;
       if (existingTextarea) {
         existingTextarea.value = trimmed;
         existingTextarea.focus();
         existingTextarea.selectionStart = existingTextarea.selectionEnd = trimmed.length;
       } else {
-        this._showComposeOverlay(trimmed);
+        this._showComposeOverlay(trimmed, targetSessionId);
       }
     } else {
       // Direct mode: inject into local echo overlay if available, else send to PTY
@@ -1047,13 +977,14 @@ const VoiceInput = {
   },
 
   /** Show an editable compose overlay so the user can review/edit before sending */
-  _showComposeOverlay(text) {
+  _showComposeOverlay(text, targetSessionId = app.activeSessionId) {
     document.querySelector('.voice-compose-overlay')?.remove();
     const overlay = document.createElement('div');
     overlay.className = 'voice-compose-overlay paste-overlay';
+    overlay.dataset.sessionId = targetSessionId;
     overlay.innerHTML = `
       <div class="paste-dialog">
-        <textarea class="paste-textarea">${text.replace(/</g, '&lt;')}</textarea>
+        <textarea class="paste-textarea"></textarea>
         <div class="paste-actions">
           <button class="paste-cancel">Cancel</button>
           <button class="paste-new"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> New</button>
@@ -1062,13 +993,21 @@ const VoiceInput = {
       </div>
     `;
     const textarea = overlay.querySelector('textarea');
+    textarea.value = text;
+    const checkTarget = () => {
+      if (targetSessionId === app.activeSessionId) return true;
+      app.showToast('Return to the original session to use this transcript.', 'warning');
+      return false;
+    };
     const send = () => {
+      if (!checkTarget()) return;
       const val = textarea.value.trim();
       overlay.remove();
       if (val) app.sendInput(val + '\r').catch(() => {});
     };
     const cancel = () => overlay.remove();
     const newInput = () => {
+      if (!checkTarget() || this._state !== 'idle') return;
       textarea.value = '';
       textarea.blur();
       this.start();
@@ -1080,34 +1019,6 @@ const VoiceInput = {
     document.body.appendChild(overlay);
     textarea.focus();
     textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
-  },
-
-  _resetSilenceTimeout() {
-    clearTimeout(this.silenceTimeout);
-    this.silenceTimeout = setTimeout(() => {
-      if (this.isRecording) {
-        // Finalize any accumulated text before stopping
-        if (this._accumulatedFinal) {
-          this._insertText(this._accumulatedFinal);
-        }
-        this.stop();
-      }
-    }, 3000);
-  },
-
-  _iosStabilityCheck(transcript) {
-    if (transcript !== this._lastTranscript) {
-      this._lastTranscript = transcript;
-      clearTimeout(this._stabilityTimer);
-      this._stabilityTimer = setTimeout(() => {
-        if (this.isRecording) {
-          const finalText = this._accumulatedFinal + transcript;
-          this._hidePreview();
-          this._insertText(finalText);
-          this.stop();
-        }
-      }, 750);
-    }
   },
 
   _startDurationTimer() {
@@ -1242,17 +1153,20 @@ const VoiceInput = {
     // Desktop button
     const desktopBtn = document.getElementById('voiceInputBtn');
     if (desktopBtn) {
+      desktopBtn.disabled = state === 'finalizing';
       desktopBtn.classList.toggle('recording', isRecording);
       desktopBtn.setAttribute('aria-pressed', String(isRecording));
-      desktopBtn.setAttribute('aria-label', isRecording ? 'Stop voice input' : 'Start voice input');
-      desktopBtn.title = isRecording ? 'Stop voice input (Ctrl+Shift+V)' : 'Voice input (Ctrl+Shift+V)';
+      desktopBtn.setAttribute('aria-label', state === 'finalizing' ? 'Finishing voice input' : isRecording ? 'Confirm voice input' : 'Start voice input');
+      desktopBtn.title = state === 'finalizing' ? 'Finishing voice input' : isRecording
+        ? 'Confirm voice input (Ctrl+Shift+V)' : 'Voice input (Ctrl+Shift+V)';
     }
     // Mobile toolbar button (always visible on mobile)
     const mobileToolbarBtn = document.getElementById('voiceInputBtnMobile');
     if (mobileToolbarBtn) {
+      mobileToolbarBtn.disabled = state === 'finalizing';
       mobileToolbarBtn.classList.toggle('recording', isRecording);
       mobileToolbarBtn.setAttribute('aria-pressed', String(isRecording));
-      mobileToolbarBtn.setAttribute('aria-label', isRecording ? 'Stop voice input' : 'Start voice input');
+      mobileToolbarBtn.setAttribute('aria-label', state === 'finalizing' ? 'Finishing voice input' : isRecording ? 'Confirm voice input' : 'Start voice input');
     }
   },
 
@@ -1263,31 +1177,10 @@ const VoiceInput = {
     if (mobileToolbarBtn) mobileToolbarBtn.style.display = '';
   },
 
-  /** Cleanup on SSE reconnect or page unload */
+  /** Preserve unfinished dictation for review when the connection/session changes. */
   cleanup() {
-    if (this.isRecording) this.stop();
+    if (this._state !== 'idle') this._finish({ review: true });
+    else this._release();
     this._hideVoiceSendBtn();
-    DeepgramProvider._cleanup();
-    ClaudeVoiceProvider._cleanup();
-    this.recognition = null;
-    this._activeProvider = null;
-    this._stopDurationTimer();
-    this._stopLevelMeter();
-    if (this._webSpeechStream) {
-      this._webSpeechStream.getTracks().forEach(t => t.stop());
-      this._webSpeechStream = null;
-    }
-    if (this.previewEl) {
-      this.previewEl.remove();
-      this.previewEl = null;
-    }
-    clearTimeout(this.silenceTimeout);
-    clearTimeout(this._stabilityTimer);
-    this.silenceTimeout = null;
-    this._stabilityTimer = null;
-    this._accumulatedFinal = '';
-    this._lastTranscript = '';
-    this._retryCount = 0;
-    this._hasReceivedResult = false;
   }
 };

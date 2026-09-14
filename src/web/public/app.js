@@ -5536,6 +5536,7 @@ class CodemanApp {
   }
 
   _cleanupPreviousSession(newSessionId) {
+    VoiceInput.cleanup?.();
     // Snapshot the OUTGOING session's xterm rendered state (viewport + scrollback +
     // colors/attrs) before the terminal gets cleared/reset. Lets us restore the
     // exact view on switch-back rather than replaying codex's byte stream, which
