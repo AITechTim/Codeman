@@ -42,11 +42,18 @@ const KEYBOARD_HEIGHT = 300;
  * Load mobile-handlers.js against a fake DOM and return its KeyboardHandler
  * plus the mutable viewport it reads.
  *
+ * Two heights are modelled, because the handler reads both: `visualViewport`
+ * is what the keyboard shrinks, and `window.innerHeight` is the layout
+ * viewport, which stays the display's full height while the keyboard is up
+ * (the page sets no interactive-widget, so the default resizes-visual mode
+ * holds on both engines). resizeTo() ties them unless a test says otherwise.
+ *
  * `const KeyboardHandler = {...}` is a lexical binding that does not survive to
  * a second `vm.runInContext`, so the export is appended to the SAME script.
  */
 function loadHandler(start: { width: number; height: number }) {
   const viewport = { ...start, offsetTop: 0, addEventListener: () => {}, removeEventListener: () => {} };
+  const layout = { height: start.height };
   const bodyClasses = new Set<string>();
   const appHeight: string[] = [];
 
@@ -59,7 +66,7 @@ function loadHandler(start: { width: number; height: number }) {
         return viewport.width;
       },
       get innerHeight() {
-        return viewport.height;
+        return layout.height;
       },
       visualViewport: viewport,
       addEventListener: () => {},
@@ -94,10 +101,16 @@ function loadHandler(start: { width: number; height: number }) {
   const handler = (context as unknown as { __KH: Handler }).__KH;
   handler.init();
 
-  /** Move the viewport and fire the resize the browser would fire. */
-  const resizeTo = (width: number, height: number) => {
+  /**
+   * Move the visual viewport and fire the resize the browser would fire.
+   * `layoutHeight` is window.innerHeight; pass the display's full height to
+   * model a keyboard that is up (the visual viewport shrunk, the layout one
+   * not), and leave it out for a plain resize, where the two agree.
+   */
+  const resizeTo = (width: number, height: number, layoutHeight = height) => {
     viewport.width = width;
     viewport.height = height;
+    layout.height = layoutHeight;
     handler.handleViewportResize();
   };
 
@@ -205,12 +218,63 @@ describe('handleViewportResize: width changes are the device changing shape', ()
     // one that is gone (updateAppHeight() bails while the keyboard is up).
     const { handler, resizeTo, appHeight } = loadHandler(DUO_INNER);
 
-    resizeTo(DUO_INNER.width, DUO_INNER.height - KEYBOARD_HEIGHT);
+    resizeTo(DUO_INNER.width, DUO_INNER.height - KEYBOARD_HEIGHT, DUO_INNER.height);
     expect(handler.keyboardVisible).toBe(true);
 
-    resizeTo(DUO_OUTER.width, DUO_OUTER.height - KEYBOARD_HEIGHT);
+    resizeTo(DUO_OUTER.width, DUO_OUTER.height - KEYBOARD_HEIGHT, DUO_OUTER.height);
 
     expect(appHeight.at(-1)).toBe(`${DUO_OUTER.height - KEYBOARD_HEIGHT}px`);
-    expect(handler.initialViewportHeight).toBe(DUO_OUTER.height - KEYBOARD_HEIGHT);
+    // The baseline is the new display's KEYBOARD-FREE height (window.innerHeight),
+    // never the shrunk visual height, or the next resize reads as the keyboard
+    // closing (see the two tests below).
+    expect(handler.initialViewportHeight).toBe(DUO_OUTER.height);
+  });
+
+  it('survives the settle event that follows a fold with the keyboard up', () => {
+    // The OS animates a shape change, so the browser fires one resize that
+    // changes the width and then at least one more at the settled width (see
+    // _scheduleViewportSettle). Baselining the first to the SHRUNK visual
+    // height made heightDiff 0 on the second, which satisfied the hide branch
+    // and tore the keyboard layout down with the keyboard still on screen, and
+    // nothing could re-arm the show branch against that baseline.
+    const { handler, resizeTo, bodyClasses } = loadHandler(DUO_INNER);
+
+    resizeTo(DUO_INNER.width, DUO_INNER.height - KEYBOARD_HEIGHT, DUO_INNER.height);
+    resizeTo(DUO_OUTER.width, DUO_OUTER.height - KEYBOARD_HEIGHT, DUO_OUTER.height);
+    resizeTo(DUO_OUTER.width, DUO_OUTER.height - KEYBOARD_HEIGHT, DUO_OUTER.height);
+
+    expect(handler.keyboardVisible).toBe(true);
+    expect(bodyClasses.has('keyboard-visible')).toBe(true);
+    expect(handler.initialViewportHeight).toBe(DUO_OUTER.height);
+  });
+
+  it('survives the settle event that follows a rotation with the keyboard up', () => {
+    // Same latch on a plain phone: portrait 393x659, keyboard up (visual 359),
+    // rotate to landscape 852x393 with the keyboard still up (visual 150),
+    // then the settle event at 160. The old baseline of 150 read the 160 as
+    // the keyboard closing.
+    const { handler, resizeTo, bodyClasses } = loadHandler({ width: 393, height: 659 });
+
+    resizeTo(393, 359, 659);
+    expect(handler.keyboardVisible).toBe(true);
+    resizeTo(852, 150, 393);
+    resizeTo(852, 160, 393);
+
+    expect(handler.keyboardVisible).toBe(true);
+    expect(bodyClasses.has('keyboard-visible')).toBe(true);
+    expect(handler.initialViewportHeight).toBe(393);
+  });
+
+  it('still detects the keyboard closing after a fold with it up', () => {
+    // The keyboard-free baseline is what makes the eventual close visible:
+    // dismissing it returns the visual viewport to the display height.
+    const { handler, resizeTo, bodyClasses } = loadHandler(DUO_INNER);
+
+    resizeTo(DUO_INNER.width, DUO_INNER.height - KEYBOARD_HEIGHT, DUO_INNER.height);
+    resizeTo(DUO_OUTER.width, DUO_OUTER.height - KEYBOARD_HEIGHT, DUO_OUTER.height);
+    resizeTo(DUO_OUTER.width, DUO_OUTER.height);
+
+    expect(handler.keyboardVisible).toBe(false);
+    expect(bodyClasses.has('keyboard-visible')).toBe(false);
   });
 });

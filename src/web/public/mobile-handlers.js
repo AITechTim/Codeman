@@ -362,13 +362,27 @@ const KeyboardHandler = {
       MobileDetection.updateAppHeight();
     }
 
-    // Update baseline when keyboard is not visible — adapts to address bar
+    // Update baseline when keyboard is not visible: adapts to address bar
     // state changes, orientation changes, and other viewport shifts. A shape
     // change re-baselines even with the keyboard up (it may genuinely still be
     // open, but its old baseline belongs to a display that is gone), and still
     // writes --app-height below so the keyboard-open sizing follows the new
     // display.
-    if (shapeChanged || !this.keyboardVisible) {
+    //
+    // ⚠️ With the keyboard up, the new baseline must be the KEYBOARD-FREE
+    // height of the display the device moved to, which is window.innerHeight
+    // (the layout viewport; the page sets no interactive-widget, so the
+    // keyboard shrinks only the visual viewport on both engines, the same
+    // fact updateLayoutForKeyboard() relies on). Baselining to the SHRUNK
+    // visual height made heightDiff 0, so the very next same-width resize
+    // (the settle event the OS animation produces, or any address-bar drift)
+    // satisfied the hide branch and tore the keyboard layout down with the
+    // keyboard still on screen, and it could not recover: no further 150px
+    // drop can re-arm the show branch against a baseline that already sits
+    // at the shrunk height.
+    if (shapeChanged) {
+      this.initialViewportHeight = this.keyboardVisible ? window.innerHeight : currentHeight;
+    } else if (!this.keyboardVisible) {
       this.initialViewportHeight = currentHeight;
     }
     if (this.keyboardVisible) {
