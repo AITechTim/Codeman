@@ -186,13 +186,6 @@ export interface CaseInfo {
     path: string;
     /** Directory INSIDE the container (defaults to `path` when unset). */
     containerWorkdir?: string;
-    /**
-     * False = an ADOPTED container the user built and runs. Only those may back
-     * several cases at once (classifyAdoptContainerConflict), so this is what lets
-     * the UI offer "duplicate for another directory" on exactly the right cases —
-     * an owned container's lifecycle belongs to its one case.
-     */
-    owned?: boolean;
     network?: string;
     /**
      * CLIs available INSIDE the container. A container case runs its agents in
@@ -210,6 +203,10 @@ export interface CaseInfo {
      * first session: the container is created on demand by the launch chain, so treating
      * "not found" as a fault there hid every agent mode behind an error telling the user
      * to start a container Codeman was about to create itself.
+     *
+     * It also gates the Add Case panel's "copy an existing case" picker: only an ADOPTED
+     * container may back several cases at once (`classifyAdoptContainerConflict`), since an
+     * owned container's lifecycle belongs to its one case.
      */
     owned?: boolean;
   };

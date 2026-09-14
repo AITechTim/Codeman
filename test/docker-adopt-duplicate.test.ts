@@ -27,13 +27,16 @@ describe('the API exposes what the picker needs', () => {
   it('reports whether the container is owned, on EVERY case-shaped response', () => {
     // Two sites build a docker CaseInfo (the list and the single-case lookup);
     // filling only one leaves the picker blind depending on which the UI read.
-    expect(routes.match(/owned: dockerCase\.owned !== false,/g) ?? []).toHaveLength(2);
+    expect(routes.match(/\.\.\.\(dockerCase\.owned === false \? \{ owned: false \} : \{\}\),/g) ?? []).toHaveLength(2);
   });
 
   it('treats an ABSENT owned flag as owned, so legacy cases are not offered', () => {
-    // `owned` is optional and predates this field; truthiness would read a legacy
-    // case as adopted and offer a duplicate the server then refuses.
-    expect(routes).toContain('dockerCase.owned !== false');
+    // `owned` is optional and predates this field; the wire carries it ONLY when
+    // false (absent = owned, the shape master already used), so the picker must
+    // test `=== false` rather than truthiness, or a legacy case would read as
+    // adopted and be offered a duplicate the server then refuses.
+    expect(routes).toContain('...(dockerCase.owned === false ? { owned: false } : {}),');
+    expect(routes).not.toContain('owned: dockerCase.owned !== false');
   });
 });
 
