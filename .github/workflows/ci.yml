@@ -74,6 +74,32 @@ jobs:
             offer_ai_cli_install >/dev/null 2>&1
             echo "bash $BASH_VERSION: skipping the AI CLI install menu continues"
           '
+          # Issue #382: the dsh identity probe builds an OPTIONAL `timeout` prefix as an
+          # array, and on stock macOS there is no `timeout`, so the array is empty and the
+          # expansion aborts the whole installer under `set -u`. The step above cannot
+          # reach that branch: this image HAS `timeout`, and with no `dsh` on PATH the
+          # probe is never called at all. So hide `timeout` and call it directly.
+          docker run --rm -v "$PWD":/w -w /w -e CODEMAN_INSTALL_SH_LIB=1 bash:3.2 bash -c '
+            set -euo pipefail
+            . /w/install.sh
+            printf "#!/bin/sh\necho \"DeepSeek Harness 0.1\"\n" > /tmp/dsh
+            printf "#!/bin/sh\necho \"dancer shell (Debian dsh)\"\n" > /tmp/not-dsh
+            chmod 755 /tmp/dsh /tmp/not-dsh
+            # A PATH the probe can still work on, minus the binary under test.
+            mkdir -p /tmp/nobin
+            for b in grep sh; do ln -sf "$(command -v $b)" "/tmp/nobin/$b"; done
+            export PATH=/tmp/nobin
+            if command -v timeout >/dev/null 2>&1; then
+              echo "timeout is still on PATH, so this is NOT exercising the empty-array branch" >&2
+              exit 1
+            fi
+            dsh_banner_probe /tmp/dsh
+            if dsh_banner_probe /tmp/not-dsh; then
+              echo "identity probe accepted a foreign dsh" >&2
+              exit 1
+            fi
+            echo "bash $BASH_VERSION: dsh identity probe survives a missing timeout"
+          '
 
       - name: CLI catalogue artifacts are in sync with stock.ts
         run: npm run generate:cli-catalog -- --check
