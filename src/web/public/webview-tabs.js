@@ -264,10 +264,17 @@ Object.assign(CodemanApp.prototype, {
         if (recent.length >= 5) return;
         recent.push(now);
         this._webviewRecoveries.set(id, recent);
-        // Path only, never an origin: a `//host/x` here would jump the frame off
-        // the proxy (resolveUpstreamUrl refuses it server-side as well).
-        const path = data.path.replace(/^\/+/, '/');
-        void this.openWebview(id, { path: path.startsWith('/') && !path.startsWith('//') ? path : '/' });
+        // Path only, never an origin. Three spellings would resolve to a foreign
+        // origin (in direct mode `new URL(path, src)` is the frame's src, so the
+        // frame would remount there): the protocol-relative `//host/x`; a
+        // backslash, which the WHATWG parser treats as `/` for http(s), so
+        // `/\host/x` too; and an ASCII tab or newline, which the parser deletes
+        // before it looks at anything, so `/<tab>/host/x` IS `//host/x` by the time
+        // it resolves. Drop the invisible ones, collapse the leading separators to
+        // one `/`, and refuse whatever still opens a second one. The proxied form
+        // is refused server-side as well (resolveUpstreamUrl).
+        const path = data.path.replace(/[\t\n\r]/g, '').replace(/^[/\\]+/, '/');
+        void this.openWebview(id, { path: path.startsWith('/') && !/^\/[/\\]/.test(path) ? path : '/' });
         return;
       }
     };

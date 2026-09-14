@@ -385,4 +385,31 @@ describe('lost-frame recovery', () => {
     expect(opens).toBeLessThanOrEqual(5);
     expect(opens).toBeGreaterThan(0);
   });
+
+  /**
+   * The proxied form above cannot leave the prefix whatever the path says. A
+   * DIRECT-mode tab is the reachable case: `POST /open` returns no embedUrl, so
+   * the recovered path is resolved with `new URL(path, src)` and becomes the
+   * frame's src. The WHATWG parser reads a backslash as `/` for http(s), and
+   * deletes ASCII tab and newline before parsing, so `/\host/x` and `/<tab>/host/x`
+   * both mean `//host/x` there: a page in such a tab could remount its own frame
+   * on a foreign origin. Not an escalation (the page can already navigate itself
+   * anywhere), but the handler promises "path only, never an origin".
+   */
+  it('keeps a direct-mode frame on its own origin whatever separator the path opens with', async () => {
+    const { win, app } = boot();
+    app._installWebviewLostListener();
+    await app.openWebview('direct');
+    expect(frameSrc(win, 'direct')).toBe('https://localhost:9443/');
+    const attempts = ['/\\evil.example/x', '\\\\evil.example/x', '/\t/evil.example/x', '/\n/evil.example/x'];
+    for (const path of attempts) {
+      lost(win, frameOf(win, 'direct').contentWindow, path);
+      await vi.waitFor(() => expect(frameSrc(win, 'direct')).toBe('https://localhost:9443/evil.example/x'));
+      // Reset for the next spelling so the assertion above cannot pass on a stale
+      // src; through openWebview rather than another lost message, which is
+      // capped at five per minute per frame.
+      await app.openWebview('direct', { path: '/' });
+      expect(frameSrc(win, 'direct')).toBe('https://localhost:9443/');
+    }
+  });
 });
