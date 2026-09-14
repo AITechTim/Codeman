@@ -856,17 +856,19 @@ const STATUSLINE_MARKER = '/api/status-telemetry';
  * (present in every managed session via tmux setenv), so the config is static.
  */
 export function generateStatusLineCommand(): string {
-  // `curl -sk`: CODEMAN_API_URL is loopback HTTPS with a self-signed cert in the
+  // `curl -sfk`: CODEMAN_API_URL is loopback HTTPS with a self-signed cert in the
   // production setup; without -k curl returns 000 and the statusline shows
-  // nothing. -k is safe here (loopback only). Falls back to a brand string so the
-  // footer is never blank if Codeman is unreachable.
+  // nothing. -k is safe here (loopback only); -f keeps an HTTP error body off
+  // the statusline. On any failure it prints NOTHING: the old `|| echo codeman`
+  // is the bare word that a hand-run `claude` in a managed repo rendered, and
+  // that reads as a broken config (discussion #405).
   return (
     `INPUT=$(cat 2>/dev/null || echo '{}'); ` +
     `printf '{"sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$INPUT" | ` +
-    `curl -sk -X POST "$CODEMAN_API_URL${STATUSLINE_MARKER}" ` +
+    `curl -sfk -X POST "$CODEMAN_API_URL${STATUSLINE_MARKER}" ` +
     `-H 'Content-Type: application/json' ` +
     `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
-    `--data @- 2>/dev/null || echo codeman`
+    `--data @- 2>/dev/null || true`
   );
 }
 
@@ -913,7 +915,7 @@ export async function applyStatusLineConfig(casePath: string, enabled: boolean):
  * whenever the script content changes so `ensureStatusLineExporterScript`'s
  * content comparison rewrites stale copies on next use.
  */
-const STATUSLINE_EXPORTER_SCRIPT_MARKER = 'CODEMAN_STATUSLINE_EXPORTER_V3';
+const STATUSLINE_EXPORTER_SCRIPT_MARKER = 'CODEMAN_STATUSLINE_EXPORTER_V4';
 
 function statusLineExporterScriptContent(): string {
   // Where the telemetry POST runs depends on who owns the footer. When the pane's
@@ -930,12 +932,14 @@ function statusLineExporterScriptContent(): string {
   // Absent a user statusline, NOTHING else will print the footer, so the POST runs
   // in the FOREGROUND and ITS OWN stdout becomes the footer — `/api/status-telemetry`
   // returns formatSessionStatusText(...) (model/tokens/context %) precisely so this
-  // can happen — falling back to the plain "codeman" marker only if curl itself
-  // fails (`|| echo codeman`, refused/unreachable Codeman). `--max-time` bounds a
+  // can happen. If curl itself fails (refused/unreachable Codeman, or an HTTP
+  // error, which `-f` keeps off stdout) the footer is simply EMPTY (`|| true`):
+  // the old `|| echo codeman` rendered a bare brand word that reads as a broken
+  // config, the symptom discussion #405 opened with. `--max-time` bounds a
   // HUNG (not just refused) Codeman so it cannot wedge the render indefinitely.
   const post =
     `printf '{"sessionId":"%s","data":%s}' "$CODEMAN_SESSION_ID" "$INPUT" | ` +
-    `curl -sk --max-time 5 -X POST "$CODEMAN_API_URL${STATUSLINE_MARKER}" ` +
+    `curl -sfk --max-time 5 -X POST "$CODEMAN_API_URL${STATUSLINE_MARKER}" ` +
     `-H 'Content-Type: application/json' ` +
     `-H "X-Codeman-Hook-Secret: $(cat "$CODEMAN_HOOK_SECRET_FILE" 2>/dev/null)" ` +
     `--data @-`;
@@ -947,7 +951,7 @@ function statusLineExporterScriptContent(): string {
     `  ( ${post} ) >/dev/null 2>&1 </dev/null &\n` +
     `  printf '%s' "$INPUT" | sh -c "$CODEMAN_USER_STATUSLINE_CMD"\n` +
     `else\n` +
-    `  ${post} 2>/dev/null || echo codeman\n` +
+    `  ${post} 2>/dev/null || true\n` +
     `fi\n`
   );
 }

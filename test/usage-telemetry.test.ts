@@ -119,8 +119,9 @@ describe('formatSessionStatusText', () => {
     expect(formatSessionStatusText({ modelDisplayName: 'Opus 4.8 (1M context)' })).toBe('Opus 4.8 (1M context)');
   });
 
-  it('falls back to a brand string when there is no data', () => {
-    expect(formatSessionStatusText(null)).toBe('codeman');
+  it('prints nothing when there is no data (a bare brand word reads as a broken statusline)', () => {
+    expect(formatSessionStatusText(null)).toBe('');
+    expect(formatSessionStatusText({} as never)).toBe('');
   });
 });
 

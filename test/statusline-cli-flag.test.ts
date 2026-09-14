@@ -19,7 +19,7 @@ import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { buildSpawnCommand } from '../src/tmux-manager.js';
 
-const EXPORTER_CMD = 'curl -sk -X POST "$CODEMAN_API_URL/api/status-telemetry" --data @- 2>/dev/null || echo codeman';
+const EXPORTER_CMD = 'curl -sfk -X POST "$CODEMAN_API_URL/api/status-telemetry" --data @- 2>/dev/null || true';
 
 /** Extract the `--settings <arg>` fragment from a built command and have a
  * real shell resolve its quoting, printing the arg back out verbatim. */

@@ -1516,10 +1516,17 @@ describe('statusline exporter script (real shell execution)', () => {
     expect(result.stdout.trim()).toBe('model: opus | 42% used');
   });
 
-  it('no-user-statusline branch: falls back to the plain "codeman" marker when curl fails', async () => {
+  it('no-user-statusline branch: prints NOTHING when curl fails (never a bare brand word)', async () => {
     writeFakeCurl(`exit 1`);
     const result = await runExporter(baseEnv);
-    expect(result.stdout.trim()).toBe('codeman');
+    expect(result.stdout).toBe('');
+    expect(result.code).toBe(0);
+  });
+
+  it('asks curl to fail on HTTP errors (-f) so an error body never becomes the footer', async () => {
+    const scriptPath = await resolveStatusLineCliCommand(testDir, true);
+    expect(readFileSync(scriptPath!, 'utf-8')).toContain('curl -sfk');
+    expect(readFileSync(scriptPath!, 'utf-8')).not.toContain('echo codeman');
   });
 
   it('wrap branch: never blocks a reader-to-EOF on a slow/hung curl (background subshell closes stdin too)', async () => {

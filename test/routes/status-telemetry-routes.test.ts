@@ -49,10 +49,10 @@ describe('POST /api/status-telemetry', () => {
     });
   });
 
-  it('does not broadcast for an unknown session; returns the brand footer', async () => {
+  it('does not broadcast for an unknown session; returns an EMPTY footer, never a brand word', async () => {
     const res = await post({ sessionId: 'does-not-exist', data: REAL });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toBe('codeman');
+    expect(res.body).toBe('');
     expect(h.ctx.broadcast).not.toHaveBeenCalled();
   });
 
