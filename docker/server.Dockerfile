@@ -100,8 +100,15 @@ COPY --from=docker:29-cli \
 #
 # Bump these deliberately, in a release. `--no-cache` is still needed to rebuild
 # this layer when only the pins change upstream.
+# The prefix is APPENDED to PATH, never prepended: it is chowned to the runtime
+# account below, and entrypoint.sh runs as root calling stat/chown/setpriv by
+# bare name. A prefix ahead of /usr/bin would let a session drop a `setpriv`
+# there and have it run as root at the next container start (measured with a
+# minimal image of this exact shape). The four CLIs live only in this prefix,
+# so they still resolve; entrypoint.sh additionally pins its own PATH to the
+# system directories for the root part of the start.
 ENV NPM_CONFIG_PREFIX=/opt/codeman-cli
-ENV PATH=/opt/codeman-cli/bin:$PATH
+ENV PATH=$PATH:/opt/codeman-cli/bin
 RUN npm install --global \
       @anthropic-ai/claude-code@2.1.258 \
       @google/gemini-cli@0.58.0 \
