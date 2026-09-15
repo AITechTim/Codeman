@@ -187,6 +187,28 @@ describe('WebServer.renderIndexHtml', () => {
     });
   });
 
+  it('reports which run modes the custom-model Run-menu picker may generate an entry for', async () => {
+    // Read generically off the CLI registry's own capabilities, not a hardcoded id
+    // list — antigravity (`unsupported`) and shell (`kind !== 'agent'`) must be
+    // absent, and any enabled agent CLI with a real injection recipe must be
+    // present, with no mock needed since this reads the real stock registry.
+    const { server } = makeServer({});
+    const html = await render(server);
+    expect(html).toContain('window.__codemanCustomModelClis=');
+    const clis = JSON.parse(html.match(/window\.__codemanCustomModelClis=(\[.*?\]);/)![1]) as Array<{
+      id: string;
+      label: string;
+    }>;
+    const ids = clis.map((c) => c.id);
+    expect(ids).toContain('claude');
+    expect(ids).not.toContain('antigravity');
+    expect(ids).not.toContain('shell');
+    for (const cli of clis) {
+      expect(typeof cli.id).toBe('string');
+      expect(typeof cli.label).toBe('string');
+    }
+  });
+
   it('still emits the object when nothing at all is installed', async () => {
     // The all-false case is the one that matters most and the easiest to get
     // wrong by only injecting when something resolves.
@@ -218,6 +240,7 @@ describe('WebServer.renderIndexHtml', () => {
     const { server } = makeServer({});
     const html = await render(server, 'sess-123');
     expect(html).not.toContain('__codemanCliAvailable');
+    expect(html).not.toContain('__codemanCustomModelClis');
   });
 
   it('does not expose gesture at all when CODEMAN_GESTURE is unset', async () => {

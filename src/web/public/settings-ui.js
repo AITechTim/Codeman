@@ -395,6 +395,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowUltracodeAgents').checked = settings.showUltracodeAgents ?? defaults.showUltracodeAgents ?? false;
     // Approvals Inbox: synced, default OFF (opt-in; only an explicit true enables).
     document.getElementById('appSettingsApprovalsInbox').checked = settings.approvalsInboxEnabled === true;
+    // Custom Model Endpoint Profiles: synced, default OFF. The toggle governs both
+    // the Run-menu picker's generated entries and this settings panel's visibility;
+    // the endpoint list itself is server state, loaded separately below.
+    document.getElementById('appSettingsCustomModelEndpoints').checked = settings.customModelEndpointsEnabled === true;
     // Read My Mind: synced, default OFF (opt-in; capture + prediction cost real tokens).
     document.getElementById('appSettingsReadMyMind').checked = settings.readMyMindEnabled === true;
     document.getElementById('appSettingsUltracodeFloatingWindows').checked =
@@ -509,6 +513,10 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsNiceValue').value = niceSettings.niceValue ?? 10;
     // Model configuration (loaded from server)
     this.loadModelConfigForSettings();
+    // Custom Model Endpoint Profiles: server state, own load path (mirrors the
+    // model-config pair above) rather than the settings payload — endpoints are
+    // infra records (CRUD'd via /api/model-endpoints), not user preferences.
+    this.loadCustomModelEndpointsForSettings();
     // Notification settings
     const notifPrefs = this.notificationManager?.preferences || {};
     document.getElementById('appSettingsNotifEnabled').checked = notifPrefs.enabled ?? true;
@@ -2106,6 +2114,7 @@ Object.assign(CodemanApp.prototype, {
       showSubagents: document.getElementById('appSettingsShowSubagents').checked,
       showUltracodeAgents: document.getElementById('appSettingsShowUltracodeAgents').checked,
       approvalsInboxEnabled: document.getElementById('appSettingsApprovalsInbox').checked,
+      customModelEndpointsEnabled: document.getElementById('appSettingsCustomModelEndpoints').checked,
       readMyMindEnabled: document.getElementById('appSettingsReadMyMind').checked,
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
@@ -2487,6 +2496,161 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  // ═══════════════════════════════════════════════════════════════
+  // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md)
+  //
+  // CRUD against /api/model-endpoints, rendered into the Models settings section.
+  // Deliberately its own load/save pair rather than folded into openAppSettings/
+  // saveAppSettings: these are server-side infra records (like remote/docker
+  // hosts), not a settings-payload field, so the app-settings-structure guard's
+  // by-id contract does not apply to them — only the `customModelEndpointsEnabled`
+  // toggle itself goes through that path.
+  // ═══════════════════════════════════════════════════════════════
+
+  async loadCustomModelEndpointsForSettings() {
+    try {
+      const res = await fetch('/api/model-endpoints');
+      const hosts = await res.json();
+      this._customModelHosts = Array.isArray(hosts) ? hosts : [];
+    } catch (err) {
+      console.warn('Failed to load model endpoints:', err);
+      this._customModelHosts = this._customModelHosts || [];
+    }
+    this.renderCustomModelHostsList();
+  },
+
+  renderCustomModelHostsList() {
+    const list = document.getElementById('customModelHostsList');
+    if (!list) return;
+    const hosts = this._customModelHosts || [];
+    if (hosts.length === 0) {
+      list.innerHTML = '<p class="set-group-hint">No endpoints yet. Add one below to point a harness at a local or cloud OpenAI-compatible server.</p>';
+      return;
+    }
+    list.innerHTML = hosts
+      .map((h) => {
+        const modelCount = (h.models || []).length;
+        const modelSummary = modelCount === 0
+          ? 'No models discovered yet'
+          : `${modelCount} model${modelCount === 1 ? '' : 's'}${h.defaultModelId ? ` · default: ${escapeHtml(h.defaultModelId)}` : ' · no default set'}`;
+        return `
+          <div class="set-row" data-endpoint-id="${escapeHtml(h.id)}">
+            <div class="set-row-text">
+              <span class="set-row-label">${escapeHtml(h.label)}</span>
+              <span class="set-row-desc">${escapeHtml(h.baseUrl)} — ${modelSummary}</span>
+            </div>
+            <div class="set-row-actions">
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.discoverCustomModelHostModels(${JSON.stringify(h.id)})">Discover</button>
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.openCustomModelHostEditor(${JSON.stringify(h.id)})">Edit</button>
+              <button type="button" class="btn-toolbar btn-danger btn-sm" onclick="app.deleteCustomModelHost(${JSON.stringify(h.id)})">Delete</button>
+            </div>
+          </div>`;
+      })
+      .join('');
+  },
+
+  /** Opens the inline add/edit form. Pass no id to add a new endpoint. */
+  openCustomModelHostEditor(hostId) {
+    const host = hostId ? (this._customModelHosts || []).find((h) => h.id === hostId) : null;
+    this._editingCustomModelHostId = host ? host.id : null;
+    document.getElementById('customModelHostEditorTitle').textContent = host ? `Edit ${host.label}` : 'Add endpoint';
+    document.getElementById('customModelHostId').value = host?.id || '';
+    document.getElementById('customModelHostId').disabled = !!host; // id is immutable once created
+    document.getElementById('customModelHostLabel').value = host?.label || '';
+    document.getElementById('customModelHostBaseUrl').value = host?.baseUrl || '';
+    document.getElementById('customModelHostApiKey').value = ''; // never round-tripped back into the field
+    document.getElementById('customModelHostApiKey').placeholder = host?.apiKey ? '•••••••• (unchanged if left blank)' : '';
+    document.getElementById('customModelHostAuthStyle').value = host?.authStyle || 'bearer';
+    this._populateCustomModelDefaultSelect(host);
+    document.getElementById('customModelHostEditor').style.display = '';
+  },
+
+  closeCustomModelHostEditor() {
+    document.getElementById('customModelHostEditor').style.display = 'none';
+    this._editingCustomModelHostId = null;
+  },
+
+  _populateCustomModelDefaultSelect(host) {
+    const select = document.getElementById('customModelHostDefaultModel');
+    const models = host?.models || [];
+    select.innerHTML =
+      '<option value="">No default (picker uses the first discovered model)</option>' +
+      models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+    select.value = host?.defaultModelId || '';
+    select.disabled = models.length === 0;
+  },
+
+  async saveCustomModelHostFromEditor() {
+    const id = document.getElementById('customModelHostId').value.trim();
+    const label = document.getElementById('customModelHostLabel').value.trim();
+    const baseUrl = document.getElementById('customModelHostBaseUrl').value.trim();
+    const apiKeyInput = document.getElementById('customModelHostApiKey').value;
+    const authStyle = document.getElementById('customModelHostAuthStyle').value;
+    const defaultModelId = document.getElementById('customModelHostDefaultModel').value || undefined;
+    if (!id || !label || !baseUrl) {
+      this.showToast('Id, label and base URL are all required', 'warning');
+      return;
+    }
+    const editing = this._editingCustomModelHostId;
+    const existing = editing ? (this._customModelHosts || []).find((h) => h.id === editing) : null;
+    const body = {
+      id,
+      label,
+      baseUrl,
+      authStyle,
+      defaultModelId,
+      // A blank key on EDIT means "leave it alone", never "clear it" — the field
+      // is never pre-filled with the real value (see openCustomModelHostEditor),
+      // so an unedited save must not silently wipe a working credential.
+      apiKey: apiKeyInput ? apiKeyInput : existing?.apiKey,
+      models: existing?.models,
+      lastDiscoveredAt: existing?.lastDiscoveredAt,
+    };
+    try {
+      const res = await fetch(editing ? `/api/model-endpoints/${encodeURIComponent(editing)}` : '/api/model-endpoints', {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        this.showToast(data.error || 'Failed to save endpoint', 'error');
+        return;
+      }
+      this.showToast(editing ? 'Endpoint updated' : 'Endpoint added', 'success');
+      this.closeCustomModelHostEditor();
+      await this.loadCustomModelEndpointsForSettings();
+    } catch (err) {
+      this.showToast(`Failed to save endpoint: ${err.message}`, 'error');
+    }
+  },
+
+  async discoverCustomModelHostModels(hostId) {
+    this.showToast('Discovering models…', 'info');
+    try {
+      const res = await fetch(`/api/model-endpoints/${encodeURIComponent(hostId)}/discover-models`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) {
+        this.showToast(data.error || 'Discovery failed', 'error');
+        return;
+      }
+      this.showToast(`Found ${data.data.models.length} model${data.data.models.length === 1 ? '' : 's'}`, 'success');
+      await this.loadCustomModelEndpointsForSettings();
+    } catch (err) {
+      this.showToast(`Discovery failed: ${err.message}`, 'error');
+    }
+  },
+
+  async deleteCustomModelHost(hostId) {
+    const host = (this._customModelHosts || []).find((h) => h.id === hostId);
+    if (!confirm(`Delete endpoint "${host?.label || hostId}"? Any session currently pointed at it keeps running until cleared.`)) return;
+    try {
+      await fetch(`/api/model-endpoints/${encodeURIComponent(hostId)}`, { method: 'DELETE' });
+      await this.loadCustomModelEndpointsForSettings();
+    } catch (err) {
+      this.showToast(`Failed to delete endpoint: ${err.message}`, 'error');
+    }
+  },
 
   // ═══════════════════════════════════════════════════════════════
   // Visibility Settings & Device-Specific Defaults

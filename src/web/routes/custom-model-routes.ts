@@ -33,6 +33,21 @@ function adminOnly(req: FastifyRequest, reply: { code: (n: number) => unknown })
   return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Admin only in multi-user mode');
 }
 
+/**
+ * `defaultModelId` names the model the Run-menu picker applies for this endpoint with
+ * no further choice, so it must actually be one of the discovered `models` — a schema
+ * `.refine()` can't see across the two fields the way this can, and would also run on
+ * every unrelated field edit rather than only when either of these two changes.
+ */
+function invalidDefaultModel(host: Pick<CustomModelHost, 'defaultModelId' | 'models'>): ApiResponse<never> | null {
+  if (host.defaultModelId === undefined) return null;
+  if ((host.models ?? []).includes(host.defaultModelId)) return null;
+  return createErrorResponse(
+    ApiErrorCode.INVALID_INPUT,
+    'defaultModelId must be one of the endpoint’s discovered models'
+  );
+}
+
 async function discoverModels(host: Pick<CustomModelHost, 'baseUrl' | 'apiKey' | 'authStyle'>): Promise<string[]> {
   const headers: Record<string, string> = {};
   const apiKey = host.apiKey?.trim();
@@ -78,6 +93,8 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
     if (isBlockedWebviewUrl(host.baseUrl)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Endpoint base URL is not allowed');
     }
+    const badDefault = invalidDefaultModel(host);
+    if (badDefault) return badDefault;
     const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
     if (hosts.some((item) => item.id === host.id)) {
       return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Model endpoint already exists');
@@ -94,6 +111,8 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
     if (isBlockedWebviewUrl(host.baseUrl)) {
       return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Endpoint base URL is not allowed');
     }
+    const badDefault = invalidDefaultModel(host);
+    if (badDefault) return badDefault;
     const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
     const index = hosts.findIndex((item) => item.id === id);
     if (index === -1) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
@@ -131,7 +150,12 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
       try {
         const models = await discoverModels(host);
         const next = [...hosts];
-        next[index] = { ...host, models, lastDiscoveredAt: new Date().toISOString() };
+        // A default that no longer appears in the fresh list would leave the Run-menu
+        // picker applying a model id the endpoint just told us it doesn't serve; drop
+        // it rather than carry it forward silently invalid.
+        const defaultModelId =
+          host.defaultModelId && models.includes(host.defaultModelId) ? host.defaultModelId : undefined;
+        next[index] = { ...host, models, defaultModelId, lastDiscoveredAt: new Date().toISOString() };
         await writeCustomModelHosts(CODEMAN_CONFIG_DIR, next);
         return { success: true, data: { models } };
       } catch (err) {

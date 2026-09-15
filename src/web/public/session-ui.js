@@ -461,6 +461,7 @@ Object.assign(CodemanApp.prototype, {
     if (menu.classList.contains('active')) {
       this._loadRunModeHistory();
       this._refreshRunModeAvailability(menu);
+      this._refreshCustomModelRunOptions(menu);
       const close = (ev) => {
         if (!menu.contains(ev.target)) {
           menu.classList.remove('active');
@@ -532,6 +533,124 @@ Object.assign(CodemanApp.prototype, {
     // all (and is the honest thing to offer there).
     const dsWeb = menu.querySelector('#runModeDeepSeekWeb');
     if (dsWeb) dsWeb.style.display = avail.deepseekBinary ? 'flex' : 'none';
+  },
+
+  /**
+   * Generates the Run menu's Custom Model Endpoint entries
+   * (docs/custom-model-endpoints-plan.md): one button per (capable harness, saved
+   * endpoint) pair, e.g. "Claude Code (llama.cpp)". Hidden entirely when the
+   * feature is off, no endpoint has a usable default model, or the active case is
+   * remote/docker (the apply route refuses both — see session-routes.ts).
+   *
+   * `window.__codemanCustomModelClis` is server-injected at render time from the
+   * CLI registry's own `capabilities.customModelInjection` (never a hardcoded id
+   * list here), so a CLI gaining or losing the capability shows up with no
+   * frontend change.
+   */
+  async _refreshCustomModelRunOptions(menu) {
+    const sep = menu.querySelector('#runModeCustomModelSep');
+    const header = menu.querySelector('#runModeCustomModelHeader');
+    const container = menu.querySelector('#runModeCustomModels');
+    if (!container) return;
+    const hide = () => {
+      if (sep) sep.style.display = 'none';
+      if (header) header.style.display = 'none';
+      container.innerHTML = '';
+    };
+
+    const settings = this.loadAppSettingsFromStorage();
+    const capableClis = window.__codemanCustomModelClis || [];
+    if (!settings.customModelEndpointsEnabled || capableClis.length === 0) return hide();
+
+    const caseName = document.getElementById('quickStartCase')?.value;
+    const activeCase = caseName ? (this.cases || []).find((c) => c.name === caseName) : null;
+    if (activeCase?.location === 'remote' || activeCase?.location === 'docker') return hide();
+
+    let hosts;
+    try {
+      const res = await fetch('/api/model-endpoints');
+      hosts = await res.json();
+    } catch {
+      return hide();
+    }
+    if (!Array.isArray(hosts) || hosts.length === 0) return hide();
+
+    const rows = [];
+    for (const host of hosts) {
+      const modelId = host.defaultModelId || (host.models || [])[0];
+      if (!modelId) continue; // nothing discovered yet — the settings panel explains why
+      for (const cli of capableClis) {
+        rows.push(`
+          <button class="run-mode-option" data-mode="${escapeHtml(cli.id)}" data-endpoint="${escapeHtml(host.id)}"
+                  onclick="app.runCustomModelEntry(${JSON.stringify(cli.id)}, ${JSON.stringify(host.id)}, ${JSON.stringify(modelId)})"
+                  title="${escapeHtml(cli.label)} → ${escapeHtml(host.baseUrl)} (${escapeHtml(modelId)})">
+            <span class="run-mode-dot ${escapeHtml(cli.id)}"></span>${escapeHtml(cli.label)} (${escapeHtml(host.label)})
+          </button>`);
+      }
+    }
+    if (rows.length === 0) return hide();
+    if (sep) sep.style.display = '';
+    if (header) header.style.display = '';
+    container.innerHTML = rows.join('');
+  },
+
+  /**
+   * Runs a session on `mode` and immediately applies `endpointId`/`modelId` to it
+   * via POST /api/sessions/:id/custom-model (see session-routes.ts) — the same
+   * restart-in-place apply path the (not-yet-built) endpoint-management surface
+   * would use for an already-running session. Reuses the existing per-mode run*()
+   * functions wholesale (case creation, env overrides, the works) rather than a
+   * parallel create path, forcing a single instance: a custom-model run is a
+   * one-off "try this endpoint" action, not a batch spawn.
+   */
+  async runCustomModelEntry(mode, endpointId, modelId) {
+    document.getElementById('runModeMenu')?.classList.remove('active');
+    const runners = {
+      claude: () => this.runClaude(),
+      opencode: () => this.runOpenCode(),
+      codex: () => this.runCodex(),
+      gemini: () => this.runGemini(),
+      pi: () => this.runPi(),
+      grok: () => this.runGrok(),
+      deepseek: () => this.runDeepSeek(),
+      omp: () => this.runOmp(),
+    };
+    const runner = runners[mode];
+    if (!runner) {
+      this.showToast(`No run function for mode ${mode}`, 'error');
+      return;
+    }
+
+    const tabCountEl = document.getElementById('tabCount');
+    const prevTabCount = tabCountEl?.value;
+    if (tabCountEl) tabCountEl.value = '1';
+    try {
+      await runner();
+    } finally {
+      if (tabCountEl && prevTabCount !== undefined) tabCountEl.value = prevTabCount;
+    }
+
+    // Every run*() ends by selecting the session it just created, so the active
+    // session at this point IS the new one — see runClaude/runShell's own comments
+    // on why selectSession must run before this reads activeSessionId.
+    const sessionId = this.activeSessionId;
+    if (!sessionId) return; // run() already reported its own error via toast
+
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/custom-model`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpointId, modelId }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        this.showToast(`Session started on the native backend — could not apply the custom endpoint: ${data.error}`, 'warning');
+        return;
+      }
+      this.showToast(`Pointed at ${endpointId} — restarting the session...`, 'info');
+    } catch (err) {
+      this.showToast(`Session started, but applying the custom endpoint failed: ${err.message}`, 'warning');
+    }
   },
 
   /**

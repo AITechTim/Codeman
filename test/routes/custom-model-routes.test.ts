@@ -194,3 +194,104 @@ describe('custom model endpoint CRUD', () => {
     }
   });
 });
+
+describe('defaultModelId — the Run-menu picker’s per-endpoint default', () => {
+  afterEach(() => {
+    fetchMock.mockReset();
+  });
+
+  it('rejects a defaultModelId that is not one of the endpoint’s discovered models, on both create and update', async () => {
+    const { app } = await setup();
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: {
+        id: 'ep-default-reject',
+        label: 'A',
+        baseUrl: 'http://localhost:8080',
+        models: ['qwen3'],
+        defaultModelId: 'ghost',
+      },
+    });
+    expect(create.json().success).toBe(false);
+    expect(create.json().errorCode).toBe('INVALID_INPUT');
+
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-default-reject', label: 'A', baseUrl: 'http://localhost:8080', models: ['qwen3'] },
+    });
+    const update = await app.inject({
+      method: 'PUT',
+      url: '/api/model-endpoints/ep-default-reject',
+      payload: { label: 'A', baseUrl: 'http://localhost:8080', models: ['qwen3'], defaultModelId: 'ghost' },
+    });
+    expect(update.json().success).toBe(false);
+    expect(update.json().errorCode).toBe('INVALID_INPUT');
+  });
+
+  it('accepts a defaultModelId that IS one of the discovered models', async () => {
+    const { app } = await setup();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: {
+        id: 'ep-default-accept',
+        label: 'A',
+        baseUrl: 'http://localhost:8080',
+        models: ['qwen3', 'llama3'],
+        defaultModelId: 'llama3',
+      },
+    });
+    expect(res.json().success).toBe(true);
+    expect(res.json().data.host.defaultModelId).toBe('llama3');
+  });
+
+  it('drops a stale default that no longer appears in a fresh discovery, rather than carrying it forward invalid', async () => {
+    const { app } = await setup();
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: {
+        id: 'ep-default-drop',
+        label: 'A',
+        baseUrl: 'http://localhost:8080',
+        models: ['qwen3'],
+        defaultModelId: 'qwen3',
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'llama3' }] }), { status: 200 }));
+    await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-default-drop/discover-models' });
+
+    const list = await app.inject({ method: 'GET', url: '/api/model-endpoints' });
+    const stored = (list.json() as Array<{ id: string; defaultModelId?: string }>).find(
+      (h) => h.id === 'ep-default-drop'
+    );
+    expect(stored?.defaultModelId).toBeUndefined();
+  });
+
+  it('keeps a default that IS still present after a fresh discovery', async () => {
+    const { app } = await setup();
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: {
+        id: 'ep-default-keep',
+        label: 'A',
+        baseUrl: 'http://localhost:8080',
+        models: ['qwen3'],
+        defaultModelId: 'qwen3',
+      },
+    });
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: 'qwen3' }, { id: 'llama3' }] }), { status: 200 })
+    );
+    await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-default-keep/discover-models' });
+
+    const list = await app.inject({ method: 'GET', url: '/api/model-endpoints' });
+    const stored = (list.json() as Array<{ id: string; defaultModelId?: string }>).find(
+      (h) => h.id === 'ep-default-keep'
+    );
+    expect(stored?.defaultModelId).toBe('qwen3');
+  });
+});

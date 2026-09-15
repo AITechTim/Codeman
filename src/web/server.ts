@@ -67,7 +67,7 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
-import { getCli } from '../config/cli-registry/registry.js';
+import { getCli, enabledClis } from '../config/cli-registry/registry.js';
 import { readCustomModelHosts } from '../custom-model-hosts.js';
 import { applyCustomModelInjection, customModelConfigDir, removeConfigDir } from '../custom-model-injection-apply.js';
 import type { CustomModelBookkeeping } from '../types/session.js';
@@ -1595,6 +1595,18 @@ export class WebServer extends EventEmitter {
       html = html.replace(
         '</head>',
         `<script>window.__codemanCliAvailable=${JSON.stringify(available)};</script>\n</head>`
+      );
+      // Which run modes the Run-menu picker (docs/custom-model-endpoints-plan.md) may
+      // generate an entry for: read generically off the registry's `capabilities`
+      // (never an id list here) so a CLI whose customModelInjection lands later shows
+      // up in the picker with no frontend change, and one that ships `unsupported`
+      // (antigravity, and `shell`'s `kind !== 'agent'`) never does.
+      const customModelClis = enabledClis()
+        .filter((entry) => entry.kind === 'agent' && entry.capabilities.customModelInjection.kind !== 'unsupported')
+        .map((entry) => ({ id: entry.id, label: entry.label }));
+      html = html.replace(
+        '</head>',
+        `<script>window.__codemanCustomModelClis=${JSON.stringify(customModelClis)};</script>\n</head>`
       );
     }
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {

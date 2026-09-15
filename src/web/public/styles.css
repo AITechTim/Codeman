@@ -16207,6 +16207,26 @@ html[data-tab-orientation='vertical'] .home-sessions {
   gap: 3px;
 }
 
+/* Custom Model Endpoint Profiles' inline add/edit form: a nested panel rather
+   than a modal, so it needs its own border to read as a distinct sub-section
+   inside .set-group-body's flat row stack. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-inline-form {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-inline-form h5 {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
 /* ── rows ─────────────────────────────────────────────────────────────── */
 :is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-row {
   display: flex;
