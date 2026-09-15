@@ -1081,7 +1081,6 @@ export function registerSessionRoutes(
       workingDir,
       mode,
       name: body.name || '',
-      nameSource: body.name ? undefined : 'auto',
       mux: ctx.mux,
       useMux: true,
       niceConfig: globalNice,
@@ -1596,6 +1595,9 @@ export function registerSessionRoutes(
 
     // Write input to PTY. Direct write is synchronous; writeViaMux
     // (tmux send-keys) is fire-and-forget to avoid blocking the HTTP response.
+    // Every write here is `fromUser`: this route carries a person's prompt, or an
+    // agent's on their behalf, so it may name the tab (Ralph, respawn, cron and
+    // approvals write through the session directly and never say so).
     //
     // Because the response has already been sent by then, a failure there is the
     // one case the caller can never learn about — so the dedup bookkeeping is
@@ -1618,32 +1620,32 @@ export function registerSessionRoutes(
     } else if (useMux && waitPromise) {
       // The response is already staying open for the wait, so the tmux write can be
       // awaited here. This is the ONE path where a writeViaMux failure is observable.
-      const ok = await session.writeViaMux(inputStr).catch(() => false);
+      const ok = await session.writeViaMux(inputStr, { fromUser: true }).catch(() => false);
       if (ok) {
         delivered = true;
       } else {
         console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
-        delivered = session.write(inputStr);
+        delivered = session.write(inputStr, { fromUser: true });
         if (!delivered) undoOnFailure();
       }
     } else if (useMux) {
       // Fire-and-forget: don't block the HTTP response on a tmux child process.
       // Fallback to a direct write on failure. Unchanged from before send-and-wait.
       session
-        .writeViaMux(inputStr)
+        .writeViaMux(inputStr, { fromUser: true })
         .then((ok) => {
           if (ok) return;
           console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
-          if (!session.write(inputStr)) undoOnFailure();
+          if (!session.write(inputStr, { fromUser: true })) undoOnFailure();
         })
         .catch(() => {
-          if (!session.write(inputStr)) undoOnFailure();
+          if (!session.write(inputStr, { fromUser: true })) undoOnFailure();
         });
     } else {
       // Same rollback. NOT an error response, deliberately: a session can
       // legitimately have no PTY yet (created but not started), and callers have
       // always been able to write to one without a 4xx.
-      delivered = session.write(inputStr);
+      delivered = session.write(inputStr, { fromUser: true });
       if (!delivered && tagged) {
         session.forgetInputSeq(clientId as string, seq as number);
       }
@@ -1892,6 +1894,9 @@ export function registerSessionRoutes(
       console.error('[Server] send-key failed:', err);
       return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, 'tmux send-keys failed');
     }
+    // The bytes bypassed the session's write path, so tell the auto-name
+    // tracker about them or the two lines of a prompt join with no separator.
+    session.trackUserInput(hex.map((byte) => String.fromCharCode(parseInt(byte, 16))).join(''));
     return {};
   });
 
@@ -3485,7 +3490,6 @@ export function registerSessionRoutes(
     const session = new Session({
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
-      nameSource: sessionName ? undefined : 'auto',
       mux: ctx.mux,
       useMux: true,
       mode: mode,

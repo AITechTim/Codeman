@@ -68,11 +68,15 @@ Tabs can also be dragged to reorder.
 
 ### Automatic session names
 
-New sessions start with a short project/sequence name so they can be created immediately.
-After the first task prompt is submitted, Codeman replaces that placeholder with a short
-title derived locally from the prompt's first sentence. Slash commands such as `/clear` do
-not become titles. A name you set with the inline rename action is treated as manual and is
-never overwritten by automatic naming.
+Off by default. Turn on **Auto-name Sessions** (App Settings → Appearance → Tabs; synced
+across devices) and a tab that still carries its generated name, such as `w3-myapp`, takes a
+title from the first real prompt you submit, keeping the prefix: `w3-myapp: fix the login
+redirect`. The strip shows the title and keeps the prefix in the tooltip, and the next
+session in that case still counts up to `w4-myapp`. It happens once per session, only for
+prompts you type or send through the input API (never a Ralph, respawn, cron or approval
+answer), and never for shells. Slash commands such as `/clear` do not become titles; the
+next prompt gets its turn. A name you set yourself, before or after, is never touched. The
+title is derived locally from the prompt's first sentence; no text leaves the machine.
 
 On phones the strip scrolls horizontally instead of wrapping, and the active tab is always
 scrolled into view. It is not reordered to the front, so the `Alt+N` numbering stays stable.

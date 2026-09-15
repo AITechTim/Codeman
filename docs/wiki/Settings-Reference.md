@@ -76,6 +76,7 @@ every session or only the active tab.
 | Tall Tabs              | Taller tab strip.                                                                          |
 | Pop-out Button on Tabs | Adds the detach control to tabs, with a per-tab override.                                  |
 | Spawn Lineage Lines    | Arcs from a parent tab to sessions it spawned. Desktop only, on by default.                |
+| Auto-name Sessions     | Titles a new tab after its first prompt, keeping the case prefix (`w3-myapp: fix the login redirect`). Synced, off by default. See [The Dashboard](The-Dashboard#automatic-session-names). |
 | Overview Home Screen   | The phone home screen. On by default.                                                      |
 
 ### Models

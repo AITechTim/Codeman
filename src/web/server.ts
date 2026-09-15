@@ -1729,6 +1729,9 @@ export class WebServer extends EventEmitter {
       registerAttachment: (id: string, filePath: string, source: 'external' | 'codex-generated') =>
         this.registerAttachment(id, filePath, source),
       updateSessionName: (id: string, name: string) => this.mux.updateSessionName(id, name),
+      // Opt-in: the first prompt lands in the tab name, mux-sessions.json, every
+      // session:updated broadcast and /api/search, so it is a choice, not a default.
+      isAutoNameEnabled: async () => (await this.readSettings()).autoNameSessions === true,
     };
   }
 

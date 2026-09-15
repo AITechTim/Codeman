@@ -408,6 +408,8 @@ Object.assign(CodemanApp.prototype, {
     // header), so the row is hidden elsewhere rather than offering a toggle that
     // changes nothing. Default ON — only an explicit false turns it off.
     document.getElementById('appSettingsLineageLines').checked = settings.sessionLineageLines ?? defaults.sessionLineageLines ?? true;
+    // Auto-name sessions: synced, default OFF (opt-in; only an explicit true enables).
+    document.getElementById('appSettingsAutoNameSessions').checked = settings.autoNameSessions === true;
     const lineageItem = document.getElementById('appSettingsLineageLinesItem');
     if (lineageItem) lineageItem.style.display = MobileDetection.getDeviceType() === 'desktop' ? '' : 'none';
     document.getElementById('appSettingsMobileOverview').checked = settings.mobileOverviewEnabled ?? defaults.mobileOverviewEnabled ?? false;
@@ -2111,6 +2113,7 @@ Object.assign(CodemanApp.prototype, {
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
       sessionLineageLines: document.getElementById('appSettingsLineageLines').checked,
+      autoNameSessions: document.getElementById('appSettingsAutoNameSessions').checked,
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
       showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
       showCronButton: document.getElementById('appSettingsShowCronButton').checked,

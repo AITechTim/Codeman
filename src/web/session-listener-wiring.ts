@@ -29,7 +29,8 @@ import { getLifecycleLog } from '../session-lifecycle-log.js';
 import { fileStreamManager } from '../file-stream-manager.js';
 import { sessionWaits } from './session-wait-registry.js';
 import { approvalInbox } from './approval-inbox.js';
-import { deriveAutoSessionName } from '../session-auto-name.js';
+import { composeAutoSessionName, deriveAutoSessionName } from '../session-auto-name.js';
+import { MAX_SESSION_NAME_LENGTH } from '../config/terminal-limits.js';
 
 /** Stored listener references for session cleanup (prevents memory leaks) */
 export interface SessionListenerRefs {
@@ -86,6 +87,8 @@ interface SessionListenerDeps {
   getStore(): import('../state-store.js').StateStore;
   registerAttachment(sessionId: string, filePath: string, source: 'external' | 'codex-generated'): Promise<void>;
   updateSessionName(sessionId: string, name: string): boolean;
+  /** The synced `autoNameSessions` setting, read fresh so a flip applies to the next prompt. */
+  isAutoNameEnabled(): Promise<boolean>;
 }
 
 /**
@@ -455,13 +458,28 @@ export function createSessionListeners(session: Session, deps: SessionListenerDe
       });
     },
 
-    /** Assigns a bounded local title from the first real task prompt. */
+    /**
+     * Names a placeholder tab after its first real prompt (`w3-case: fix the
+     * login redirect`), behind the synced `autoNameSessions` setting. The
+     * eligibility check comes first so the settings read costs nothing on the
+     * prompts of an already-named session; a prompt that yields no title (a
+     * slash command) leaves the session eligible for the next one.
+     */
     promptSubmitted: (prompt: string) => {
-      const name = deriveAutoSessionName(prompt);
-      if (!name || !session.applyAutoName(name)) return;
-      deps.updateSessionName(session.id, session.name);
-      deps.persistSessionState(session);
-      deps.broadcast(SseEvent.SessionUpdated, deps.getSessionStateWithRespawn(session));
+      if (session.nameSource !== 'placeholder') return;
+      const title = deriveAutoSessionName(prompt);
+      if (!title) return;
+      void deps
+        .isAutoNameEnabled()
+        .then((enabled) => {
+          if (!enabled) return;
+          const name = composeAutoSessionName(session.name, title, MAX_SESSION_NAME_LENGTH);
+          if (!session.applyAutoName(name)) return;
+          deps.updateSessionName(session.id, session.name);
+          deps.persistSessionState(session);
+          deps.broadcast(SseEvent.SessionUpdated, deps.getSessionStateWithRespawn(session));
+        })
+        .catch((err) => console.error(`[Session] auto-name failed for ${session.id}:`, err));
     },
   };
 }
