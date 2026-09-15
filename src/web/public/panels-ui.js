@@ -116,6 +116,20 @@ Object.assign(CodemanApp.prototype, {
   },
 
 
+  // Wake-on-LAN from user input on a sleeping remote host (see remote-wake.ts).
+  _onRemoteHostWaking(data) {
+    const label = data && data.label ? data.label : 'Remote host';
+    // Long enough to cover the wake + attach (~10s measured on a warm S3), and it
+    // is replaced by `remote:sessionReconnected` the moment the pane is back.
+    this.showToast(`Waking ${label} … input is queued`, 'info', { duration: 12000 });
+  },
+
+  _onRemoteHostWakeFailed(data) {
+    const label = data && data.label ? data.label : 'Remote host';
+    this.showToast(`${label} did not wake up — queued input is still held`, 'error', { duration: 15000 });
+  },
+
+
   // Bash tools
   _onBashToolStart(data) {
     this.handleBashToolStart(data.sessionId, data.tool);

@@ -219,6 +219,8 @@ const _SSE_HANDLER_MAP = [
   // Remote auto-reconnect (COD-108)
   [SSE_EVENTS.REMOTE_SESSION_RECONNECTED, '_onRemoteSessionReconnected'],
   [SSE_EVENTS.REMOTE_RECONNECT_EXHAUSTED, '_onRemoteReconnectExhausted'],
+  [SSE_EVENTS.REMOTE_HOST_WAKING, '_onRemoteHostWaking'],
+  [SSE_EVENTS.REMOTE_HOST_WAKE_FAILED, '_onRemoteHostWakeFailed'],
 
   // Ralph
   [SSE_EVENTS.SESSION_RALPH_LOOP_UPDATE, '_onRalphLoopUpdate'],

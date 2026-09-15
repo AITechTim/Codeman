@@ -8,9 +8,11 @@ import {
   readRemoteHosts,
   remoteDisplayPath,
   remoteSshTarget,
+  toSessionRemote,
   writeRemoteCases,
   writeRemoteHosts,
 } from '../src/remote-hosts.js';
+import { RemoteHostSchema } from '../src/web/schemas.js';
 
 describe('remote-hosts domain', () => {
   let dir: string | null = null;
@@ -68,5 +70,49 @@ describe('remote-hosts domain', () => {
     expect(remoteDisplayPath({ username: 'aamer', host: 'box.local', path: '/opt/work' })).toBe(
       'aamer@box.local:/opt/work'
     );
+  });
+
+  it('carries the wake command from host config into the session', () => {
+    // The input route reads `session.remote.wakeCommand` — it must survive the host
+    // -> session mapping, or wake-on-LAN silently degrades to "no wake command".
+    const remote = toSessionRemote(
+      {
+        id: 'hufflepuff',
+        label: 'Hufflepuff',
+        host: '192.168.50.137',
+        username: 'j',
+        wakeCommand: '/home/joe/bin/whuff',
+      },
+      { name: 'c', type: 'remote', hostId: 'hufflepuff', remotePath: '/home/j/work' }
+    );
+    expect(remote.wakeCommand).toBe('/home/joe/bin/whuff');
+  });
+
+  it('omits the wake command by default (feature off without a config entry)', () => {
+    const remote = toSessionRemote(
+      { id: 'h', label: 'H', host: '10.0.0.1', username: 'j' },
+      { name: 'c', type: 'remote', hostId: 'h', remotePath: '/tmp' }
+    );
+    expect(remote.wakeCommand).toBeUndefined();
+  });
+
+  describe('RemoteHostSchema wakeCommand', () => {
+    const host = { id: 'hufflepuff', label: 'Hufflepuff', host: '192.168.50.137', username: 'j' };
+
+    it('accepts an optional absolute executable path', () => {
+      expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/home/joe/bin/whuff' }).success).toBe(true);
+      expect(RemoteHostSchema.safeParse(host).success).toBe(true);
+    });
+
+    it('rejects an argument list (spawn runs the path without a shell)', () => {
+      // `spawn('/home/joe/bin/whuff --mac 00:11:22')` would fail as a confusing
+      // ENOENT at wake time — refuse it at config time instead.
+      expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/home/joe/bin/whuff --now' }).success).toBe(false);
+    });
+
+    it('rejects shell metacharacters as defence in depth', () => {
+      expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/bin/sh$(id)' }).success).toBe(false);
+      expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/bin/`id`' }).success).toBe(false);
+    });
   });
 });

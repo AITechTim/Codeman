@@ -737,6 +737,18 @@ export const RemoteHostSchema = z.object({
     .max(32)
     .optional(),
   commands: RemoteCommandOverridesSchema,
+  // Wake-on-LAN: a single executable path (no arguments, no shell) run to power a
+  // SLEEPING host back on, e.g. `/home/joe/bin/whuff`. Executed via spawn without
+  // a shell, so there is no shell layer to escape; the regexes are belt-and-braces
+  // (and the no-whitespace rule rejects an argument list before it can fail as a
+  // confusing ENOENT at wake time). See docs/remote-sessions.md §Wake-on-LAN.
+  wakeCommand: z
+    .string()
+    .min(1)
+    .max(4096)
+    .regex(/^\S+$/, 'Wake command must be a single executable path (no arguments)')
+    .regex(NO_SHELL_META, 'Invalid characters in wake command')
+    .optional(),
 });
 
 export const RemoteCaseLinkSchema = z.object({

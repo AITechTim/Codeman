@@ -97,6 +97,15 @@ export interface RemoteHost extends RemoteSshOptions {
   username: string;
   port?: number;
   commands?: Partial<Record<RemoteCommandMode, string>>;
+  /**
+   * Optional Wake-on-LAN command that powers this host on from SLEEP (e.g. a
+   * wrapper script like `/home/joe/bin/whuff`). Absent = no wake support and
+   * today's behavior exactly. Executed WITHOUT a shell (a single executable
+   * path, never a command line), only from user input on a session whose host
+   * is unreachable — never from the auto-reconnect/boot-recovery path, which
+   * would re-wake a host seconds after each suspend.
+   */
+  wakeCommand?: string;
 }
 
 export interface RemoteCase {
@@ -137,6 +146,11 @@ export interface SessionRemote extends RemoteSshOptions {
    * session was created elsewhere. Only meaningful when `owned === false`.
    */
   remoteSessionName?: string;
+  /**
+   * Wake-on-LAN command carried over from the host config (see `RemoteHost.wakeCommand`)
+   * so the input route can wake a sleeping host without re-reading the host list.
+   */
+  wakeCommand?: string;
 }
 
 /**

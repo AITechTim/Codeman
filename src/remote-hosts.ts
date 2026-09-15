@@ -549,6 +549,9 @@ export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): Sessi
     port: host.port,
     remotePath: remoteCase.remotePath,
     commands: host.commands,
+    // Wake-on-LAN command travels with the session so the input route can wake a
+    // sleeping host without a second config read (see remote-wake.ts).
+    wakeCommand: host.wakeCommand,
     // COD-105 — the COD-104 launch path creates the remote session, so we own it
     // (an explicit kill may propagate a remote kill-session). Discovered+attached
     // sessions go through `toAttachedSessionRemote` with `owned: false`.
@@ -587,6 +590,9 @@ export function toAttachedSessionRemote(
     port: host.port,
     remotePath,
     commands: host.commands,
+    // An attached session can be woken exactly the same way — the identity of the
+    // creator does not change whether the host is asleep.
+    wakeCommand: host.wakeCommand,
     // Discovered + attached — another Codeman created it. Detach-not-kill.
     owned: false,
     remoteSessionName,
