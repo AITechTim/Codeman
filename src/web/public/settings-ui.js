@@ -397,8 +397,11 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsApprovalsInbox').checked = settings.approvalsInboxEnabled === true;
     // Custom Model Endpoint Profiles: synced, default OFF. The toggle governs both
     // the Run-menu picker's generated entries and this settings panel's visibility;
-    // the endpoint list itself is server state, loaded separately below.
+    // the endpoint list itself is server state, loaded on demand below.
     document.getElementById('appSettingsCustomModelEndpoints').checked = settings.customModelEndpointsEnabled === true;
+    // Assigning .checked above does not fire onchange, so the body's visibility
+    // (and its lazy load) needs an explicit sync on every open, not just a save.
+    this.applyCustomModelEndpointsVisibility();
     // Read My Mind: synced, default OFF (opt-in; capture + prediction cost real tokens).
     document.getElementById('appSettingsReadMyMind').checked = settings.readMyMindEnabled === true;
     document.getElementById('appSettingsUltracodeFloatingWindows').checked =
@@ -513,10 +516,9 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsNiceValue').value = niceSettings.niceValue ?? 10;
     // Model configuration (loaded from server)
     this.loadModelConfigForSettings();
-    // Custom Model Endpoint Profiles: server state, own load path (mirrors the
-    // model-config pair above) rather than the settings payload — endpoints are
-    // infra records (CRUD'd via /api/model-endpoints), not user preferences.
-    this.loadCustomModelEndpointsForSettings();
+    // Custom Model Endpoint Profiles' own load is gated on the toggle above (see
+    // applyCustomModelEndpointsVisibility) — unlike model config, this GET is
+    // pointless work with the feature off, so it is not fired unconditionally.
     // Notification settings
     const notifPrefs = this.notificationManager?.preferences || {};
     document.getElementById('appSettingsNotifEnabled').checked = notifPrefs.enabled ?? true;
@@ -2507,15 +2509,51 @@ Object.assign(CodemanApp.prototype, {
   // toggle itself goes through that path.
   // ═══════════════════════════════════════════════════════════════
 
+  /**
+   * Toggles the endpoint-management body's visibility to match the setting and,
+   * turning it on, lazily loads the endpoint list. Assigning `.checked` (as the
+   * settings load path does) fires no `change` event, so this must be called
+   * explicitly on open as well as wired to the checkbox's own onchange — a
+   * gate that only worked one of those two ways would show a stale "off"
+   * body right after opening, or a stale "on" one right after saving it off.
+   * With the feature off the body is a list of controls that do nothing, so it
+   * is hidden entirely rather than shown disabled.
+   */
+  applyCustomModelEndpointsVisibility() {
+    const enabled = document.getElementById('appSettingsCustomModelEndpoints').checked;
+    const body = document.getElementById('customModelEndpointsBody');
+    if (body) body.style.display = enabled ? '' : 'none';
+    if (enabled) this.loadCustomModelEndpointsForSettings();
+    else this.closeCustomModelHostEditor();
+    this._applyCustomModelAdminGate();
+  },
+
+  /**
+   * Endpoint writes are admin-only in multi-user mode (custom-model-routes.ts),
+   * and GET already answers a non-admin with an empty list, which hides every
+   * per-row Edit/Discover/Delete button on its own. The "+ Add endpoint" button
+   * has no row to hide behind, so it needs its own gate — otherwise a non-admin
+   * can open the form, fill it in, and get a 403 toast on Save. Wired to the
+   * `codeman:me` event (admin-ui.js) as well as called from
+   * applyCustomModelEndpointsVisibility(), because `window.__codemanUser`'s
+   * real role can resolve AFTER settings have already been opened once.
+   */
+  _applyCustomModelAdminGate() {
+    const addBtn = document.getElementById('customModelHostAddBtn');
+    if (!addBtn) return;
+    const me = window.__codemanUser || {};
+    const blocked = me.multiUser && me.role !== 'admin';
+    addBtn.style.display = blocked ? 'none' : '';
+  },
+
   async loadCustomModelEndpointsForSettings() {
-    try {
-      const res = await fetch('/api/model-endpoints');
-      const hosts = await res.json();
-      this._customModelHosts = Array.isArray(hosts) ? hosts : [];
-    } catch (err) {
-      console.warn('Failed to load model endpoints:', err);
-      this._customModelHosts = this._customModelHosts || [];
-    }
+    // GET /api/model-endpoints wraps its body in the { success, data } envelope
+    // like every other /api route (server.ts's preSerialization hook applies to
+    // arrays too) — _apiJson() unwraps it. A raw fetch().json() here would
+    // silently see the envelope object instead of the array and this panel
+    // would read as "No endpoints yet" forever, even with endpoints saved.
+    const hosts = await this._apiJson('/api/model-endpoints');
+    this._customModelHosts = Array.isArray(hosts) ? hosts : [];
     this.renderCustomModelHostsList();
   },
 
@@ -2533,6 +2571,14 @@ Object.assign(CodemanApp.prototype, {
         const modelSummary = modelCount === 0
           ? 'No models discovered yet'
           : `${modelCount} model${modelCount === 1 ? '' : 's'}${h.defaultModelId ? ` · default: ${escapeHtml(h.defaultModelId)}` : ' · no default set'}`;
+        // escapeHtml(JSON.stringify(h.id)) — not JSON.stringify(h.id) alone —
+        // because JSON.stringify's own double quotes would otherwise terminate
+        // this double-quoted attribute at the first one, and everything after
+        // parses as raw tag content rather than the rest of the quoted string.
+        // Same idiom as deleteCase's onclick in session-ui.js. h.id is
+        // regex-constrained server-side (safe either way) but the pattern must
+        // match everywhere it is used, including where the argument is not.
+        const idArg = escapeHtml(JSON.stringify(h.id));
         return `
           <div class="set-row" data-endpoint-id="${escapeHtml(h.id)}">
             <div class="set-row-text">
@@ -2540,9 +2586,9 @@ Object.assign(CodemanApp.prototype, {
               <span class="set-row-desc">${escapeHtml(h.baseUrl)} — ${modelSummary}</span>
             </div>
             <div class="set-row-actions">
-              <button type="button" class="btn-toolbar btn-sm" onclick="app.discoverCustomModelHostModels(${JSON.stringify(h.id)})">Discover</button>
-              <button type="button" class="btn-toolbar btn-sm" onclick="app.openCustomModelHostEditor(${JSON.stringify(h.id)})">Edit</button>
-              <button type="button" class="btn-toolbar btn-danger btn-sm" onclick="app.deleteCustomModelHost(${JSON.stringify(h.id)})">Delete</button>
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.discoverCustomModelHostModels(${idArg})">Discover</button>
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.openCustomModelHostEditor(${idArg})">Edit</button>
+              <button type="button" class="btn-toolbar btn-danger btn-sm" onclick="app.deleteCustomModelHost(${idArg})">Delete</button>
             </div>
           </div>`;
       })
@@ -2558,8 +2604,8 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('customModelHostId').disabled = !!host; // id is immutable once created
     document.getElementById('customModelHostLabel').value = host?.label || '';
     document.getElementById('customModelHostBaseUrl').value = host?.baseUrl || '';
-    document.getElementById('customModelHostApiKey').value = ''; // never round-tripped back into the field
-    document.getElementById('customModelHostApiKey').placeholder = host?.apiKey ? '•••••••• (unchanged if left blank)' : '';
+    document.getElementById('customModelHostApiKey').value = ''; // the server never returns the real value (apiKeySet is a bool)
+    document.getElementById('customModelHostApiKey').placeholder = host?.apiKeySet ? '•••••••• (unchanged if left blank)' : '';
     document.getElementById('customModelHostAuthStyle').value = host?.authStyle || 'bearer';
     this._populateCustomModelDefaultSelect(host);
     document.getElementById('customModelHostEditor').style.display = '';
@@ -2592,6 +2638,13 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
     const editing = this._editingCustomModelHostId;
+    // PUT (server-side) treats an absent apiKey as "keep the stored one" — the
+    // browser never holds the real value to resend deliberately unchanged (see
+    // openCustomModelHostEditor and custom-model-routes.ts's applyStoredApiKey),
+    // so a blank field here means omitting the key entirely, not resending
+    // something we do not have. models/lastDiscoveredAt DO still need
+    // re-sending: PUT replaces the whole record, and this cached copy still
+    // carries both (only apiKey is redacted from what GET hands back).
     const existing = editing ? (this._customModelHosts || []).find((h) => h.id === editing) : null;
     const body = {
       id,
@@ -2599,10 +2652,7 @@ Object.assign(CodemanApp.prototype, {
       baseUrl,
       authStyle,
       defaultModelId,
-      // A blank key on EDIT means "leave it alone", never "clear it" — the field
-      // is never pre-filled with the real value (see openCustomModelHostEditor),
-      // so an unedited save must not silently wipe a working credential.
-      apiKey: apiKeyInput ? apiKeyInput : existing?.apiKey,
+      apiKey: apiKeyInput || undefined,
       models: existing?.models,
       lastDiscoveredAt: existing?.lastDiscoveredAt,
     };
@@ -3706,4 +3756,16 @@ Object.assign(CodemanApp.prototype, {
     }
     this.subagentPanelVisible = false;
   },
+});
+
+// window.__codemanUser's real role can resolve after settings have already been
+// opened once (admin-ui.js fetches /api/me asynchronously and dispatches this on
+// arrival), so the Custom Model Endpoints admin gate needs to be re-applied when
+// it does, not just when the modal opens. Optional chaining on addEventListener
+// itself: several frontend tests (run-mode-ui.test.ts) load this file into a vm
+// context with a minimal fake `document` that has no event-target methods at
+// all, and a module-level statement that throws there fails the whole file's
+// evaluation, not just this feature.
+document.addEventListener?.('codeman:me', () => {
+  window.app?._applyCustomModelAdminGate?.();
 });

@@ -207,6 +207,20 @@ function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
 
+/**
+ * Escapes a JSON string for safe embedding as the body of an inline `<script>`
+ * tag: `<` becomes the six-character sequence `<`, which both a JSON
+ * parser and a plain JS string literal decode back to `<` (both treat
+ * `\uXXXX` identically), but which can never itself form the two literal
+ * characters `<` `/` a browser's HTML tokenizer looks for to end the tag. A
+ * value containing a literal `</script>` would otherwise close the tag early
+ * and turn the rest of the document into inert script-body text. Exported so
+ * it unit-tests without constructing a WebServer (which needs a real tmux).
+ */
+export function escapeScriptJson(json: string): string {
+  return json.replace(/</g, '\\u003c');
+}
+
 import {
   SESSIONS_LIST_CACHE_TTL,
   SCHEDULED_CLEANUP_INTERVAL,
@@ -1604,9 +1618,14 @@ export class WebServer extends EventEmitter {
       const customModelClis = enabledClis()
         .filter((entry) => entry.kind === 'agent' && entry.capabilities.customModelInjection.kind !== 'unsupported')
         .map((entry) => ({ id: entry.id, label: entry.label }));
+      // Unlike the boolean-only __codemanCliAvailable above, this payload carries
+      // `label`, a string a user's own clis.json can set (CliEntry.label, up to 60
+      // chars) — see escapeScriptJson's own doc comment for why that needs escaping
+      // and __codemanCliAvailable's booleans never did.
+      const customModelClisJson = escapeScriptJson(JSON.stringify(customModelClis));
       html = html.replace(
         '</head>',
-        `<script>window.__codemanCustomModelClis=${JSON.stringify(customModelClis)};</script>\n</head>`
+        `<script>window.__codemanCustomModelClis=${customModelClisJson};</script>\n</head>`
       );
     }
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {

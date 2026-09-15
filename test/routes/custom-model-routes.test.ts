@@ -295,3 +295,97 @@ describe('defaultModelId — the Run-menu picker’s per-endpoint default', () =
     expect(stored?.defaultModelId).toBe('qwen3');
   });
 });
+
+describe('apiKey is never handed back to the browser', () => {
+  afterEach(() => {
+    fetchMock.mockReset();
+  });
+
+  it('POST, GET and PUT responses all carry apiKeySet instead of the real key', async () => {
+    const { app } = await setup();
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-secret', label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'super-secret' },
+    });
+    expect(create.json().data.host.apiKey).toBeUndefined();
+    expect(create.json().data.host.apiKeySet).toBe(true);
+
+    const list = await app.inject({ method: 'GET', url: '/api/model-endpoints' });
+    const listed = (list.json() as Array<{ id: string; apiKey?: string; apiKeySet?: boolean }>).find(
+      (h) => h.id === 'ep-secret'
+    );
+    expect(listed?.apiKey).toBeUndefined();
+    expect(listed?.apiKeySet).toBe(true);
+    expect(JSON.stringify(list.json())).not.toContain('super-secret');
+
+    const update = await app.inject({
+      method: 'PUT',
+      url: '/api/model-endpoints/ep-secret',
+      payload: { label: 'Renamed', baseUrl: 'http://localhost:8080' },
+    });
+    expect(update.json().data.host.apiKey).toBeUndefined();
+    expect(update.json().data.host.apiKeySet).toBe(true);
+    expect(JSON.stringify(update.json())).not.toContain('super-secret');
+  });
+
+  it('a host with no key set at all reports apiKeySet: false', async () => {
+    const { app } = await setup();
+    const create = await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-nokey', label: 'A', baseUrl: 'http://localhost:8080' },
+    });
+    expect(create.json().data.host.apiKeySet).toBe(false);
+  });
+
+  it('PUT with no apiKey keeps the stored one, rather than clearing it', async () => {
+    const { app } = await setup();
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-keep-key', label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'original-key' },
+    });
+    // Edit without touching the API key field — the real bug this guards: a
+    // browser round-trip that only ever sees apiKeySet, never the real value,
+    // must not accidentally send an empty string and wipe a working credential.
+    const update = await app.inject({
+      method: 'PUT',
+      url: '/api/model-endpoints/ep-keep-key',
+      payload: { label: 'Renamed', baseUrl: 'http://localhost:8080' },
+    });
+    expect(update.json().data.host.apiKeySet).toBe(true);
+
+    // Prove it by observing the auth header discovery actually sends.
+    fetchMock.mockImplementation(async (_url: URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe('Bearer original-key');
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    });
+    const discover = await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-keep-key/discover-models' });
+    expect(discover.json().success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('PUT with a new apiKey replaces the stored one', async () => {
+    const { app } = await setup();
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-replace-key', label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'old-key' },
+    });
+    await app.inject({
+      method: 'PUT',
+      url: '/api/model-endpoints/ep-replace-key',
+      payload: { label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'new-key' },
+    });
+
+    fetchMock.mockImplementation(async (_url: URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe('Bearer new-key');
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    });
+    await app.inject({ method: 'POST', url: '/api/model-endpoints/ep-replace-key/discover-models' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

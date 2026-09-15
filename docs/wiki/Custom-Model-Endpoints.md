@@ -37,7 +37,9 @@ necessary, not incidental: every supported harness reads its endpoint config at 
 start, never per turn, so there is no live hot-swap while a turn is running.
 
 Entries are hidden entirely for a session in a **remote (SSH) or Docker case** — support for
-redirecting those hasn't landed yet, see below.
+redirecting those hasn't landed yet, see below. The picker also only appears in the desktop
+**Run** dropdown; the phone home screen builds its own run picker separately and does not
+currently offer these entries.
 
 ## Which harnesses actually work
 
@@ -59,6 +61,9 @@ missing entry is the more current answer.
   (reattaching a durable tmux session rather than relaunching the process), so redirecting
   them needs its own plumbing that hasn't been built.
 - **No live hot-swap mid-conversation.** Applying a selection always restarts the process.
+- **No button to un-point a session from the UI yet.** Clearing back to native cloud is an
+  HTTP call (`POST .../custom-model {"clear": true}`) or deleting the session; the settings
+  panel manages saved endpoints, not what a running session is currently pointed at.
 - **Nothing is shared with your real cloud credentials.** The endpoint's own key, if any,
   never touches your Anthropic/OpenAI/Google login — a custom endpoint is a separate,
   explicit choice per session.

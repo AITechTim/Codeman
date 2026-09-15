@@ -11,7 +11,7 @@
  * Port: N/A (no server start).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { WebServer } from '../src/web/server.js';
+import { WebServer, escapeScriptJson } from '../src/web/server.js';
 import { isClaudeAvailable } from '../src/utils/claude-cli-resolver.js';
 import { isOpenCodeAvailable } from '../src/utils/opencode-cli-resolver.js';
 import { isCodexAvailable } from '../src/utils/codex-cli-resolver.js';
@@ -207,6 +207,19 @@ describe('WebServer.renderIndexHtml', () => {
       expect(typeof cli.id).toBe('string');
       expect(typeof cli.label).toBe('string');
     }
+  });
+
+  it('escapeScriptJson neutralizes a literal </script>, and still round-trips as a JS literal', () => {
+    // CliEntry.label is a plain string a user's own clis.json can set (up to 60
+    // chars), unlike __codemanCliAvailable's booleans-only payload, so this is
+    // the one injection that needs it. Exported so this tests the pure
+    // function directly rather than needing a real WebServer (which needs tmux).
+    const dangerous = JSON.stringify([{ id: 'x', label: '</script><script>alert(1)</script>' }]);
+    const escaped = escapeScriptJson(dangerous);
+    expect(escaped).not.toContain('</script');
+    // Proves it decodes back to the real value the way a browser's own JS
+    // parser would, not just "the output contains no </script>".
+    expect(eval(escaped)[0].label).toBe('</script><script>alert(1)</script>');
   });
 
   it('still emits the object when nothing at all is installed', async () => {
