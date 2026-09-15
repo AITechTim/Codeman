@@ -107,6 +107,26 @@ describe('POST /api/sessions/:id/input — wake-on-LAN', () => {
     expect(session.reattachRemote).toHaveBeenCalled();
   });
 
+  it('flushes several inputs typed during a wake IN ORDER (the browser posts one per keystroke)', async () => {
+    // The concurrency surface that only exists in production: xterm's onData posts each
+    // keystroke as its OWN request, so a wake collects N concurrent buffer writes and must
+    // replay them in order. Route-level, so it is covered on every run instead of only in a
+    // hand-driven browser session.
+    const h = await harness({ hostUp: false, holdWake: true });
+    const session = h.ctx.sessions.get(SESSION_ID)!;
+
+    for (const chunk of ['h', 'a', 'llo']) {
+      const res = await send(h.app, { input: chunk, useMux: true });
+      expect(res.statusCode).toBe(200);
+    }
+    // Nothing written while the host is asleep/dead — that is the whole point.
+    expect(session.writeBuffer).toEqual([]);
+
+    h.releaseWake();
+    await h.registry.wake(session);
+    expect(session.writeBuffer).toEqual(['h', 'a', 'llo']);
+  });
+
   it('keeps the historical fire-and-forget write when the host is reachable', async () => {
     const h = await harness({ hostUp: true });
     const session = h.ctx.sessions.get(SESSION_ID)!;

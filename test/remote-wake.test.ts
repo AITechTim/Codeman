@@ -423,11 +423,33 @@ describe('RemoteWakeRegistry', () => {
     expect(resolveRemote).toHaveBeenCalledTimes(1);
   });
 
-  it('does not consult the resolver when the session already has a wake target', async () => {
-    const resolveRemote = vi.fn(async () => undefined);
-    const h = harness({ resolveRemote });
-    expect(await h.registry.hasWakeTarget(h.session)).toBe(true);
-    expect(resolveRemote).not.toHaveBeenCalled();
+  it('consults the resolver on the TTL even when the session has a target', async () => {
+    // The host config is authoritative in BOTH directions: a target removed in the config
+    // (or the dialog) must turn the feature off for a live session, which it cannot do if
+    // the session's own snapshot short-circuits the lookup.
+    const resolveRemote = vi.fn(async () => ({
+      hostId: 'hufflepuff',
+      label: 'Hufflepuff',
+      host: '192.168.50.137',
+    }));
+    const h = harness({
+      remote: {
+        hostId: 'hufflepuff',
+        label: 'Hufflepuff',
+        host: '192.168.50.137',
+        wakeMac: '04:d9:f5:80:c6:58',
+      },
+      resolveRemote,
+    });
+
+    expect(await h.registry.hasWakeTarget(h.session)).toBe(false);
+    expect(await h.registry.wakeConfigured(h.session)).toBe('none');
+    // ... and with the feature off there is nothing to buffer for.
+    expect(await h.registry.handleInput(h.session, 'x')).toBe('deliver');
+    // Cached for the TTL — not one host-config read per keystroke.
+    expect(resolveRemote).toHaveBeenCalledTimes(1);
+    await h.registry.hasWakeTarget(h.session);
+    expect(resolveRemote).toHaveBeenCalledTimes(1);
   });
 
   it('drops buffered input with the session', async () => {

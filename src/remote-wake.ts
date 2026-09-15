@@ -590,22 +590,27 @@ export class RemoteWakeRegistry {
   }
 
   /**
-   * The host config to act on: the session's own `remote` when it can wake, else a
+   * The host config to act on: the session's own `remote` when it is fresh enough, else a
    * freshly resolved one.
    *
-   * The persisted `remote` snapshot is taken at launch, so a wake target configured
-   * AFTER the session started (e.g. through the banner's config dialog, or by adding
-   * `wakeMac` to `remote-hosts.json`) is invisible to it. Recovery rehydration
-   * (server.ts) covers restarts; this covers the live session, and it is why saving
-   * the dialog takes effect without restarting anything. The resolver is asked at
-   * most once per TTL, and never for a session that already has a usable target.
+   * The persisted `remote` snapshot is taken at launch, so a wake target configured AFTER
+   * the session started (e.g. through the banner's config dialog, or by adding `wakeMac`
+   * to `remote-hosts.json`) is invisible to it. Recovery rehydration (server.ts) covers
+   * restarts; this covers the live session, and it is why saving the dialog takes effect
+   * without restarting anything.
+   *
+   * ⚠️ The host config wins in BOTH directions, so the resolver is consulted on the TTL
+   * regardless of whether the session already carries a target. Preferring the snapshot
+   * whenever it HAD one meant removing a MAC/command in the config (or the dialog) never
+   * took effect for a running session — the feature stayed on with a target nobody could
+   * see in the config any more, which is exactly the "host config is authoritative"
+   * promise failing in the one direction a user can observe.
    */
   private async _effectiveRemote(session: WakeableSession): Promise<WakeableRemote | undefined> {
     const state = this._state(session.id);
-    if (state.resolvedRemote && resolveWakeTarget(state.resolvedRemote)) return state.resolvedRemote;
-    if (resolveWakeTarget(session.remote)) return session.remote;
-    if (!session.remote || !this.deps.resolveRemote) return state.resolvedRemote ?? session.remote;
-    if (Date.now() - state.resolvedAt < REMOTE_WAKE_RESOLVE_TTL_MS) {
+    if (!session.remote) return state.resolvedRemote;
+    if (!this.deps.resolveRemote) return state.resolvedRemote ?? session.remote;
+    if (state.resolvedAt !== 0 && Date.now() - state.resolvedAt < REMOTE_WAKE_RESOLVE_TTL_MS) {
       return state.resolvedRemote ?? session.remote;
     }
     state.resolvedAt = Date.now();
