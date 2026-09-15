@@ -30,12 +30,13 @@ const HOST_WAKE_POLL_MS = 30_000;
 Object.assign(CodemanApp.prototype, {
   /** Per-tab banner state (single active session at a time). */
   _hostWake: null,
+  /** The page-wide poller interval (created once, see `_ensureHostWakePoller`). */
+  _hostWakeTimer: null,
 
   /** Fresh state for a session we just switched to. */
   _hostWakeState() {
     return {
       sessionId: null,
-      timer: null,
       /** Last reachability answer, or null before the first poll. */
       reachable: null,
       /** 'command' | 'mac' | 'none' — what the banner action should do. */
@@ -52,33 +53,57 @@ Object.assign(CodemanApp.prototype, {
   /**
    * Entry point from the session switcher — called for every active session, remote or
    * not, so it must be cheap and must clear the banner for local sessions.
+   *
+   * ⚠️ The POLLER is page-wide and independent of this call on purpose: a session
+   * switch is not the only way the active tab changes (boot restore, a page loaded with
+   * the tab already active, and `selectSession`'s own early return for the tab you are
+   * already on), and the banner must not depend on any single one of those paths
+   * running — that is exactly how it could silently never appear.
    */
   refreshHostWakeBanner(sessionId) {
-    const state = (this._hostWake = this._hostWakeState());
-    if (state.timer) clearInterval(state.timer);
-    state.sessionId = sessionId || null;
+    this._ensureHostWakePoller();
+    const state = this._hostWake;
+    if (state && state.sessionId && state.sessionId !== sessionId) this._hostWake = null;
+    this._hostWakeTick();
+  },
 
+  /** Create the page-wide poller once (interval + a visibility wake-up). */
+  _ensureHostWakePoller() {
+    if (this._hostWakeTimer) return;
+    this._hostWakeTimer = setInterval(() => this._hostWakeTick(), HOST_WAKE_POLL_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') this._hostWakeTick();
+    });
+  },
+
+  /**
+   * One poller tick: resolve the ACTIVE session, reset the banner when it changed, and
+   * ask the server. No-op while the page is hidden (a background tab must not poll).
+   */
+  _hostWakeTick() {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    const sessionId = this.activeSessionId;
     const session = sessionId && this.sessions ? this.sessions.get(sessionId) : null;
-    if (!session || !session.remote) {
-      this._renderHostWakeBanner();
+    if (!sessionId || !session || !session.remote) {
+      if (this._hostWake) {
+        this._hostWake = null;
+        this._renderHostWakeBanner();
+      }
       return;
     }
-
-    state.host = session.remote.host || '';
-    state.label = session.remote.label || 'Remote host';
-    // Text from the session payload first (instant, no round trip), corrected by the
-    // poll — a session whose wake config was added after launch only knows it after
-    // the server resolves host config.
-    state.wakeConfigured = session.remote.wakeMac || session.remote.wakeCommand ? 'mac' : 'none';
-    this._renderHostWakeBanner();
-
+    let state = this._hostWake;
+    if (!state || state.sessionId !== sessionId) {
+      state = this._hostWake = this._hostWakeState();
+      state.sessionId = sessionId;
+      state.host = session.remote.host || '';
+      state.label = session.remote.label || 'Remote host';
+      // Text from the session payload first (instant, no round trip), corrected by the
+      // poll — a session whose wake config was added after launch only knows it after
+      // the server resolves host config.
+      state.wakeConfigured = session.remote.wakeMac || session.remote.wakeCommand ? 'mac' : 'none';
+      this._renderHostWakeBanner();
+    }
     this._pollHostReachability();
-    if (state.timer) clearInterval(state.timer);
-    state.timer = setInterval(() => {
-      if (document.visibilityState === 'hidden') return;
-      if (this.activeSessionId !== state.sessionId) return;
-      this._pollHostReachability();
-    }, HOST_WAKE_POLL_MS);
   },
 
   /** One reachability check for the active remote session. */

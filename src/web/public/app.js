@@ -1815,6 +1815,9 @@ class CodemanApp {
   _onInit(data) {
     _crashDiag.log(`INIT: ${data.sessions?.length || 0} sessions`);
     this.handleInit(data);
+    // Start the remote-host reachability poller even if no session switch follows
+    // (a page loaded with the remote tab already active) — see host-wake-ui.js.
+    this._ensureHostWakePoller?.();
   }
 
   _onSessionCreated(data) {
