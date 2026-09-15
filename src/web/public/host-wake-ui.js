@@ -326,9 +326,16 @@ Object.assign(CodemanApp.prototype, {
    */
   _onRemoteHostWaking(data) {
     const label = data && data.label ? data.label : 'Remote host';
+    // A create-path wake (the user pressed Run / Attach) has no session yet, so
+    // nothing is queued behind it — the wording has to say what actually happens.
+    const forNewSession = Boolean(data && data.forNewSession);
     // Long enough to cover the wake + attach (~10s measured on a warm S3), and it
     // is replaced by `remote:sessionReconnected` the moment the pane is back.
-    this.showToast(`Waking ${label} … input is queued`, 'info', { duration: 12000 });
+    this.showToast(
+      forNewSession ? `Waking ${label} … the session starts when it is back` : `Waking ${label} … input is queued`,
+      'info',
+      { duration: 12000 }
+    );
     const state = this._hostWake;
     if (!state || !data || state.sessionId !== data.sessionId) return;
     state.waking = true;
@@ -340,7 +347,14 @@ Object.assign(CodemanApp.prototype, {
   /** SSE `remote:hostWakeFailed` — the host did not come back in time. */
   _onRemoteHostWakeFailed(data) {
     const label = data && data.label ? data.label : 'Remote host';
-    this.showToast(`${label} did not wake up — queued input is still held`, 'error', { duration: 15000 });
+    const forNewSession = Boolean(data && data.forNewSession);
+    this.showToast(
+      forNewSession
+        ? `${label} did not wake up — no session was started`
+        : `${label} did not wake up — queued input is still held`,
+      'error',
+      { duration: 15000 }
+    );
     const state = this._hostWake;
     if (!state || !data || state.sessionId !== data.sessionId) return;
     state.waking = false;

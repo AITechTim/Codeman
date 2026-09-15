@@ -368,6 +368,20 @@ it is unreachable it wakes it, polls until the host answers, reattaches the pane
 agent conversation is not restarted), and flushes the input that arrived meanwhile.
 Implementation: `src/remote-wake.ts`.
 
+The same wake path also serves **opening** a session, which is where a sleeping host used to
+be a dead end: pressing Run on a remote case (`POST /api/quick-start`) or Attach on a
+discovered remote tmux session (`POST /api/sessions` + `attachRemoteSession`) probes the host
+first, and on a sleeping one wakes it, waits for SSH and only then runs the tmux prereq probe.
+Without that the run failed with `could not verify tmux on remote host …` — an ssh error that
+blames tmux for a machine that is merely suspended. The wait is **blocking** (the caller gets
+the session or the error) but bounded by `REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS` (40 s) rather
+than the 90 s session default, because the dashboard sits behind a reverse proxy whose default
+`proxy_read_timeout` is 60 s: a longer wait would be cut off at the proxy while the session was
+still being created. The budget covers the whole request, not just the wait (40 s wake + 1.5 s
+probe + the tmux prereq probe's own 15 s timeout = 56.5 s worst case). A host with no wake target is not even probed on this path, so nothing
+changes for it, and `remote:hostWaking` is broadcast without a `sessionId` (the toast then reads
+"the session starts when it is back" — there is no session yet, and no input queued behind it).
+
 Two wake paths, `wakeCommand` first because it is the explicit override:
 
 - **`wakeMac`** — Codeman builds the magic packet itself (`buildMagicPacket`, six `0xFF`
@@ -387,12 +401,17 @@ banner comes from `GET /api/sessions/:id/reachability`, polled for the active re
 
 The invariants worth keeping:
 
-- **Only real user input or an explicit wake request may wake a host.** The COD-108 watcher,
-  the server's dropped-session handler and boot recovery have no access to the wake registry —
-  a wake there would re-wake the host seconds after every suspend, so it could never stay
-  asleep (the same failure `hufflepuff-mcp-lazy` exists to prevent for MCP keepalives). A
-  reachability check never wakes: it is a question, not an action. Both are enforced by tests
-  in `test/remote-wake.test.ts` and `test/routes/session-remote-wake.test.ts`, not comments.
+- **Only an EXPLICIT request may wake a host:** user input on an established session, the wake
+  button, or the user's own session create/attach request (`ensureHostAwake`). Everything that
+  runs on a TIMER must never wake one — the COD-108 watcher, the server's dropped-session
+  handler, boot recovery and session discovery have no access to the wake registry, and neither
+  has the shared session service, because `cron-service.ts` builds sessions there with nobody
+  waiting on the answer; a wake on such a path would re-wake the host seconds after every
+  suspend, so it could never stay asleep (the same failure `hufflepuff-mcp-lazy` exists to
+  prevent for MCP keepalives). A reachability check, a discovery listing and the tmux prereq
+  probe never wake: they are questions, not actions. All of it is enforced by tests in
+  `test/remote-wake.test.ts` (two wiring guards, one of them asserting `ensureHostAwake` has
+  exactly one caller file) and `test/routes/session-remote-wake.test.ts`, not by comments.
 - **Detection is a bare TCP connect** to the SSH port (then the configured `port`, else 22),
   throttled per session, and only for wake-enabled hosts. No `ServerAliveInterval` is added to
   the launch command: keepalives push bytes into an otherwise idle connection every interval,

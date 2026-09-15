@@ -28,6 +28,7 @@ import {
   type GrokConfig,
   type DeepSeekConfig,
   type OmpConfig,
+  type RemoteHost,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isExternalCliMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
 import { SseEvent } from '../sse-events.js';
@@ -67,7 +68,12 @@ import {
   type WaitSignal,
   type SignalWaitResult,
 } from '../session-wait-registry.js';
-import { RemoteWakeRegistry, createDefaultRemoteWakeDeps } from '../../remote-wake.js';
+import {
+  RemoteWakeRegistry,
+  REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+  createDefaultRemoteWakeDeps,
+  type WakeableRemote,
+} from '../../remote-wake.js';
 import { clampWaitMs, MAX_BUFFER_SCAN_BYTES } from '../../config/agent-wait.js';
 import {
   autoConfigureRalph,
@@ -816,6 +822,22 @@ export function resolveOmpConfigForCreate(
   return resolvedId ? { ...ompConfig, resumeSessionId: resolvedId } : ompConfig;
 }
 
+/**
+ * `RemoteHost` → the wake registry's host shape. They differ in one field name only
+ * (`id` in host config vs `hostId` on a session's `remote`), but the rename is load-
+ * bearing: the registry keys its per-host wake state on `hostId`.
+ */
+function wakeableHost(host: RemoteHost): WakeableRemote {
+  return {
+    hostId: host.id,
+    label: host.label,
+    host: host.host,
+    port: host.port,
+    wakeMac: host.wakeMac,
+    wakeCommand: host.wakeCommand,
+  };
+}
+
 export function registerSessionRoutes(
   app: FastifyInstance,
   ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort,
@@ -928,6 +950,19 @@ export function registerSessionRoutes(
       const { hostId, remoteSessionName } = body.attachRemoteSession;
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      // An explicit wake request is the only thing that may wake a host, and the user
+      // pressing Attach IS one (see quick-start for the same gate, and
+      // `remote-wake.ts` for what must never call this). Without it a sleeping host
+      // answers with an ssh failure that blames anything but the machine being asleep.
+      const hostWake = await remoteWake.ensureHostAwake(wakeableHost(host), {
+        timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+      });
+      if (hostWake === 'failed') {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `${host.label} did not come back after a wake-on-LAN request — nothing was attached`
+        );
+      }
       workingDir = `${host.username}@${host.host}:${remoteSessionName}`;
       remote = toAttachedSessionRemote(host, remoteSessionName, workingDir);
     }
@@ -3272,11 +3307,39 @@ export function registerSessionRoutes(
         );
       }
 
+      // The user pressing "Run" on a case whose host is asleep IS an explicit wake
+      // request (docs/remote-sessions.md §Wake-on-LAN), and the tmux probe below would
+      // otherwise fail with "could not verify tmux on remote host …" — an ssh failure
+      // that blames tmux for a machine that is merely suspended. Wired HERE, in the HTTP
+      // route, and deliberately NOT in the shared session service: `cron-service.ts`
+      // builds sessions through the service, and a wake down there would re-wake the
+      // host on every schedule (the failure invariant #1 exists to prevent).
+      const hostWake = await remoteWake.ensureHostAwake(wakeableHost(host), {
+        timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+      });
+      if (hostWake === 'failed') {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `${host.label} did not come back after a wake-on-LAN request — the session was not started`
+        );
+      }
+
       // tmux is a hard prerequisite on the remote host (the agent runs inside a remote
       // tmux server so it survives ssh drops). Probe before spawning so a missing tmux
       // surfaces a clear, structured error instead of a dead "tmux: command not found" pane.
       const tmuxCheck = await checkRemoteTmuxAvailable(host);
       if (!tmuxCheck.ok) {
+        // An unreachable host and a host without tmux fail the same way over ssh, so the
+        // probe's own message would send the user hunting for a tmux install. Ask the
+        // registry (which just probed, when it woke the host) which of the two it is.
+        if (!(await remoteWake.checkHostReachable(wakeableHost(host)))) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            hostWake === 'no-target'
+              ? `${host.label} (${host.host}) is not reachable, and this host has no wake-on-LAN target — configure a MAC address or a wake command first`
+              : `${host.label} (${host.host}) is not reachable`
+          );
+        }
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error || 'remote host is missing tmux');
       }
 

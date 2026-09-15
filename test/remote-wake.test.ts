@@ -26,6 +26,7 @@ import {
   sendWakePackets,
   wakeConfigured,
   REMOTE_WAKE_PENDING_MAX_BYTES,
+  REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
   type RemoteWakeDeps,
   type WakeableRemote,
   type WakeableSession,
@@ -439,6 +440,98 @@ describe('RemoteWakeRegistry', () => {
   });
 });
 
+// ========== Host-scoped wake (session create/attach) ==========
+
+describe('RemoteWakeRegistry — host-scoped wake for a request that waits on it', () => {
+  const hostRemote: WakeableRemote = {
+    hostId: 'hufflepuff',
+    label: 'Hufflepuff',
+    host: '192.168.50.137',
+    wakeMac: '04:d9:f5:80:c6:58',
+  };
+
+  it('does not even probe a host without a wake target (byte-identical to no feature)', async () => {
+    const h = harness({ remote: { hostId: 'x', label: 'X', host: '10.0.0.9' } });
+    await expect(h.registry.ensureHostAwake(h.session.remote!)).resolves.toBe('no-target');
+    expect(h.probe).not.toHaveBeenCalled();
+    expect(h.wake).not.toHaveBeenCalled();
+  });
+
+  it('reports ready without waking when the host already answers', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(true);
+    await expect(h.registry.ensureHostAwake(hostRemote)).resolves.toBe('ready');
+    expect(h.wake).not.toHaveBeenCalled();
+  });
+
+  it('wakes a sleeping host and waits with the caller’s budget, not the 90 s default', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+
+    await expect(
+      h.registry.ensureHostAwake(hostRemote, { timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS })
+    ).resolves.toBe('ready');
+
+    expect(h.wake).toHaveBeenCalledWith({ kind: 'mac', macs: [[4, 217, 245, 128, 198, 88]] });
+    // The budget has to reach the readiness poll: the reverse proxy cuts a request at
+    // 60 s, so a create-path wake must not inherit the 90 s session default.
+    expect(h.waitUntilReady).toHaveBeenCalledWith(hostRemote, {
+      timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+    });
+    expect(h.events).toContain('remote:hostWaking');
+  });
+
+  it('reports failed when the host never comes back, and probes again on the next attempt', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+    h.waitUntilReady.mockResolvedValue(false);
+
+    await expect(h.registry.ensureHostAwake(hostRemote)).resolves.toBe('failed');
+    expect(h.events).toContain('remote:hostWakeFailed');
+
+    // The failure resets the probe verdict, so a second Run probes instead of
+    // trusting a stale "down" forever.
+    h.waitUntilReady.mockResolvedValue(true);
+    h.probe.mockClear();
+    await expect(h.registry.ensureHostAwake(hostRemote)).resolves.toBe('ready');
+    expect(h.probe).toHaveBeenCalled();
+  });
+
+  it('single-flights two concurrent create-path wakes for the same host', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+    let release: (value: boolean) => void = () => {};
+    h.waitUntilReady.mockImplementation(() => new Promise<boolean>((resolve) => (release = resolve)));
+
+    const first = h.registry.ensureHostAwake(hostRemote);
+    const second = h.registry.ensureHostAwake(hostRemote);
+    await vi.waitFor(() => expect(h.wake).toHaveBeenCalledTimes(1));
+    release(true);
+
+    await expect(Promise.all([first, second])).resolves.toEqual(['ready', 'ready']);
+    // One magic packet for a double click, not two.
+    expect(h.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it('checkHostReachable is a question, never an action', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+
+    await expect(h.registry.checkHostReachable(hostRemote)).resolves.toBe(false);
+    expect(h.wake).not.toHaveBeenCalled();
+  });
+
+  it('reports failed instead of rejecting when the wake IO itself throws', async () => {
+    // A create route must answer with its own error, not a 500 from an unexpected
+    // rejection — the session flow catches for the same reason.
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+    h.wake.mockRejectedValue(new Error('udp socket exploded'));
+
+    await expect(h.registry.ensureHostAwake(hostRemote)).resolves.toBe('failed');
+  });
+});
+
 // ========== Wiring guard ==========
 
 const SRC = fileURLToPath(new URL('../src', import.meta.url));
@@ -467,5 +560,21 @@ describe('wake wiring guard', () => {
       .map((full) => relative(SRC, full));
 
     expect(importers.sort()).toEqual([...allowed].sort());
+  });
+
+  it('wakes a host for a create/attach request ONLY from the HTTP route', () => {
+    // The create-path wake (`ensureHostAwake`) is a USER request, so it belongs to the
+    // HTTP route. `cron-service.ts` builds sessions through the shared service with
+    // nobody waiting on the answer, so a wake down there would power the host on for
+    // every schedule — the failure invariant #1 exists to prevent. Asserted across the
+    // source tree, so a future caller has to come through this test.
+    // `remote-wake.ts` names itself: that is the definition, not a caller, and the
+    // import guard above already pins the file to the route.
+    const allowed = new Set([join('web', 'routes', 'session-routes.ts'), 'remote-wake.ts']);
+    const callers = walkTs(SRC)
+      .filter((full) => /ensureHostAwake\s*\(/.test(readFileSync(full, 'utf-8')))
+      .map((full) => relative(SRC, full));
+
+    expect(callers.sort()).toEqual([...allowed].sort());
   });
 });

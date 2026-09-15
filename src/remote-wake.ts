@@ -8,11 +8,16 @@
  * lost with no error anywhere — the failure this module exists to close.
  *
  * Design (deliberately narrow, see docs/remote-sessions.md §Wake-on-LAN):
- *  - ONLY real user input wakes a host. The auto-reconnect watcher and
- *    boot-recovery must never wake one, or a host would be re-woken ~45 s after
- *    each suspend and could never stay asleep (the "keepalive pings a sleeping
- *    host" failure already solved for a different consumer by
- *    `hufflepuff-mcp-lazy`).
+ *  - An EXPLICIT request wakes a host, and nothing else: user input on an
+ *    established session (`handleInput`), the wake button (`ensureAwake`), or the
+ *    user's own session create/attach request (`ensureHostAwake`, wired in the HTTP
+ *    routes). Everything that runs on a TIMER — the auto-reconnect watcher, boot
+ *    recovery, the reachability probe, session discovery — must never wake one, or
+ *    a host would be re-woken ~45 s after each suspend and could never stay asleep
+ *    (the "keepalive pings a sleeping host" failure already solved for a different
+ *    consumer by `hufflepuff-mcp-lazy`). The create path is deliberately wired in
+ *    `session-routes.ts` and NOT in the shared session service, because
+ *    `cron-service.ts` builds sessions there without a user waiting on the answer.
  *  - Detection is a cheap TCP connect to the SSH port (no auth, no ssh client,
  *    a few hundred bytes — below any meaningful activity threshold), throttled
  *    per session. No SSH keepalive is added to the launch command: keepalives
@@ -41,6 +46,17 @@ export const REMOTE_WAKE_PROBE_TIMEOUT_MS = 1_500;
 export const REMOTE_WAKE_READY_INTERVAL_MS = 1_500;
 /** Bounded wait for the host to come back after the wake command ran. */
 export const REMOTE_WAKE_READY_TIMEOUT_MS = 90_000;
+/**
+ * Budget for a wake that an HTTP REQUEST is waiting on (session create/attach).
+ * Deliberately shorter than {@link REMOTE_WAKE_READY_TIMEOUT_MS}: the dashboard is
+ * served through a reverse proxy whose default `proxy_read_timeout` is 60 s, so a
+ * 90 s wait would be cut off AT THE PROXY while the session was still being built —
+ * the browser reports a failure for a session that exists. The budget has to cover
+ * the WHOLE request, not just the wait: 40 s here + the 1.5 s reachability probe +
+ * the tmux prereq probe's own 15 s timeout = 56.5 s worst case, still under 60 s.
+ * A warm S3 resume measures ~12 s, so 40 s is >3× the observed wake.
+ */
+export const REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS = 40_000;
 /** The wake command itself must not hang the wake flow. */
 export const REMOTE_WAKE_COMMAND_TIMEOUT_MS = 10_000;
 /**
@@ -224,7 +240,7 @@ export interface RemoteWakeDeps {
   /** Run the resolved wake target (magic packet or host command). Resolves false on failure. */
   wake(target: NonNullable<WakeTarget>): Promise<boolean>;
   /** Poll until the woken host accepts connections again. */
-  waitUntilReady(remote: WakeableRemote): Promise<boolean>;
+  waitUntilReady(remote: WakeableRemote, opts?: { timeoutMs?: number }): Promise<boolean>;
   /** Sleep helper (injected for tests). */
   delay(ms: number): Promise<void>;
   /** Notify the COD-108 watcher so an exhausted backoff is reset. */
@@ -262,6 +278,25 @@ export function wakeConfigured(remote: WakeableRemote | undefined): WakeConfigur
   const target = resolveWakeTarget(remote);
   if (!target) return 'none';
   return target.kind;
+}
+
+/**
+ * Outcome of waking a host for a caller that has NO session yet (the create/attach
+ * routes). A union rather than a boolean because the three cases need different
+ * handling: `'no-target'` must leave the caller's behavior byte-identical (no probe,
+ * no extra latency for a host without WoL), and only `'failed'` is an error that
+ * deserves its own message instead of the caller's usual one.
+ */
+export type HostWakeOutcome = 'no-target' | 'ready' | 'failed';
+
+/**
+ * State key for a host-scoped wake. Prefixed so it can never collide with a session
+ * id, and keyed on the HOST rather than the case: two cases on one host share a
+ * single in-flight wake and one probe verdict. Such an entry is tiny (no input
+ * buffer) and bounded by the number of configured hosts, so it is never dropped.
+ */
+function hostWakeKey(hostId: string): string {
+  return `host:${hostId}`;
 }
 
 /** Per-session wake bookkeeping. */
@@ -392,6 +427,67 @@ export class RemoteWakeRegistry {
   }
 
   /**
+   * Host-scoped reachability, for a caller that has no session yet (create/attach).
+   * Shares the per-HOST probe state with {@link ensureHostAwake}, so the probe the
+   * wake flow just paid for also answers "was that ssh failure really a sleeping
+   * machine?". Never wakes anything — it is a question, not an action.
+   */
+  async checkHostReachable(remote: WakeableRemote, opts: { force?: boolean; ttlMs?: number } = {}): Promise<boolean> {
+    const state = this._state(hostWakeKey(remote.hostId));
+    const ttl = opts.force ? 0 : (opts.ttlMs ?? REMOTE_WAKE_REACHABILITY_TTL_MS);
+    if (Date.now() - state.probedAt >= ttl) {
+      state.probedAt = Date.now();
+      state.reachable = await this.deps.probe(remote);
+    }
+    return state.reachable === true;
+  }
+
+  /**
+   * Wake a host for a REQUEST that is waiting on it — the session create/attach
+   * routes, where there is no session to reattach and no input to buffer yet.
+   *
+   * `'no-target'` returns without probing, so a host without WoL config costs
+   * nothing and behaves exactly as before. Single-flight per host, so a double click
+   * (or two cases on the same host) sends one packet and shares one readiness poll.
+   */
+  async ensureHostAwake(remote: WakeableRemote, opts: { timeoutMs?: number } = {}): Promise<HostWakeOutcome> {
+    if (!resolveWakeTarget(remote)) return 'no-target';
+    const state = this._state(hostWakeKey(remote.hostId));
+    if (state.waking) return (await state.waking) ? 'ready' : 'failed';
+
+    state.probedAt = Date.now();
+    state.reachable = await this.deps.probe(remote);
+    if (state.reachable) return 'ready';
+    this.deps.log?.(`[RemoteWake] ${remote.label} (${remote.host}) is unreachable — waking it for a new session`);
+    return (await this.wakeHost(remote, opts)) ? 'ready' : 'failed';
+  }
+
+  /**
+   * Single-flight wake for a host with no session (see {@link ensureHostAwake}).
+   * A write into the same `waking` slot the session flow uses, so the two can never
+   * run two readiness polls against one host from the same key space.
+   */
+  private async wakeHost(remote: WakeableRemote, opts: { timeoutMs?: number }): Promise<boolean> {
+    const state = this._state(hostWakeKey(remote.hostId));
+    if (state.waking) return state.waking;
+    state.waking = (async (): Promise<boolean> => {
+      try {
+        return await this._wakeAndWait(remote, state, { timeoutMs: opts.timeoutMs, forNewSession: true });
+      } catch (err) {
+        // Injected IO is documented not to throw, but a rejected promise here would
+        // surface as an unhandled rejection AND take the route down with it (the
+        // session path catches for exactly this reason). A broken wake target must
+        // fail the wake, never the create route beyond its own error response.
+        this.deps.log?.(`[RemoteWake] unexpected failure: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      } finally {
+        state.waking = null;
+      }
+    })();
+    return state.waking;
+  }
+
+  /**
    * Single-flight wake: probe-free (the caller already knows the host is down),
    * run the wake command, poll for readiness, reattach the pane, flush the buffer.
    */
@@ -405,29 +501,9 @@ export class RemoteWakeRegistry {
     state.waking = (async (): Promise<boolean> => {
       const id = session.id;
       try {
-        this.deps.broadcast?.('remote:hostWaking', { sessionId: id, hostId: remote.hostId, label: remote.label });
-        this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) via ${target.kind} for session ${id}`);
+        const ready = await this._wakeAndWait(remote, state, { sessionId: id });
+        if (!ready) return false;
 
-        const woke = await this.deps.wake(target);
-        if (!woke) {
-          this.deps.log?.(
-            `[RemoteWake] wake failed for ${remote.label}: ${target.kind === 'command' ? target.command : 'magic packet'}`
-          );
-        }
-
-        const ready = await this.deps.waitUntilReady(remote);
-        if (!ready) {
-          this.deps.log?.(`[RemoteWake] ${remote.label} did not come back — input stays buffered`);
-          this.deps.broadcast?.('remote:hostWakeFailed', { sessionId: id, hostId: remote.hostId, label: remote.label });
-          // Reset the probe state so the NEXT user input probes and retries
-          // instead of trusting a stale "down" verdict forever.
-          state.probedAt = 0;
-          state.reachable = undefined;
-          return false;
-        }
-
-        state.reachable = true;
-        state.probedAt = Date.now();
         const reattached = await session.reattachRemote();
         if (!reattached) {
           this.deps.log?.(`[RemoteWake] ${remote.label} is up but the pane could not be reattached`);
@@ -451,6 +527,57 @@ export class RemoteWakeRegistry {
     })();
 
     return state.waking;
+  }
+
+  /**
+   * Broadcast + run the wake target + wait for SSH. Shared by the session flow (which
+   * then reattaches and flushes the buffer) and the create/attach flow (which has no
+   * pane yet). On failure the probe state is reset so the NEXT attempt probes and
+   * retries instead of trusting a stale "down" verdict forever.
+   */
+  private async _wakeAndWait(
+    remote: WakeableRemote,
+    state: WakeState,
+    opts: { sessionId?: string; timeoutMs?: number; forNewSession?: boolean } = {}
+  ): Promise<boolean> {
+    const target = resolveWakeTarget(remote);
+    if (!target) return true;
+    const forWhat = opts.sessionId ? `for session ${opts.sessionId}` : 'for a new session';
+    // No `sessionId` for a create-path wake: the toast handler is then the only one
+    // that acts (a banner for a session that does not exist yet would have no target),
+    // which is exactly the `forNewSession` distinction the UI renders.
+    this.deps.broadcast?.('remote:hostWaking', {
+      ...(opts.sessionId ? { sessionId: opts.sessionId } : { forNewSession: true }),
+      hostId: remote.hostId,
+      label: remote.label,
+    });
+    this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) via ${target.kind} ${forWhat}`);
+
+    const woke = await this.deps.wake(target);
+    if (!woke) {
+      this.deps.log?.(
+        `[RemoteWake] wake failed for ${remote.label}: ${target.kind === 'command' ? target.command : 'magic packet'}`
+      );
+    }
+
+    const ready = await this.deps.waitUntilReady(remote, { timeoutMs: opts.timeoutMs });
+    if (!ready) {
+      this.deps.log?.(
+        `[RemoteWake] ${remote.label} did not come back — ${opts.forNewSession ? 'the session was not started' : 'input stays buffered'}`
+      );
+      this.deps.broadcast?.('remote:hostWakeFailed', {
+        ...(opts.sessionId ? { sessionId: opts.sessionId } : { forNewSession: true }),
+        hostId: remote.hostId,
+        label: remote.label,
+      });
+      state.probedAt = 0;
+      state.reachable = undefined;
+      return false;
+    }
+
+    state.reachable = true;
+    state.probedAt = Date.now();
+    return true;
   }
 
   private _state(sessionId: string): WakeState {
@@ -675,7 +802,7 @@ export function createDefaultRemoteWakeDeps(overrides: Partial<RemoteWakeDeps> =
   return {
     probe: probeRemoteHostReachable,
     wake: (target) => (target.kind === 'command' ? runRemoteWakeCommand(target.command) : sendWakePackets(target.macs)),
-    waitUntilReady: (remote) => waitUntilRemoteReady(remote),
+    waitUntilReady: (remote, opts) => waitUntilRemoteReady(remote, opts),
     delay,
     ...overrides,
   };
