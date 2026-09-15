@@ -1081,6 +1081,7 @@ export function registerSessionRoutes(
       workingDir,
       mode,
       name: body.name || '',
+      nameSource: body.name ? undefined : 'auto',
       mux: ctx.mux,
       useMux: true,
       niceConfig: globalNice,
@@ -3484,6 +3485,7 @@ export function registerSessionRoutes(
     const session = new Session({
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
+      nameSource: sessionName ? undefined : 'auto',
       mux: ctx.mux,
       useMux: true,
       mode: mode,
