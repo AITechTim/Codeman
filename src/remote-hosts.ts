@@ -540,6 +540,32 @@ export function remoteDisplayPath(
   return `${remote.username}@${remote.host}:${path}`;
 }
 
+/**
+ * Refresh HOST-level config on a RESTORED `SessionRemote`.
+ *
+ * A session's `remote` block is persisted at launch time (mux-sessions.json /
+ * state.json) and recovery uses that snapshot, so a field ADDED to the host config
+ * later never reaches an already-running session — not even across a Codeman
+ * restart. That is exactly how a `wakeCommand` added to `remote-hosts.json` would
+ * silently do nothing until the session is relaunched (which for an owned remote
+ * session means killing the remote tmux).
+ *
+ * Deliberately narrow: ONLY `wakeCommand` is taken from the host config, and the
+ * host is authoritative for it (removing it in the config turns the feature off
+ * again). The other host-level fields (`commands`, ssh options) stay as persisted
+ * so this cannot silently change how an existing pane connects.
+ */
+export function rehydrateRemoteHostFields(
+  remote: SessionRemote | undefined,
+  hostsById: ReadonlyMap<string, RemoteHost>
+): SessionRemote | undefined {
+  if (!remote) return remote;
+  const host = hostsById.get(remote.hostId);
+  if (!host) return remote;
+  if (remote.wakeCommand === host.wakeCommand) return remote;
+  return { ...remote, wakeCommand: host.wakeCommand };
+}
+
 export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): SessionRemote {
   return {
     hostId: host.id,

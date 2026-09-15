@@ -6,6 +6,7 @@ import {
   defaultRemoteCommandForMode,
   readRemoteCases,
   readRemoteHosts,
+  rehydrateRemoteHostFields,
   remoteDisplayPath,
   remoteSshTarget,
   toSessionRemote,
@@ -113,6 +114,55 @@ describe('remote-hosts domain', () => {
     it('rejects shell metacharacters as defence in depth', () => {
       expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/bin/sh$(id)' }).success).toBe(false);
       expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/bin/`id`' }).success).toBe(false);
+    });
+  });
+
+  describe('rehydrateRemoteHostFields', () => {
+    const persisted = {
+      hostId: 'hufflepuff',
+      label: 'Hufflepuff',
+      host: '192.168.50.137',
+      username: 'j',
+      remotePath: '/home/j/work',
+    };
+    const hosts = (wakeCommand?: string) =>
+      new Map([
+        [
+          'hufflepuff',
+          {
+            id: 'hufflepuff',
+            label: 'Hufflepuff',
+            host: '192.168.50.137',
+            username: 'j',
+            ...(wakeCommand ? { wakeCommand } : {}),
+          },
+        ],
+      ]);
+
+    it('adds a wake command that only exists in the host config', () => {
+      // The pre-existing-session case: the field was added to remote-hosts.json after
+      // this session was persisted, so recovery is the only place it can arrive.
+      expect(rehydrateRemoteHostFields(persisted, hosts('/home/joe/bin/whuff'))?.wakeCommand).toBe(
+        '/home/joe/bin/whuff'
+      );
+    });
+
+    it('treats the host config as authoritative (removing it turns the feature off)', () => {
+      const remote = { ...persisted, wakeCommand: '/home/joe/bin/whuff' };
+      expect(rehydrateRemoteHostFields(remote, hosts())?.wakeCommand).toBeUndefined();
+    });
+
+    it('leaves the block untouched when the host is gone or the session is local', () => {
+      expect(rehydrateRemoteHostFields(persisted, new Map())).toBe(persisted);
+      expect(rehydrateRemoteHostFields(undefined, hosts('/x'))).toBeUndefined();
+    });
+
+    it('keeps the other host-level fields as persisted', () => {
+      // Only wakeCommand is refreshed: silently re-pointing an existing pane's ssh
+      // options would be a behavior change nobody asked for.
+      const remote = { ...persisted, identityFile: '~/.ssh/pinned_key' };
+      const rehydrated = rehydrateRemoteHostFields(remote, hosts('/home/joe/bin/whuff'));
+      expect(rehydrated?.identityFile).toBe('~/.ssh/pinned_key');
     });
   });
 });
