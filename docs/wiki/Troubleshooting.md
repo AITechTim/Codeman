@@ -138,6 +138,12 @@ That is the PTY-exit circuit breaker. Repeated rapid PTY exits trip it, and it b
 automatic restarts so a broken configuration does not spin forever. Reset it explicitly from
 the session's controls. Reattaching does not clear it, deliberately.
 
+### Typed prompts are silently ignored after restoring a tab
+
+Update. A browser whose input sequence counter fell behind the server's (a restored tab,
+cleared site data) used to have every prompt deduplicated away. Since 1.29.0 the duplicate
+acknowledgement carries the watermark and the client re-sends.
+
 ### Sessions I did not create appeared, or my session resized itself
 
 Two Codeman servers are running against the same data directory and tmux socket. The second
@@ -166,6 +172,16 @@ Things to try:
 
 Codex ignores the mouse reports that forwarding would send, so Codeman does not forward
 there. Scrolling is local, and `Shift+Wheel` behaves the same way.
+
+### Selected text is invisible on a light skin
+
+Update. Every skin named its selection colour under a key xterm renamed in v5, so the four
+light skins painted white at 30% over near-white. Fixed in 1.29.0.
+
+### `Ctrl+Z` suspended my agent
+
+Update. Since 1.28.0 `Ctrl+Z` is swallowed in agent sessions, so a running CLI cannot be
+stopped by job control. Shell sessions keep it.
 
 ### `Ctrl+C` copies when I wanted to interrupt
 
@@ -252,11 +268,25 @@ node scripts/build-agent-image.mjs --no-cache
 A plain rebuild reuses the cached `npm install -g` layer and keeps the CLIs frozen at their
 original versions while reporting success.
 
+### Every file in a remote case says "File not found"
+
+Update. Before 1.29.0 the file routes resolved every path on the Codeman host, so in a
+remote case every click failed while the file plainly existed on the other machine. Reads
+now go over ssh; see [Working With Files](Working-With-Files). Editing and Office previews
+stay unavailable remotely and say so with a 400.
+
+### Compose: the server crash-loops with `EACCES` on first start
+
+Start the stack with `bash docker/Start-Codeman.sh` rather than a plain `docker compose up`,
+and update: since 1.29.0 the entrypoint corrects a root-owned bind mount before dropping
+privileges. See [Running As A Service](Running-As-A-Service).
+
 ### A remote SSH session dropped and did not come back
 
 A bounded-backoff watcher reattaches dropped sessions, and it is on by default. Intentional
-kills are never revived. Check the host is reachable and that the remote tmux server is
-still running.
+kills are never revived, and neither is a clean exit inside the pane (Ctrl-D, `exit`): only
+a transport drop is reconnected. Check the host is reachable and that the remote tmux server
+is still running.
 
 ## Gathering diagnostics
 
