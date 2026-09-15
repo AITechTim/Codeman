@@ -574,10 +574,14 @@ export function runRemoteWakeCommand(command: string, timeoutMs = REMOTE_WAKE_CO
  * interface to broadcast on, permission) rather than throwing — a broken network
  * must not break the wake flow, which reports the failure itself.
  */
-export function sendWakePackets(addresses: number[][], port = 9): Promise<boolean> {
+export function sendWakePackets(
+  addresses: number[][],
+  port = 9,
+  createSocket: WakeSocketFactory = () => dgram.createSocket('udp4')
+): Promise<boolean> {
   if (addresses.length === 0) return Promise.resolve(false);
   return new Promise((resolve) => {
-    const socket = dgram.createSocket('udp4');
+    const socket = createSocket();
     let settled = false;
     const finish = (value: boolean) => {
       if (settled) return;
@@ -590,24 +594,40 @@ export function sendWakePackets(addresses: number[][], port = 9): Promise<boolea
       resolve(value);
     };
     socket.once('error', () => finish(false));
-    try {
-      socket.setBroadcast(true);
-    } catch {
-      finish(false);
-      return;
-    }
-    let pending = addresses.length;
-    let failed = false;
-    for (const mac of addresses) {
-      const packet = buildMagicPacket(mac);
-      socket.send(packet, port, '255.255.255.255', (err) => {
-        if (err) failed = true;
-        pending--;
-        if (pending === 0) finish(!failed);
-      });
-    }
+    // ⚠️ `setBroadcast` BEFORE the socket is bound fails with EBADF on Linux, and the
+    // send that follows fails with EACCES — i.e. the packet silently never leaves the
+    // machine. So the broadcast flag is set in the bind callback, always. (Found by
+    // the live test: macOS/BSD tolerate the wrong order, Linux does not.)
+    socket.bind(() => {
+      try {
+        socket.setBroadcast(true);
+      } catch {
+        finish(false);
+        return;
+      }
+      let pending = addresses.length;
+      let failed = false;
+      for (const mac of addresses) {
+        socket.send(buildMagicPacket(mac), port, '255.255.255.255', (err?: Error | null) => {
+          if (err) failed = true;
+          pending--;
+          if (pending === 0) finish(!failed);
+        });
+      }
+    });
   });
 }
+
+/** The `dgram` surface {@link sendWakePackets} uses — injectable so the bind/setBroadcast ORDER is testable. */
+export interface WakeSocket {
+  bind(callback: () => void): void;
+  setBroadcast(flag: boolean): void;
+  send(msg: Buffer, port: number, address: string, callback: (err?: Error | null) => void): void;
+  close(): void;
+  once(event: 'error', listener: (err: Error) => void): void;
+}
+
+export type WakeSocketFactory = () => WakeSocket;
 
 /** Poll the host until it accepts connections again, or the bound is hit. */
 export async function waitUntilRemoteReady(

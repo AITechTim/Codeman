@@ -23,6 +23,7 @@ import {
   decideRemoteInputAction,
   parseMacList,
   resolveWakeTarget,
+  sendWakePackets,
   wakeConfigured,
   REMOTE_WAKE_PENDING_MAX_BYTES,
   type RemoteWakeDeps,
@@ -109,6 +110,55 @@ describe('MAC parsing + magic packet', () => {
     for (let repeat = 0; repeat < 16; repeat++) {
       expect([...packet.subarray(6 + repeat * 6, 12 + repeat * 6)]).toEqual(mac);
     }
+  });
+
+  it('binds BEFORE enabling broadcast — the order that silently kills the packet on Linux', async () => {
+    // `setBroadcast()` on an unbound socket throws EBADF on Linux and the follow-up
+    // send dies with EACCES, so the magic packet never leaves the machine (verified
+    // against a real sleeping host). The order is asserted, not described.
+    const calls: string[] = [];
+    const sent: { packet: Buffer; port: number; address: string }[] = [];
+    const packets = await sendWakePackets(
+      [
+        [4, 217, 245, 128, 198, 88],
+        [28, 97, 180, 32, 88, 235],
+      ],
+      9,
+      () => ({
+        bind: (cb: () => void) => {
+          calls.push('bind');
+          cb();
+        },
+        setBroadcast: () => calls.push('setBroadcast'),
+        send: (packet: Buffer, port: number, address: string, cb: (err?: Error | null) => void) => {
+          calls.push('send');
+          sent.push({ packet, port, address });
+          cb(null);
+        },
+        close: () => calls.push('close'),
+        once: () => undefined,
+      })
+    );
+
+    expect(packets).toBe(true);
+    expect(calls[0]).toBe('bind');
+    expect(calls[1]).toBe('setBroadcast');
+    // One 102-byte magic packet per MAC, to the broadcast address on port 9.
+    expect(sent).toHaveLength(2);
+    expect(sent.every((s) => s.packet.length === 102 && s.port === 9 && s.address === '255.255.255.255')).toBe(true);
+  });
+
+  it('reports failure when the platform refuses to broadcast', async () => {
+    const ok = await sendWakePackets([[4, 217, 245, 128, 198, 88]], 9, () => ({
+      bind: (cb: () => void) => cb(),
+      setBroadcast: () => {
+        throw new Error('EBADF');
+      },
+      send: () => undefined,
+      close: () => undefined,
+      once: () => undefined,
+    }));
+    expect(ok).toBe(false);
   });
 
   it('resolves the wake target with the command as the explicit override', () => {
