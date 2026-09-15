@@ -314,8 +314,21 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  /** SSE `remote:hostWaking` — a wake is running (ours or one started by typing). */
+  /**
+   * SSE `remote:hostWaking` — a wake is running (ours or one started by typing).
+   *
+   * ⚠️ The ONLY definition of this handler: `panels-ui.js` must not define it too.
+   * Both mix into `Codeman.prototype` and this file loads later, so a second copy
+   * would be silently shadowed (the guard in `sse-dispatch-table.test.ts` sees that a
+   * handler exists, not that two modules claim the same name). The toast is
+   * deliberately UNCONDITIONAL — a wake can start for a background session (input on
+   * a non-active tab) where there is no banner to update.
+   */
   _onRemoteHostWaking(data) {
+    const label = data && data.label ? data.label : 'Remote host';
+    // Long enough to cover the wake + attach (~10s measured on a warm S3), and it
+    // is replaced by `remote:sessionReconnected` the moment the pane is back.
+    this.showToast(`Waking ${label} … input is queued`, 'info', { duration: 12000 });
     const state = this._hostWake;
     if (!state || !data || state.sessionId !== data.sessionId) return;
     state.waking = true;
@@ -326,6 +339,8 @@ Object.assign(CodemanApp.prototype, {
 
   /** SSE `remote:hostWakeFailed` — the host did not come back in time. */
   _onRemoteHostWakeFailed(data) {
+    const label = data && data.label ? data.label : 'Remote host';
+    this.showToast(`${label} did not wake up — queued input is still held`, 'error', { duration: 15000 });
     const state = this._hostWake;
     if (!state || !data || state.sessionId !== data.sessionId) return;
     state.waking = false;

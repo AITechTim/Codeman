@@ -57,4 +57,22 @@ describe('SSE dispatch table', () => {
       .filter((handler) => !new RegExp(`(^|\\s)${handler}\\s*\\(`, 'm').test(allModules));
     expect(missing).toEqual([]);
   });
+
+  it('defines every handler in exactly ONE module (a second copy is shadowed)', () => {
+    // Modules mix into `CodemanApp.prototype` and run in script order, so two
+    // definitions of the same handler name silently shadow each other: the later file
+    // wins and the earlier one never runs. The existence check above cannot see that
+    // (both names resolve), which is how a duplicate banner handler can leave a toast
+    // dead with no error anywhere.
+    const byModule = readdirSync(PUBLIC_DIR)
+      .filter((name) => name.endsWith('.js'))
+      .map((name) => ({ name, source: readFileSync(join(PUBLIC_DIR, name), 'utf-8') }));
+    const shadowed = dispatchEntries()
+      .map((entry) => entry.handler)
+      .filter((handler) => {
+        const re = new RegExp(`(^|\\s)${handler}\\s*\\(`, 'm');
+        return byModule.filter((mod) => re.test(mod.source)).length > 1;
+      });
+    expect(shadowed).toEqual([]);
+  });
 });

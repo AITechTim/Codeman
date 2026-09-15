@@ -404,7 +404,8 @@ The invariants worth keeping:
   after the reattach, with a settle delay so bytes cannot land in a still-connecting
   pane. The **send-and-wait** path blocks on the wake instead — its response is open
   anyway, and buffering would break the wait contract.
-- **The command runs without a shell** (`spawn(path, [], { shell: false })`), the schema
+- **The command runs without a shell** (`spawn(path, [], { stdio: 'ignore' })` — `shell`
+  defaults to `false`), the schema
   requires a single executable path (no arguments, no `$`/backtick), and `wakeMac` is a
   structural hex-pair allowlist. A broken or missing wake target fails the wake, never the
   input route.
@@ -418,8 +419,9 @@ The invariants worth keeping:
   again). Other host-level fields deliberately stay as persisted, so neither path can
   silently re-point an existing pane's SSH options.
 - **UI/SSE**: `remote:hostWaking` and `remote:hostWakeFailed` (plus the reused
-  `remote:sessionReconnected`) drive the banner and toasts in `host-wake-ui.js` /
-  `panels-ui.js`.
+  `remote:sessionReconnected`) drive the banner and toasts, all from `host-wake-ui.js` —
+  its handlers are the ONLY definitions, since a second one in another mixin would be
+  silently shadowed by script order.
 
 Tests: `test/remote-wake.test.ts` (decision/throttle table, single-flight registry,
 buffering + flush order, MAC parsing/magic packet, live host-config resolution, and the wiring

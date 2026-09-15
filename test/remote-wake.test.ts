@@ -76,9 +76,21 @@ describe('appendBoundedPending', () => {
     expect(appendBoundedPending([big], 'newest')).toEqual(['newest']);
   });
 
-  it('never drops the just-typed chunk even when it alone exceeds the cap', () => {
+  it('trims a single oversized chunk to the cap, keeping its TAIL', () => {
+    // One large paste is one input value, so the cap has to hold WITHIN a chunk too
+    // (otherwise "bounded at 4 KB" would only be true per chunk, not per session).
     const huge = 'y'.repeat(REMOTE_WAKE_PENDING_MAX_BYTES + 100);
-    expect(appendBoundedPending([], huge)).toEqual([huge]);
+    const result = appendBoundedPending([], huge);
+    expect(result).toEqual(['y'.repeat(REMOTE_WAKE_PENDING_MAX_BYTES)]);
+    expect(result[0].length).toBe(REMOTE_WAKE_PENDING_MAX_BYTES);
+  });
+
+  it('trims a multi-byte tail without splitting a character', () => {
+    const cap = 10;
+    const value = 'ä'.repeat(8); // 2 bytes each → 16 bytes
+    const result = appendBoundedPending([], value, cap);
+    expect(Buffer.byteLength(result[0])).toBeLessThanOrEqual(cap);
+    expect(result[0]).toBe('ä'.repeat(5)); // 10 bytes, no U+FFFD
   });
 });
 

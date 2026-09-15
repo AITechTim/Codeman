@@ -120,17 +120,13 @@ Object.assign(CodemanApp.prototype, {
 
 
   // Wake-on-LAN from user input on a sleeping remote host (see remote-wake.ts).
-  _onRemoteHostWaking(data) {
-    const label = data && data.label ? data.label : 'Remote host';
-    // Long enough to cover the wake + attach (~10s measured on a warm S3), and it
-    // is replaced by `remote:sessionReconnected` the moment the pane is back.
-    this.showToast(`Waking ${label} … input is queued`, 'info', { duration: 12000 });
-  },
-
-  _onRemoteHostWakeFailed(data) {
-    const label = data && data.label ? data.label : 'Remote host';
-    this.showToast(`${label} did not wake up — queued input is still held`, 'error', { duration: 15000 });
-  },
+  // ⚠️ The `remote:hostWaking` / `remote:hostWakeFailed` HANDLERS live in
+  // `host-wake-ui.js`, which owns the banner state. They are NOT redefined here:
+  // both files mix into `CodemanApp.prototype` and `host-wake-ui.js` is loaded
+  // later, so a second definition would silently shadow the banner update (and the
+  // toast would never fire — the exact silent no-op `sse-dispatch-table.test.ts`
+  // exists to prevent, which cannot see shadowing). The toasts are shown from the
+  // host-wake-ui handlers instead.
 
 
   // Bash tools

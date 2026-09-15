@@ -99,6 +99,11 @@ export function decideRemoteInputAction(args: {
 /**
  * Append `data` to the pending buffer, dropping the OLDEST bytes when the cap is
  * exceeded. Returns the resulting buffer. Pure.
+ *
+ * A single chunk can itself exceed the cap (one large paste is one `input` value),
+ * so after whole chunks are dropped the surviving chunk's HEAD is trimmed too —
+ * otherwise "bounded at 4 KB" would hold only per chunk, not per session. The trim
+ * is code-point aware, so it never emits a broken multi-byte character.
  */
 export function appendBoundedPending(
   pending: string[],
@@ -111,7 +116,23 @@ export function appendBoundedPending(
     total -= Buffer.byteLength(next[0]);
     next.shift();
   }
+  if (next.length === 1) next[0] = tailWithinBytes(next[0], maxBytes);
   return next;
+}
+
+/** Keep only the trailing part of `value` that fits in `maxBytes` UTF-8 bytes. Pure. */
+function tailWithinBytes(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  const chars = [...value];
+  let total = 0;
+  let start = chars.length;
+  while (start > 0) {
+    const size = Buffer.byteLength(chars[start - 1]);
+    if (total + size > maxBytes) break;
+    total += size;
+    start--;
+  }
+  return chars.slice(start).join('');
 }
 
 /** The remote fields the wake flow needs. Structurally satisfied by `SessionRemote`. */
