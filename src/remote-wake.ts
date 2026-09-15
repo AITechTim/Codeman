@@ -214,15 +214,11 @@ export class RemoteWakeRegistry {
 
     if (action === 'deliver') return 'deliver';
     if (action === 'buffer') {
-      // A buffered decision with no wake in flight (the wake failed and the state
-      // was reset, or the very first input of a session in the throttle window)
-      // must still drive a wake, or the bytes would sit in the buffer forever.
-      if (state.waking == null && remote?.wakeCommand) {
-        this._enqueue(session.id, data);
-        void this.wake(session);
-        return 'buffered';
-      }
       this._enqueue(session.id, data);
+      // A buffered verdict with no wake in flight still has to DRIVE a wake (the
+      // previous one failed and reset the probe state, or the ladder landed here
+      // directly) — otherwise the bytes would sit in the buffer forever.
+      if (state.waking == null && remote?.wakeCommand) void this.wake(session);
       return 'buffered';
     }
 

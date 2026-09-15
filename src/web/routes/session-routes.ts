@@ -1322,6 +1322,7 @@ export function registerSessionRoutes(
 
     for (const id of sessionIds) {
       if (ctx.sessions.has(id)) {
+        remoteWake.drop(id);
         await ctx.cleanupSession(id, true, 'user_bulk_delete');
         killed++;
       }
