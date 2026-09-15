@@ -749,6 +749,18 @@ export const RemoteHostSchema = z.object({
     .regex(/^\S+$/, 'Wake command must be a single executable path (no arguments)')
     .regex(NO_SHELL_META, 'Invalid characters in wake command')
     .optional(),
+  // Wake-on-LAN MAC address(es), comma-separated. Structural: only hex pairs with
+  // `:`/`-` separators, so nothing here can be a shell token even by accident (the
+  // value never reaches a shell — Codeman builds the magic packet itself).
+  wakeMac: z
+    .string()
+    .min(11)
+    .max(128)
+    .regex(
+      /^[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5}(\s*,\s*[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5})*$/,
+      'Wake MAC must be one or more MAC addresses, comma-separated'
+    )
+    .optional(),
 });
 
 export const RemoteCaseLinkSchema = z.object({

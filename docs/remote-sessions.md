@@ -361,49 +361,71 @@ vanished with no error anywhere, and without a keepalive the pane could look ali
 the OS TCP timeout. The only recovery was waiting for the reconnect watcher, which
 gave up after ~13 minutes and, once exhausted, never retried.
 
-An **optional** `wakeCommand` on a remote host (a Wake-on-LAN wrapper such as
-`/home/joe/bin/whuff`) closes that: on user input, `POST /api/sessions/:id/input`
-probes the host, and if it is unreachable it runs the wake command, polls until the
-host answers, reattaches the pane (`Session.reattachRemote()`, which idempotently
-attaches the still-running remote tmux — the agent conversation is not restarted),
-and flushes the input that arrived meanwhile. Implementation: `src/remote-wake.ts`.
+An **optional** `wakeMac` (one or more MAC addresses, comma-separated) or `wakeCommand` on a
+remote host closes that: on user input, `POST /api/sessions/:id/input` probes the host, and if
+it is unreachable it wakes it, polls until the host answers, reattaches the pane
+(`Session.reattachRemote()`, which idempotently attaches the still-running remote tmux — the
+agent conversation is not restarted), and flushes the input that arrived meanwhile.
+Implementation: `src/remote-wake.ts`.
+
+Two wake paths, `wakeCommand` first because it is the explicit override:
+
+- **`wakeMac`** — Codeman builds the magic packet itself (`buildMagicPacket`, six `0xFF`
+  bytes then the MAC repeated 16×; the shape is asserted byte-for-byte) and broadcasts it
+  over UDP port 9 (`sendWakePackets`). This is the normal case: no external script, and one
+  MAC list per host instead of one per consumer.
+- **`wakeCommand`** — a single executable path, run WITHOUT a shell. For hosts that need a
+  router/another machine to send the packet.
+
+**UI**: a banner (`#hostWakeBanner`, `host-wake-ui.js`) appears while the ACTIVE remote
+session's host is unreachable — amber, since the Codeman session is healthy and only the
+machine is asleep. With a wake target the action is **Wake** (`POST /api/sessions/:id/wake`);
+with none it is **Configure WoL** and opens `#wakeConfigModal`, a small form for that host's
+`wakeMac`/`wakeCommand` that saves with `PUT /api/remote-hosts/:id`. Reachability for the
+banner comes from `GET /api/sessions/:id/reachability`, polled for the active remote session
+(30 s, visible tab only).
 
 The invariants worth keeping:
 
-- **Only real user input may wake a host.** The COD-108 watcher, the server's
-  dropped-session handler and boot recovery have no access to the wake registry — a
-  wake there would re-wake the host seconds after every suspend, so it could never
-  stay asleep (the same failure `hufflepuff-mcp-lazy` exists to prevent for MCP
-  keepalives). Enforced by `test/remote-wake.test.ts`'s wiring guard, not a comment.
-- **Detection is a bare TCP connect** to the SSH port (then the configured `port`, else
-  22), throttled to one probe per `REMOTE_WAKE_PROBE_MIN_INTERVAL_MS` (30 s) per
-  session, and only for wake-enabled hosts. No `ServerAliveInterval` is added to the
-  launch command: keepalives push bytes into an otherwise idle connection every
-  interval, which is exactly what a byte-threshold idle detector must not count as
-  activity. A probe is ~200 bytes per 30 s, orders of magnitude below any such
-  threshold, and the SYN alone cannot wake a host.
+- **Only real user input or an explicit wake request may wake a host.** The COD-108 watcher,
+  the server's dropped-session handler and boot recovery have no access to the wake registry —
+  a wake there would re-wake the host seconds after every suspend, so it could never stay
+  asleep (the same failure `hufflepuff-mcp-lazy` exists to prevent for MCP keepalives). A
+  reachability check never wakes: it is a question, not an action. Both are enforced by tests
+  in `test/remote-wake.test.ts` and `test/routes/session-remote-wake.test.ts`, not comments.
+- **Detection is a bare TCP connect** to the SSH port (then the configured `port`, else 22),
+  throttled per session, and only for wake-enabled hosts. No `ServerAliveInterval` is added to
+  the launch command: keepalives push bytes into an otherwise idle connection every interval,
+  which is exactly what a byte-threshold idle detector must not count as activity. A probe is
+  ~200 bytes per 30 s, orders of magnitude below any such threshold, and the SYN alone cannot
+  wake a host.
 - **Input is buffered while a wake is in flight** (`REMOTE_WAKE_PENDING_MAX_BYTES`,
   oldest bytes dropped, bounded so user input cannot grow memory) and flushed in order
   after the reattach, with a settle delay so bytes cannot land in a still-connecting
   pane. The **send-and-wait** path blocks on the wake instead — its response is open
   anyway, and buffering would break the wait contract.
-- **The command runs without a shell** (`spawn(path, [], { shell: false })`), and the
-  schema requires a single executable path: no arguments, no `$`/backtick. A broken or
-  missing wake command fails the wake, never the input route.
-- **`wakeCommand` is host-level config, refreshed on session recovery**
-  (`rehydrateRemoteHostFields` in `src/remote-hosts.ts`). A session's `remote` block is
-  persisted at launch time, so a field added to `remote-hosts.json` later would
-  otherwise never reach an already-running session — not even across a Codeman restart.
-  The host config is authoritative (removing the field disables the feature again);
-  other host-level fields deliberately stay as persisted, so recovery cannot silently
-  re-point an existing pane's SSH options.
+- **The command runs without a shell** (`spawn(path, [], { shell: false })`), the schema
+  requires a single executable path (no arguments, no `$`/backtick), and `wakeMac` is a
+  structural hex-pair allowlist. A broken or missing wake target fails the wake, never the
+  input route.
+- **`wakeMac`/`wakeCommand` are host-level config, refreshed on recovery AND live**
+  (`rehydrateRemoteHostFields` in `src/remote-hosts.ts` plus `RemoteWakeDeps.resolveRemote`).
+  A session's `remote` block is persisted at launch time, so a field added to
+  `remote-hosts.json` later would otherwise never reach an already-running session — not even
+  across a Codeman restart, and certainly not right after saving the banner's config dialog.
+  Recovery rehydration covers restarts, the (throttled, cache-backed) resolver covers the live
+  session; the host config is authoritative for both (removing the field disables the feature
+  again). Other host-level fields deliberately stay as persisted, so neither path can
+  silently re-point an existing pane's SSH options.
 - **UI/SSE**: `remote:hostWaking` and `remote:hostWakeFailed` (plus the reused
-  `remote:sessionReconnected`) drive toasts in `panels-ui.js`.
+  `remote:sessionReconnected`) drive the banner and toasts in `host-wake-ui.js` /
+  `panels-ui.js`.
 
 Tests: `test/remote-wake.test.ts` (decision/throttle table, single-flight registry,
-buffering + flush order, and the wiring guard) and
-`test/routes/session-remote-wake.test.ts` (the input route buffers instead of writing
-into a sleeping host, and the non-wake paths are unchanged).
+buffering + flush order, MAC parsing/magic packet, live host-config resolution, and the wiring
+guard) and `test/routes/session-remote-wake.test.ts` (the input route buffers instead of writing
+into a sleeping host, the reachability route never wakes, and the wake route reports the
+no-target case the UI turns into "configure WoL").
 
 ## API
 
@@ -418,8 +440,9 @@ Routes are registered in `src/web/routes/case-routes.ts`:
 | `GET`    | `/api/remote-hosts/:hostId/sessions` | Discover `codeman-*` sessions on the host (COD-105; `listRemoteCodemanSessions`, never errors) |
 | `POST`   | `/api/cases/remote-link`             | Link a case to a remote host (creates the `RemoteCase`)                                        |
 
-`RemoteHost` accepts the optional `wakeCommand` (single executable path, run without a
-shell) — see **Wake-on-LAN from user input** above.
+`RemoteHost` accepts the optional `wakeMac` (magic packet, sent by Codeman) and `wakeCommand`
+(single executable path, run without a shell, takes precedence) — see **Wake-on-LAN from user
+input** above.
 
 Attaching to a discovered session is a **session-create** path, not a host route:
 `POST /api/sessions` accepts `attachRemoteSession: { hostId, remoteSessionName }`

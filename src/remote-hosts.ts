@@ -550,20 +550,20 @@ export function remoteDisplayPath(
  * silently do nothing until the session is relaunched (which for an owned remote
  * session means killing the remote tmux).
  *
- * Deliberately narrow: ONLY `wakeCommand` is taken from the host config, and the
- * host is authoritative for it (removing it in the config turns the feature off
- * again). The other host-level fields (`commands`, ssh options) stay as persisted
- * so this cannot silently change how an existing pane connects.
+ * Deliberately narrow: ONLY `wakeCommand`/`wakeMac` are taken from the host config,
+ * and the host is authoritative for them (removing one in the config turns that
+ * wake path off again). The other host-level fields (`commands`, ssh options) stay as
+ * persisted so this cannot silently change how an existing pane connects.
  */
-export function rehydrateRemoteHostFields(
-  remote: SessionRemote | undefined,
+export function rehydrateRemoteHostFields<T extends { hostId: string; wakeCommand?: string; wakeMac?: string }>(
+  remote: T | undefined,
   hostsById: ReadonlyMap<string, RemoteHost>
-): SessionRemote | undefined {
+): T | undefined {
   if (!remote) return remote;
   const host = hostsById.get(remote.hostId);
   if (!host) return remote;
-  if (remote.wakeCommand === host.wakeCommand) return remote;
-  return { ...remote, wakeCommand: host.wakeCommand };
+  if (remote.wakeCommand === host.wakeCommand && remote.wakeMac === host.wakeMac) return remote;
+  return { ...remote, wakeCommand: host.wakeCommand, wakeMac: host.wakeMac };
 }
 
 export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): SessionRemote {
@@ -575,9 +575,10 @@ export function toSessionRemote(host: RemoteHost, remoteCase: RemoteCase): Sessi
     port: host.port,
     remotePath: remoteCase.remotePath,
     commands: host.commands,
-    // Wake-on-LAN command travels with the session so the input route can wake a
+    // Wake-on-LAN command/MAC travel with the session so the input route can wake a
     // sleeping host without a second config read (see remote-wake.ts).
     wakeCommand: host.wakeCommand,
+    wakeMac: host.wakeMac,
     // COD-105 — the COD-104 launch path creates the remote session, so we own it
     // (an explicit kill may propagate a remote kill-session). Discovered+attached
     // sessions go through `toAttachedSessionRemote` with `owned: false`.
@@ -619,6 +620,7 @@ export function toAttachedSessionRemote(
     // An attached session can be woken exactly the same way — the identity of the
     // creator does not change whether the host is asleep.
     wakeCommand: host.wakeCommand,
+    wakeMac: host.wakeMac,
     // Discovered + attached — another Codeman created it. Detach-not-kill.
     owned: false,
     remoteSessionName,

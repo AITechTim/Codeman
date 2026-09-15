@@ -19,7 +19,11 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   RemoteWakeRegistry,
   appendBoundedPending,
+  buildMagicPacket,
   decideRemoteInputAction,
+  parseMacList,
+  resolveWakeTarget,
+  wakeConfigured,
   REMOTE_WAKE_PENDING_MAX_BYTES,
   type RemoteWakeDeps,
   type WakeableRemote,
@@ -29,10 +33,10 @@ import {
 // ========== Pure decisions ==========
 
 describe('decideRemoteInputAction', () => {
-  const base = { hasWakeCommand: true, waking: false, probeAgeMs: 0, lastReachable: undefined as boolean | undefined };
+  const base = { hasWakeTarget: true, waking: false, probeAgeMs: 0, lastReachable: undefined as boolean | undefined };
 
   it('delivers unchanged when the host has no wake command (feature off)', () => {
-    expect(decideRemoteInputAction({ ...base, hasWakeCommand: false, probeAgeMs: Number.MAX_SAFE_INTEGER })).toBe(
+    expect(decideRemoteInputAction({ ...base, hasWakeTarget: false, probeAgeMs: Number.MAX_SAFE_INTEGER })).toBe(
       'deliver'
     );
   });
@@ -77,6 +81,59 @@ describe('appendBoundedPending', () => {
   });
 });
 
+describe('MAC parsing + magic packet', () => {
+  it('parses one or more MACs with either separator', () => {
+    expect(parseMacList('04:d9:f5:80:c6:58')).toEqual([[4, 217, 245, 128, 198, 88]]);
+    expect(parseMacList('04-d9-f5-80-c6-58, 1c:61:b4:20:58:eb')).toEqual([
+      [4, 217, 245, 128, 198, 88],
+      [28, 97, 180, 32, 88, 235],
+    ]);
+  });
+
+  it('is all-or-nothing so a typo cannot half-arm a host', () => {
+    expect(parseMacList('04:d9:f5:80:c6')).toBeNull();
+    expect(parseMacList('04:d9:f5:80:c6:58, nonsense')).toBeNull();
+    expect(parseMacList('')).toBeNull();
+    expect(
+      parseMacList('04:d9:f5:80:c6:58,1c:61:b4:20:58:eb,aa:bb:cc:dd:ee:ff,11:22:33:44:55:66,99:88:77:66:55:44')
+    ).toBeNull();
+  });
+
+  it('builds the documented magic packet byte-for-byte', () => {
+    // 6 x 0xFF then the MAC repeated 16 times — a packet off by one byte simply never
+    // wakes anything, so the shape is pinned rather than described.
+    const mac = [4, 217, 245, 128, 198, 88];
+    const packet = buildMagicPacket(mac);
+    expect(packet.length).toBe(6 + 16 * 6);
+    expect([...packet.subarray(0, 6)]).toEqual([255, 255, 255, 255, 255, 255]);
+    for (let repeat = 0; repeat < 16; repeat++) {
+      expect([...packet.subarray(6 + repeat * 6, 12 + repeat * 6)]).toEqual(mac);
+    }
+  });
+
+  it('resolves the wake target with the command as the explicit override', () => {
+    const mac = '04:d9:f5:80:c6:58';
+    expect(resolveWakeTarget(undefined)).toBeNull();
+    expect(resolveWakeTarget({ hostId: 'h', label: 'H', host: '10.0.0.1' })).toBeNull();
+    expect(resolveWakeTarget({ hostId: 'h', label: 'H', host: '10.0.0.1', wakeMac: mac })).toEqual({
+      kind: 'mac',
+      macs: [[4, 217, 245, 128, 198, 88]],
+    });
+    expect(
+      resolveWakeTarget({ hostId: 'h', label: 'H', host: '10.0.0.1', wakeMac: mac, wakeCommand: '/bin/wake' })
+    ).toEqual({ kind: 'command', command: '/bin/wake' });
+    // A malformed MAC (hand-written config) must not arm a broken wake.
+    expect(resolveWakeTarget({ hostId: 'h', label: 'H', host: '10.0.0.1', wakeMac: 'nope' })).toBeNull();
+  });
+
+  it('reports which wake path the UI should offer', () => {
+    expect(wakeConfigured(undefined)).toBe('none');
+    expect(wakeConfigured({ hostId: 'h', label: 'H', host: 'x' })).toBe('none');
+    expect(wakeConfigured({ hostId: 'h', label: 'H', host: 'x', wakeMac: '04:d9:f5:80:c6:58' })).toBe('mac');
+    expect(wakeConfigured({ hostId: 'h', label: 'H', host: 'x', wakeCommand: '/bin/wake' })).toBe('command');
+  });
+});
+
 // ========== Registry ==========
 
 const remote: WakeableRemote = {
@@ -98,7 +155,9 @@ interface Harness {
   events: string[];
 }
 
-function harness(opts: { remote?: WakeableRemote; writesFail?: boolean } = {}): Harness {
+function harness(
+  opts: { remote?: WakeableRemote; writesFail?: boolean; resolveRemote?: RemoteWakeDeps['resolveRemote'] } = {}
+): Harness {
   const probe = vi.fn(async () => false);
   const wake = vi.fn(async () => true);
   const waitUntilReady = vi.fn(async () => true);
@@ -115,6 +174,7 @@ function harness(opts: { remote?: WakeableRemote; writesFail?: boolean } = {}): 
     noteReconnected,
     broadcast: (event) => events.push(event),
     log: () => {},
+    ...(opts.resolveRemote ? { resolveRemote: opts.resolveRemote } : {}),
   };
 
   const session: WakeableSession = {
@@ -185,7 +245,7 @@ describe('RemoteWakeRegistry', () => {
     releaseWake?.();
     await h.registry.wake(h.session);
 
-    expect(h.wake).toHaveBeenCalledWith('/home/joe/bin/whuff');
+    expect(h.wake).toHaveBeenCalledWith({ kind: 'command', command: '/home/joe/bin/whuff' });
     expect(h.reattachRemote).toHaveBeenCalledTimes(1);
     expect(h.noteReconnected).toHaveBeenCalledWith('sess-1', true);
     expect(h.writeViaMux.mock.calls.map((c) => c[0])).toEqual(['hal', 'lo']);
@@ -261,6 +321,50 @@ describe('RemoteWakeRegistry', () => {
     await expect(h.registry.ensureAwake(h.session)).resolves.toBe(true);
     expect(h.wake).toHaveBeenCalledTimes(1);
     expect(h.registry.pendingBytes('sess-1')).toBe(0);
+  });
+
+  it('wakes a MAC-configured host by magic packet, with no external command', async () => {
+    const h = harness({
+      remote: { hostId: 'h', label: 'H', host: '10.0.0.9', wakeMac: '04:d9:f5:80:c6:58' },
+    });
+    h.probe.mockResolvedValue(false);
+    await expect(h.registry.handleInput(h.session, 'hi')).resolves.toBe('buffered');
+    await h.registry.wake(h.session);
+    expect(h.wake).toHaveBeenCalledWith({ kind: 'mac', macs: [[4, 217, 245, 128, 198, 88]] });
+    expect(h.writeViaMux.mock.calls.map((c) => c[0])).toEqual(['hi']);
+  });
+
+  it('resolves host config for a session that predates it, so a saved MAC works live', async () => {
+    // The persisted `remote` snapshot is taken at launch: without this the banner's
+    // config dialog would only take effect after restarting the session.
+    const resolveRemote = vi.fn(async () => ({
+      hostId: 'hufflepuff',
+      label: 'Hufflepuff',
+      host: '192.168.50.137',
+      wakeMac: '04:d9:f5:80:c6:58',
+    }));
+    const h = harness({
+      remote: { hostId: 'hufflepuff', label: 'Hufflepuff', host: '192.168.50.137' },
+      resolveRemote,
+    });
+    h.probe.mockResolvedValue(false);
+
+    expect(await h.registry.hasWakeTarget(h.session)).toBe(true);
+    await expect(h.registry.handleInput(h.session, 'a')).resolves.toBe('buffered');
+    await h.registry.wake(h.session);
+    expect(h.wake).toHaveBeenCalledWith({ kind: 'mac', macs: [[4, 217, 245, 128, 198, 88]] });
+    expect(resolveRemote).toHaveBeenCalledTimes(1);
+
+    // Cached: the next keystroke must not re-read the host config.
+    await h.registry.hasWakeTarget(h.session);
+    expect(resolveRemote).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not consult the resolver when the session already has a wake target', async () => {
+    const resolveRemote = vi.fn(async () => undefined);
+    const h = harness({ resolveRemote });
+    expect(await h.registry.hasWakeTarget(h.session)).toBe(true);
+    expect(resolveRemote).not.toHaveBeenCalled();
   });
 
   it('drops buffered input with the session', async () => {

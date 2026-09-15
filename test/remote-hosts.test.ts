@@ -115,6 +115,15 @@ describe('remote-hosts domain', () => {
       expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/bin/sh$(id)' }).success).toBe(false);
       expect(RemoteHostSchema.safeParse({ ...host, wakeCommand: '/bin/`id`' }).success).toBe(false);
     });
+
+    it('accepts one or more MAC addresses and rejects anything else', () => {
+      expect(RemoteHostSchema.safeParse({ ...host, wakeMac: '04:d9:f5:80:c6:58' }).success).toBe(true);
+      expect(RemoteHostSchema.safeParse({ ...host, wakeMac: '04-d9-f5-80-c6-58, 1C:61:B4:20:58:EB' }).success).toBe(
+        true
+      );
+      expect(RemoteHostSchema.safeParse({ ...host, wakeMac: '04:d9:f5:80:c6' }).success).toBe(false);
+      expect(RemoteHostSchema.safeParse({ ...host, wakeMac: '04:d9:f5:80:c6:58; rm -rf /' }).success).toBe(false);
+    });
   });
 
   describe('rehydrateRemoteHostFields', () => {
@@ -150,6 +159,15 @@ describe('remote-hosts domain', () => {
     it('treats the host config as authoritative (removing it turns the feature off)', () => {
       const remote = { ...persisted, wakeCommand: '/home/joe/bin/whuff' };
       expect(rehydrateRemoteHostFields(remote, hosts())?.wakeCommand).toBeUndefined();
+    });
+
+    it('refreshes a MAC that only exists in the host config', () => {
+      const withMac = new Map(
+        hosts()
+          .entries()
+          .map(([id, host]) => [id, { ...host, wakeMac: '04:d9:f5:80:c6:58' }] as const)
+      );
+      expect(rehydrateRemoteHostFields(persisted, withMac)?.wakeMac).toBe('04:d9:f5:80:c6:58');
     });
 
     it('leaves the block untouched when the host is gone or the session is local', () => {

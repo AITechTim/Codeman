@@ -30,6 +30,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import dgram from 'node:dgram';
 import net from 'node:net';
 
 /** Minimum spacing between two reachability probes for the same session. */
@@ -60,7 +61,6 @@ export const DEFAULT_SSH_PORT = 22;
 
 /** What the input path should do with a chunk of user input. Pure. */
 export type RemoteInputAction = 'deliver' | 'probe' | 'buffer';
-
 /**
  * The caller-facing outcome of {@link RemoteWakeRegistry.handleInput}: either the
  * caller writes the bytes as usual, or the registry took ownership of them.
@@ -82,14 +82,14 @@ export type RemoteInputOutcome = 'deliver' | 'buffered';
  * Pure — no clock, no IO.
  */
 export function decideRemoteInputAction(args: {
-  hasWakeCommand: boolean;
+  hasWakeTarget: boolean;
   waking: boolean;
   probeAgeMs: number;
   lastReachable?: boolean;
   minProbeIntervalMs?: number;
 }): RemoteInputAction {
   if (args.waking) return 'buffer';
-  if (!args.hasWakeCommand) return 'deliver';
+  if (!args.hasWakeTarget) return 'deliver';
   if (args.lastReachable === false) return 'buffer';
   const interval = args.minProbeIntervalMs ?? REMOTE_WAKE_PROBE_MIN_INTERVAL_MS;
   if (args.probeAgeMs >= interval) return 'probe';
@@ -117,10 +117,70 @@ export function appendBoundedPending(
 /** The remote fields the wake flow needs. Structurally satisfied by `SessionRemote`. */
 export interface WakeableRemote {
   wakeCommand?: string;
+  wakeMac?: string;
   hostId: string;
   label: string;
   host: string;
   port?: number;
+}
+
+/**
+ * A resolved wake path for a host. `command` wins over `mac` (an explicit override
+ * beats the default path), and `null` means the host cannot be woken at all — which
+ * is what the UI turns into "configure WoL" instead of "wake".
+ */
+export type WakeTarget = { kind: 'command'; command: string } | { kind: 'mac'; macs: number[][] } | null;
+
+/**
+ * Resolve the wake target from host config. Pure.
+ *
+ * A malformed `wakeMac` resolves to `null` rather than throwing: the schema
+ * already rejects one at config time, so this can only be reached with a config
+ * written by hand, and a broken MAC must not break the input route.
+ */
+export function resolveWakeTarget(remote: WakeableRemote | undefined): WakeTarget {
+  if (!remote) return null;
+  if (remote.wakeCommand) return { kind: 'command', command: remote.wakeCommand };
+  if (remote.wakeMac) {
+    const macs = parseMacList(remote.wakeMac);
+    if (macs && macs.length > 0) return { kind: 'mac', macs };
+  }
+  return null;
+}
+
+/**
+ * Parse a comma-separated MAC list into byte arrays. Pure; returns null when any
+ * entry is malformed (all-or-nothing, so a typo cannot half-arm a host).
+ */
+export function parseMacList(value: string, maxMacs = 4): number[][] | null {
+  const parts = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0 || parts.length > maxMacs) return null;
+  const macs: number[][] = [];
+  for (const part of parts) {
+    const match =
+      /^([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})[:-]([0-9a-fA-F]{2})$/.exec(
+        part
+      );
+    if (!match) return null;
+    macs.push(match.slice(1).map((hex) => Number.parseInt(hex, 16)));
+  }
+  return macs;
+}
+
+/**
+ * Build a Wake-on-LAN "magic packet": six `0xFF` bytes then the MAC repeated 16
+ * times. Pure — the shape is asserted byte-for-byte in the tests because a packet
+ * that is off by one byte simply never wakes anything.
+ */
+export function buildMagicPacket(mac: number[]): Buffer {
+  const packet = Buffer.alloc(6 + 16 * 6, 0xff);
+  for (let repeat = 0; repeat < 16; repeat++) {
+    Buffer.from(mac).copy(packet, 6 + repeat * 6);
+  }
+  return packet;
 }
 
 /**
@@ -140,8 +200,8 @@ export interface WakeableSession {
 export interface RemoteWakeDeps {
   /** Cheap reachability probe. Must resolve false (never throw) for a sleeping host. */
   probe(remote: WakeableRemote): Promise<boolean>;
-  /** Run the host's wake command. Resolves false when it fails to run. */
-  wake(command: string): Promise<boolean>;
+  /** Run the resolved wake target (magic packet or host command). Resolves false on failure. */
+  wake(target: NonNullable<WakeTarget>): Promise<boolean>;
   /** Poll until the woken host accepts connections again. */
   waitUntilReady(remote: WakeableRemote): Promise<boolean>;
   /** Sleep helper (injected for tests). */
@@ -155,6 +215,32 @@ export interface RemoteWakeDeps {
   ): void;
   /** Structured diagnostics. */
   log?(message: string): void;
+  /**
+   * Resolve the host's CURRENT wake config for a session whose persisted `remote`
+   * snapshot predates it (or was configured after launch). Called at most once per
+   * `REMOTE_WAKE_RESOLVE_TTL_MS` per session, and only when the session's own copy
+   * has no wake target — so a config saved in the UI works without restarting the
+   * session, without a per-keystroke config read.
+   */
+  resolveRemote?(session: WakeableSession): Promise<WakeableRemote | undefined>;
+}
+
+/** Probe freshness for the UI's reachability check (a tab switch is not a hammer). */
+export const REMOTE_WAKE_REACHABILITY_TTL_MS = 5_000;
+/** How long a resolved host config is trusted before asking the resolver again. */
+export const REMOTE_WAKE_RESOLVE_TTL_MS = 30_000;
+
+/**
+ * What the UI is allowed to offer for a host: how it can be woken, if at all. The
+ * `'none'` case is what the banner turns into "configure WoL" instead of "wake".
+ */
+export type WakeConfigured = 'command' | 'mac' | 'none';
+
+/** Which wake path a host config provides (mirrors {@link resolveWakeTarget}). Pure. */
+export function wakeConfigured(remote: WakeableRemote | undefined): WakeConfigured {
+  const target = resolveWakeTarget(remote);
+  if (!target) return 'none';
+  return target.kind;
 }
 
 /** Per-session wake bookkeeping. */
@@ -163,6 +249,9 @@ interface WakeState {
   reachable?: boolean;
   waking: Promise<boolean> | null;
   pending: string[];
+  /** Host config resolved after launch (see `RemoteWakeDeps.resolveRemote`). */
+  resolvedRemote?: WakeableRemote;
+  resolvedAt: number;
 }
 
 /**
@@ -194,6 +283,35 @@ export class RemoteWakeRegistry {
     return state.pending.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
   }
 
+  /** Whether this session's host has any wake path configured at all. */
+  async hasWakeTarget(session: WakeableSession): Promise<boolean> {
+    return resolveWakeTarget(await this._effectiveRemote(session)) !== null;
+  }
+
+  /** Which wake path is configured (`'none'` when the UI should offer configuration). */
+  async wakeConfigured(session: WakeableSession): Promise<WakeConfigured> {
+    return wakeConfigured(await this._effectiveRemote(session));
+  }
+
+  /**
+   * Reachability for the UI: probe unless a recent result is still fresh.
+   *
+   * Shares the per-session probe state with the input path on purpose — a fresh
+   * answer is exactly what the input ladder wants, and an `unreachable` verdict here
+   * makes the next keystroke buffer + wake instead of vanishing into a stalled pane.
+   */
+  async checkReachable(session: WakeableSession, opts: { force?: boolean; ttlMs?: number } = {}): Promise<boolean> {
+    const remote = await this._effectiveRemote(session);
+    if (!remote) return true;
+    const state = this._state(session.id);
+    const ttl = opts.force ? 0 : (opts.ttlMs ?? REMOTE_WAKE_REACHABILITY_TTL_MS);
+    if (Date.now() - state.probedAt >= ttl) {
+      state.probedAt = Date.now();
+      state.reachable = await this.deps.probe(remote);
+    }
+    return state.reachable === true;
+  }
+
   /**
    * Decide + act for one input chunk.
    *
@@ -203,10 +321,11 @@ export class RemoteWakeRegistry {
    * in order once the pane is reattached.
    */
   async handleInput(session: WakeableSession, data: string): Promise<RemoteInputOutcome> {
-    const remote = session.remote;
+    const remote = await this._effectiveRemote(session);
     const state = this._state(session.id);
+    const target = resolveWakeTarget(remote);
     const action = decideRemoteInputAction({
-      hasWakeCommand: Boolean(remote?.wakeCommand),
+      hasWakeTarget: target !== null,
       waking: state.waking != null,
       probeAgeMs: Date.now() - state.probedAt,
       lastReachable: state.reachable,
@@ -218,7 +337,7 @@ export class RemoteWakeRegistry {
       // A buffered verdict with no wake in flight still has to DRIVE a wake (the
       // previous one failed and reset the probe state, or the ladder landed here
       // directly) — otherwise the bytes would sit in the buffer forever.
-      if (state.waking == null && remote?.wakeCommand) void this.wake(session);
+      if (state.waking == null && target) void this.wake(session);
       return 'buffered';
     }
 
@@ -237,11 +356,13 @@ export class RemoteWakeRegistry {
    * send-and-wait path, where the HTTP response stays open anyway and buffering
    * would break the wait contract.
    */
-  async ensureAwake(session: WakeableSession): Promise<boolean> {
-    const remote = session.remote;
-    if (!remote?.wakeCommand) return true;
+  async ensureAwake(session: WakeableSession, opts: { force?: boolean } = {}): Promise<boolean> {
+    const remote = await this._effectiveRemote(session);
+    if (!remote || !resolveWakeTarget(remote)) return true;
     const state = this._state(session.id);
-    if (state.reachable !== false && Date.now() - state.probedAt >= REMOTE_WAKE_PROBE_MIN_INTERVAL_MS) {
+    // `force` is the manual path (a user pressed "wake"): a cached "reachable" from
+    // seconds ago must not talk the button out of waking a host that just slept.
+    if (opts.force || (state.reachable !== false && Date.now() - state.probedAt >= REMOTE_WAKE_PROBE_MIN_INTERVAL_MS)) {
       state.probedAt = Date.now();
       state.reachable = await this.deps.probe(remote);
     }
@@ -254,8 +375,9 @@ export class RemoteWakeRegistry {
    * run the wake command, poll for readiness, reattach the pane, flush the buffer.
    */
   async wake(session: WakeableSession): Promise<boolean> {
-    const remote = session.remote;
-    if (!remote?.wakeCommand) return true;
+    const remote = await this._effectiveRemote(session);
+    const target = resolveWakeTarget(remote);
+    if (!remote || !target) return true;
     const state = this._state(session.id);
     if (state.waking) return state.waking;
 
@@ -263,10 +385,14 @@ export class RemoteWakeRegistry {
       const id = session.id;
       try {
         this.deps.broadcast?.('remote:hostWaking', { sessionId: id, hostId: remote.hostId, label: remote.label });
-        this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) for session ${id}`);
+        this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) via ${target.kind} for session ${id}`);
 
-        const woke = await this.deps.wake(remote.wakeCommand as string);
-        if (!woke) this.deps.log?.(`[RemoteWake] wake command failed for ${remote.label}: ${remote.wakeCommand}`);
+        const woke = await this.deps.wake(target);
+        if (!woke) {
+          this.deps.log?.(
+            `[RemoteWake] wake failed for ${remote.label}: ${target.kind === 'command' ? target.command : 'magic packet'}`
+          );
+        }
 
         const ready = await this.deps.waitUntilReady(remote);
         if (!ready) {
@@ -309,10 +435,41 @@ export class RemoteWakeRegistry {
   private _state(sessionId: string): WakeState {
     let state = this.states.get(sessionId);
     if (!state) {
-      state = { probedAt: 0, reachable: undefined, waking: null, pending: [] };
+      state = { probedAt: 0, reachable: undefined, waking: null, pending: [], resolvedAt: 0 };
       this.states.set(sessionId, state);
     }
     return state;
+  }
+
+  /**
+   * The host config to act on: the session's own `remote` when it can wake, else a
+   * freshly resolved one.
+   *
+   * The persisted `remote` snapshot is taken at launch, so a wake target configured
+   * AFTER the session started (e.g. through the banner's config dialog, or by adding
+   * `wakeMac` to `remote-hosts.json`) is invisible to it. Recovery rehydration
+   * (server.ts) covers restarts; this covers the live session, and it is why saving
+   * the dialog takes effect without restarting anything. The resolver is asked at
+   * most once per TTL, and never for a session that already has a usable target.
+   */
+  private async _effectiveRemote(session: WakeableSession): Promise<WakeableRemote | undefined> {
+    const state = this._state(session.id);
+    if (state.resolvedRemote && resolveWakeTarget(state.resolvedRemote)) return state.resolvedRemote;
+    if (resolveWakeTarget(session.remote)) return session.remote;
+    if (!session.remote || !this.deps.resolveRemote) return state.resolvedRemote ?? session.remote;
+    if (Date.now() - state.resolvedAt < REMOTE_WAKE_RESOLVE_TTL_MS) {
+      return state.resolvedRemote ?? session.remote;
+    }
+    state.resolvedAt = Date.now();
+    try {
+      const resolved = await this.deps.resolveRemote(session);
+      if (resolved) state.resolvedRemote = resolved;
+    } catch (err) {
+      this.deps.log?.(
+        `[RemoteWake] host config lookup failed for session ${session.id}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    return state.resolvedRemote ?? session.remote;
   }
 
   private _enqueue(sessionId: string, data: string): void {
@@ -407,6 +564,51 @@ export function runRemoteWakeCommand(command: string, timeoutMs = REMOTE_WAKE_CO
   });
 }
 
+/**
+ * Send Wake-on-LAN magic packets for every MAC, over UDP to the broadcast address.
+ *
+ * This is the whole reason `wakeMac` exists: the common case needs no external
+ * script. Broadcast on 255.255.255.255 is what the CLI `wakeonlan` does and what the
+ * NICs here answer to; the socket is closed as soon as the packets are queued, so a
+ * sleeping host cannot leave a handle behind. Resolves false on any failure (no
+ * interface to broadcast on, permission) rather than throwing — a broken network
+ * must not break the wake flow, which reports the failure itself.
+ */
+export function sendWakePackets(addresses: number[][], port = 9): Promise<boolean> {
+  if (addresses.length === 0) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket('udp4');
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.close();
+      } catch {
+        /* already closed */
+      }
+      resolve(value);
+    };
+    socket.once('error', () => finish(false));
+    try {
+      socket.setBroadcast(true);
+    } catch {
+      finish(false);
+      return;
+    }
+    let pending = addresses.length;
+    let failed = false;
+    for (const mac of addresses) {
+      const packet = buildMagicPacket(mac);
+      socket.send(packet, port, '255.255.255.255', (err) => {
+        if (err) failed = true;
+        pending--;
+        if (pending === 0) finish(!failed);
+      });
+    }
+  });
+}
+
 /** Poll the host until it accepts connections again, or the bound is hit. */
 export async function waitUntilRemoteReady(
   remote: WakeableRemote,
@@ -431,7 +633,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 export function createDefaultRemoteWakeDeps(overrides: Partial<RemoteWakeDeps> = {}): RemoteWakeDeps {
   return {
     probe: probeRemoteHostReachable,
-    wake: runRemoteWakeCommand,
+    wake: (target) => (target.kind === 'command' ? runRemoteWakeCommand(target.command) : sendWakePackets(target.macs)),
     waitUntilReady: (remote) => waitUntilRemoteReady(remote),
     delay,
     ...overrides,

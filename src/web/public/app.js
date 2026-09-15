@@ -221,7 +221,6 @@ const _SSE_HANDLER_MAP = [
   [SSE_EVENTS.REMOTE_RECONNECT_EXHAUSTED, '_onRemoteReconnectExhausted'],
   [SSE_EVENTS.REMOTE_HOST_WAKING, '_onRemoteHostWaking'],
   [SSE_EVENTS.REMOTE_HOST_WAKE_FAILED, '_onRemoteHostWakeFailed'],
-
   // Ralph
   [SSE_EVENTS.SESSION_RALPH_LOOP_UPDATE, '_onRalphLoopUpdate'],
   [SSE_EVENTS.SESSION_RALPH_TODO_UPDATE, '_onRalphTodoUpdate'],
@@ -6076,6 +6075,9 @@ class CodemanApp {
     // bar (issue #262). Also disarms a one-shot Ctrl left over from the tab we
     // just left, so it can never fire against the session we just opened.
     if (typeof KeyboardAccessoryBar !== 'undefined') KeyboardAccessoryBar.refreshForActiveSession();
+    // Remote-host reachability banner: only meaningful for a remote session, so this
+    // also clears it when the newly active tab is local.
+    this.refreshHostWakeBanner?.(sessionId);
 
     // Restore flushed offset AND text IMMEDIATELY so backspace/typing work during
     // the async buffer load.  Without this, the offset is 0 during the

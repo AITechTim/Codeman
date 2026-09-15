@@ -134,6 +134,7 @@ import {
   checkRemoteTmuxAvailable,
   readRemoteCases,
   readRemoteHosts,
+  rehydrateRemoteHostFields,
   toAttachedSessionRemote,
   toSessionRemote,
 } from '../../remote-hosts.js';
@@ -841,6 +842,16 @@ export function registerSessionRoutes(
         },
         broadcast: (event, payload) => ctx.broadcast(event, payload),
         log: (message) => console.log(message),
+        // The session's `remote` block is a launch-time snapshot, so a wake target
+        // configured later (banner's config dialog, or a hand-edited remote-hosts.json)
+        // is resolved here — throttled by the registry, and only for sessions that
+        // have no usable target of their own.
+        resolveRemote: async (session) => {
+          const remote = session.remote;
+          if (!remote) return undefined;
+          const hosts = await readRemoteHosts(CODEMAN_CONFIG_DIR);
+          return rehydrateRemoteHostFields(remote, new Map(hosts.map((host) => [host.id, host])));
+        },
       })
     );
   // ═══════════════════════════════════════════════════════════════
@@ -1541,6 +1552,56 @@ export function registerSessionRoutes(
   // Terminal I/O (input, resize, buffer)
   // ═══════════════════════════════════════════════════════════════
 
+  // ========== Wake-on-LAN: state + manual trigger ==========
+  //
+  // Both routes are session-scoped (not host-scoped) because the wake flow needs the
+  // SESSION: a woken host whose pane is not reattached is still a dead terminal, and an
+  // exhausted COD-108 backoff never retries on its own. The probe in `/reachability` is
+  // the same cheap TCP connect the input path uses and it NEVER wakes a host — the UI
+  // decides that, with the button.
+
+  app.get('/api/sessions/:id/reachability', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    const remote = session.remote;
+    if (!remote) return { success: true, data: { reachable: true, wakeConfigured: 'none' as const } };
+    const force = (req.query as { force?: string })?.force === '1';
+    const reachable = await remoteWake.checkReachable(session, { force });
+    return {
+      success: true,
+      data: {
+        reachable,
+        wakeConfigured: await remoteWake.wakeConfigured(session),
+        host: remote.host,
+        label: remote.label,
+      },
+    };
+  });
+
+  app.post('/api/sessions/:id/wake', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    if (!session.remote) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Not a remote session');
+    }
+    // The UI uses this to route to the host config dialog instead of a dead button.
+    if (!(await remoteWake.hasWakeTarget(session))) {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'No wake-on-LAN target configured for this host (set a MAC address or a wake command)'
+      );
+    }
+    const woke = await remoteWake.ensureAwake(session, { force: true });
+    return {
+      success: true,
+      data: {
+        woke,
+        reachable: await remoteWake.checkReachable(session),
+        wakeConfigured: await remoteWake.wakeConfigured(session),
+      },
+    };
+  });
+
   // ========== Send Input ==========
 
   app.post('/api/sessions/:id/input', async (req, reply) => {
@@ -1591,7 +1652,7 @@ export function registerSessionRoutes(
     // known reachable inside the probe throttle window; the probe itself is a bare
     // TCP connect on wake-enabled hosts only, at most once per
     // REMOTE_WAKE_PROBE_MIN_INTERVAL_MS.
-    if (!duplicate && session.remote?.wakeCommand) {
+    if (!duplicate && (await remoteWake.hasWakeTarget(session))) {
       if (wantsWait) {
         // Send-and-wait keeps the response open anyway, so blocking on the wake is
         // simpler and more correct than buffering (buffering would break the wait).
