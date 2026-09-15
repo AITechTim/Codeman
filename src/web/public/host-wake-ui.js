@@ -135,7 +135,11 @@ Object.assign(CodemanApp.prototype, {
           ? `ssh ${state.host}`
           : 'no wake-on-LAN configured';
     }
-    action.textContent = state.waking ? 'Waking …' : hasTarget ? 'Wake' : 'Configure WoL';
+    // After a FAILED wake the only useful next step is fixing the target (wrong MAC,
+    // host moved NIC, command gone) — otherwise a configured-but-broken host would be
+    // stuck behind a button that keeps failing with no way to edit it.
+    const offerConfig = !hasTarget || Boolean(state.error);
+    action.textContent = state.waking ? 'Waking …' : offerConfig ? 'Configure WoL' : 'Wake';
     action.disabled = state.waking;
   },
 
@@ -143,7 +147,7 @@ Object.assign(CodemanApp.prototype, {
   hostWakeAction() {
     const state = this._hostWake;
     if (!state || !state.sessionId || state.waking) return;
-    if (state.wakeConfigured === 'none') {
+    if (state.wakeConfigured === 'none' || state.error) {
       this.openWakeConfigDialog();
       return;
     }
