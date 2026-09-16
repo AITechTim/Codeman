@@ -928,36 +928,51 @@ Object.assign(CodemanApp.prototype, {
 
   /**
    * Polls llama-swap's own `/running` (via the read-only running-status route) until
-   * `modelId` reports `state: 'ready'`, showing a sticky toast the whole time so a slow
+   * `modelId` reports `state: 'ready'`, showing a sticky banner the whole time so a slow
    * unload/reload (measured well over a minute for a large model) reads as "loading",
-   * never as silence or a wrong answer from whatever was loaded before. Bounded at 2
-   * minutes; still not ready by then gets a toast saying so rather than polling forever.
+   * never as silence or a wrong answer from whatever was loaded before. Checks immediately
+   * (a fast load, or a re-apply onto an already-ready model, shouldn't wait a full interval
+   * to say so), then every `pollIntervalMs`. Bounded at `maxWaitMs`; still not ready by then
+   * gets a toast saying so rather than polling forever — 5 minutes by default, since a large
+   * (20GB+) model reading from disk can genuinely take longer than the 2 minutes this used
+   * to allow.
+   *
+   * `_watchLlamaSwapGeneration` guards against two overlapping calls (a second launch
+   * started before the first one's loop finished) clobbering each other's banner:
+   * `_showCenterStatus` reuses one shared DOM node, so an older loop's `dismiss()`/message
+   * update firing after a newer one has already taken over the banner would otherwise hide
+   * or overwrite the WRONG one. Each call claims the counter as its own "generation" and
+   * checks it still owns it before touching the banner.
    *
    * `pollIntervalMs`/`maxWaitMs` exist to let a test drive this in milliseconds instead of
    * minutes — real callers never pass them, which is what keeps the defaults live here
    * rather than only in a test fixture.
    */
-  async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 3000, maxWaitMs = 120000) {
+  async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 1000, maxWaitMs = 300000) {
+    const generation = (this._watchLlamaSwapGeneration = (this._watchLlamaSwapGeneration || 0) + 1);
+    const isCurrent = () => this._watchLlamaSwapGeneration === generation;
     // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
     // sit on screen for well over a minute, easy to mistake for nothing happening there.
     const toast = this._showCenterStatus(`Loading ${modelId} on ${endpointId}… this can take a while`);
     const deadline = Date.now() + maxWaitMs;
     while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
       const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
-      if (!status) continue; // transient failure — keep waiting rather than giving up early
-      if (!status.isLlamaSwap) {
+      if (!isCurrent()) return; // a newer launch took over the banner — this loop is done
+      if (!status) {
+        // transient failure — keep waiting rather than giving up early
+      } else if (!status.isLlamaSwap) {
         // Endpoint changed under us, or wasn't llama-swap after all — nothing more to
         // watch for, and not a failure worth a toast of its own.
         toast?.dismiss();
         return;
-      }
-      if (status.running.some((r) => r.model === modelId && r.state === 'ready')) {
+      } else if (status.running.some((r) => r.model === modelId && r.state === 'ready')) {
         toast?.dismiss();
         this.showToast(`${modelId} is ready`, 'success', { duration: 2500 });
         return;
       }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
+    if (!isCurrent()) return;
     toast?.dismiss();
     this.showToast(`Still waiting for ${modelId} to finish loading on ${endpointId} — check the llama-swap server`, 'warning');
   },

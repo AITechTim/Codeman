@@ -676,6 +676,64 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
 
     expect(toastCalls.at(-1)).toMatch(/ready/i);
   });
+
+  it('checks immediately rather than waiting a full interval before the first check', async () => {
+    // A model that is already ready by the time this runs (a fast load, or a re-apply
+    // onto one that was already loaded) shouldn't sit on "Loading..." for a whole
+    // pollIntervalMs before saying so.
+    const { app } = bootApp({});
+    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
+    let calls = 0;
+    app._apiJson = async () => {
+      calls += 1;
+      return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
+    };
+
+    // A huge interval that would time the test out if the function actually waited for
+    // it before the first check.
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 60000, 300000);
+
+    expect(calls).toBe(1);
+  });
+
+  it('a newer call takes over the shared banner — the older one neither dismisses nor overwrites it', async () => {
+    const { app } = bootApp({});
+    const bannerCalls: string[] = [];
+    const dismissCalls: string[] = [];
+    app._showCenterStatus = (message: string) => {
+      bannerCalls.push(message);
+      return { dismiss: () => dismissCalls.push(message), setMessage: () => {} };
+    };
+    app.showToast = () => {};
+    // The FIRST call never sees its target model ready, so it would otherwise run all
+    // the way to its own timeout and dismiss/warn — but a second call starts first.
+    let firstResolveApiJson: (() => void) | undefined;
+    const firstNeverReady = new Promise<void>((resolve) => {
+      firstResolveApiJson = resolve;
+    });
+    app._apiJson = async () => {
+      await firstNeverReady; // block the first loop's very first check indefinitely
+      return { isLlamaSwap: true, running: [] };
+    };
+    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', 5, 50);
+
+    // Second call, for a DIFFERENT model, starts while the first is still blocked on its
+    // very first status check — claims the banner as the newer generation.
+    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'model-b', state: 'ready' }] });
+    await app._watchLlamaSwapLoading('llama-box', 'model-b', 5, 200);
+
+    // Now let the first call's blocked check resolve and run to completion.
+    firstResolveApiJson?.();
+    await firstCall;
+
+    expect(bannerCalls).toEqual([
+      'Loading model-a on llama-box… this can take a while',
+      'Loading model-b on llama-box… this can take a while',
+    ]);
+    // Only the CURRENT (second) call's own dismiss ever ran — the stale first call's
+    // late resolution recognised it no longer owns the banner and touched nothing.
+    expect(dismissCalls).toEqual([bannerCalls[1]]);
+  });
 });
 
 describe('Custom Model Endpoint Profiles: _confirmModelSwap (in-app modal, replaces a native confirm() popup)', () => {
