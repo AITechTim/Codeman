@@ -957,6 +957,8 @@ class CodemanApp {
     this.registerServiceWorker();
     // Fetch tunnel status for header indicator (desktop only)
     this.loadTunnelStatus();
+    // Ask whether a host reboot left sessions worth rebuilding (banner, never automatic)
+    this.initRebootRestoreBanner?.();
     // Share a single settings fetch between both consumers
     const settingsPromise = fetch('/api/settings').then(r => r.ok ? r.json() : null).then(env => env?.data ?? null).catch(() => null);
     this.loadQuickStartCases(null, settingsPromise);

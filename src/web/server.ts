@@ -39,7 +39,9 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
-import { hostname as getHostname } from 'node:os';
+import { hostname as getHostname, uptime as osUptime } from 'node:os';
+import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
+import { rebootRestoreRegistry } from './reboot-restore-registry.js';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
 import { GLYPH, palette } from '../cli-style.js';
@@ -171,6 +173,7 @@ import {
   registerScheduledRoutes,
   registerHookEventRoutes,
   registerApprovalRoutes,
+  registerRebootRestoreRoutes,
   registerReadMyMindRoutes,
   registerStatusTelemetryRoutes,
   registerSystemRoutes,
@@ -1060,6 +1063,7 @@ export class WebServer extends EventEmitter {
     registerScheduledRoutes(this.app, ctx);
     registerHookEventRoutes(this.app, ctx);
     registerApprovalRoutes(this.app, ctx);
+    registerRebootRestoreRoutes(this.app, ctx);
     registerReadMyMindRoutes(this.app, ctx);
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
@@ -2857,6 +2861,52 @@ export class WebServer extends EventEmitter {
     return false;
   }
 
+  /**
+   * Work out what a host reboot destroyed, and leave it on offer for the board.
+   *
+   * Runs inside `restoreMuxSessions()`, in the window after `reconcileSessions()`
+   * has reported the dead sessions and before `finalizeRestoredState()` prunes
+   * their records, so `state.json` is still the full picture here. That window is
+   * the only place the plan can be built, which is why the boot pass builds it
+   * even though nothing is rebuilt until a user clicks.
+   *
+   * Nothing is created here. The plan goes to `rebootRestoreRegistry`, the board
+   * offers it as a banner, and `web/routes/reboot-restore-routes` rebuilds what
+   * the user asks for. A wrong reboot guess therefore costs a line of text the
+   * user dismisses, not N CLI processes nobody asked for.
+   *
+   * @returns how many sessions are on offer.
+   */
+  private planRebootRestoreOffer(dead: string[], livePaneCount: number): number {
+    if (dead.length === 0) return 0;
+
+    const persisted = this.store.getSessions();
+    if (
+      !looksLikeHostReboot({
+        livePaneCount,
+        deadSessionCount: dead.length,
+        uptimeSeconds: osUptime(),
+        newestPersistedActivityAt: newestPersistedActivity(persisted),
+        now: Date.now(),
+      })
+    ) {
+      return 0;
+    }
+
+    const { restore, skipped } = planRebootRestore(dead, persisted, (workingDir) => existsSync(workingDir));
+    if (skipped.length > 0) {
+      console.log(`[Server] Reboot restore is passing over ${skipped.length} dead session(s):`);
+      for (const rejection of skipped) {
+        console.log(`[Server]   ${rejection.sessionId}: ${rejection.reason}`);
+      }
+    }
+    rebootRestoreRegistry.set(restore);
+    if (restore.length > 0) {
+      console.log(`[Server] Host reboot detected; offering ${restore.length} session(s) for restore`);
+    }
+    return restore.length;
+  }
+
   private async restoreMuxSessions(): Promise<boolean> {
     try {
       // Reconcile mux sessions to find which ones are still alive (also discovers unknown ones)
@@ -2865,6 +2915,11 @@ export class WebServer extends EventEmitter {
       if (discovered.length > 0) {
         console.log(`[Server] Discovered ${discovered.length} unknown mux session(s)`);
       }
+
+      // Build the reboot-restore offer HERE: `dead` is only known after
+      // reconciliation, and the records it reads are pruned by
+      // `cleanupStaleSessions()` as soon as `finalizeRestoredState()` runs.
+      this.planRebootRestoreOffer(dead, alive.length);
 
       if (alive.length > 0 || discovered.length > 0) {
         console.log(`[Server] Found ${alive.length + discovered.length} alive mux session(s) from previous run`);

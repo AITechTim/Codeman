@@ -1,0 +1,95 @@
+/**
+ * @fileoverview Reboot-restore banner: offer back the sessions a host reboot destroyed.
+ *
+ * A host reboot takes the tmux server down with it, so every session's pane dies
+ * and the board comes up empty. The server works out what was running from the
+ * records it still holds at boot, and this banner asks the user whether to
+ * rebuild them. Nothing is created until they click, because the server's
+ * reboot guess is a heuristic and a wrong automatic restore would spawn CLI
+ * processes nobody asked for.
+ *
+ * Seeded once from `GET /api/reboot-restore` on init. Restore posts to
+ * `POST /api/reboot-restore/restore`, Dismiss posts to
+ * `POST /api/reboot-restore/dismiss`, and either way the banner goes away. The
+ * restored sessions arrive as ordinary `session:created` events, so no extra
+ * rendering is needed here.
+ *
+ * The banner says that terminal history did not survive, because a restored
+ * session is a new pane: the conversation continues and the scrollback does not.
+ * Saying so is what keeps an empty pane from reading as a broken restore.
+ * Backend: src/web/reboot-restore-registry.ts, src/web/routes/reboot-restore-routes.ts.
+ *
+ * @mixin Extends CodemanApp.prototype via Object.assign
+ * @dependency app.js (CodemanApp class, showToast)
+ * @dependency api-client.js at runtime (this._apiJson / this._apiPost)
+ * @loadorder 11.7 of 17, after approvals-ui.js
+ */
+
+Object.assign(CodemanApp.prototype, {
+  /** Ask the server whether a reboot left anything on offer, and show the banner if so. */
+  async initRebootRestoreBanner() {
+    const data = await this._apiJson('/api/reboot-restore');
+    const sessions = data?.sessions ?? [];
+    if (sessions.length === 0) return;
+    this._rebootRestoreSessions = sessions;
+    this.renderRebootRestoreBanner();
+  },
+
+  renderRebootRestoreBanner() {
+    const banner = this.$('rebootRestoreBanner');
+    if (!banner) return;
+    const sessions = this._rebootRestoreSessions ?? [];
+    if (sessions.length === 0) {
+      banner.hidden = true;
+      return;
+    }
+    const count = sessions.length;
+    const text = this.$('rebootRestoreBannerText');
+    if (text) {
+      const noun = count === 1 ? 'session' : 'sessions';
+      text.textContent = `Restore ${count} ${noun} from before the reboot`;
+    }
+    const detail = this.$('rebootRestoreBannerDetail');
+    if (detail) {
+      // Names, so the user can tell what they are about to relaunch.
+      const names = sessions
+        .map((s) => s.name || s.workingDir?.split('/').pop() || s.id.slice(0, 8))
+        .slice(0, 4)
+        .join(', ');
+      detail.textContent = count > 4 ? `${names}, …` : names;
+      detail.title = sessions.map((s) => `${s.name || s.id}\n${s.workingDir}`).join('\n\n');
+    }
+    banner.hidden = false;
+  },
+
+  /** Rebuild everything on offer. The panes are new, so scrollback does not come back. */
+  async restoreRebootSessions() {
+    const button = this.$('rebootRestoreBannerAccept');
+    if (button) button.disabled = true;
+    const res = await this._apiPost('/api/reboot-restore/restore', {});
+    const body = res && res.ok ? await res.json().catch(() => null) : null;
+    if (!body) {
+      if (button) button.disabled = false;
+      this.showToast?.('Could not restore the sessions', 'error');
+      return;
+    }
+    const restored = body.restored?.length ?? 0;
+    const skipped = body.skipped?.length ?? 0;
+    this._rebootRestoreSessions = [];
+    this.renderRebootRestoreBanner();
+    if (restored > 0) {
+      const noun = restored === 1 ? 'conversation' : 'conversations';
+      this.showToast?.(`Restored ${restored} ${noun}. Terminal history did not survive the reboot.`, 'success');
+    }
+    if (skipped > 0) {
+      this.showToast?.(`${skipped} could not be restored (workspace gone, or already open)`, 'warning');
+    }
+  },
+
+  /** Drop the offer. The Resume list still reaches every one of these conversations. */
+  async dismissRebootRestore() {
+    this._rebootRestoreSessions = [];
+    this.renderRebootRestoreBanner();
+    await this._apiPost('/api/reboot-restore/dismiss', {});
+  },
+});

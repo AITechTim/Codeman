@@ -15243,6 +15243,81 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
    skin, including the light ones. Visibility is driven by the `hidden`
    attribute, so the display rules need !important to lose to it. */
 
+/* Reboot-restore offer. Amber rather than red: nothing is wrong, the board is
+   asking a question, and the user can ignore it. See reboot-restore-ui.js. */
+.reboot-restore-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 1rem;
+  background: linear-gradient(90deg, #b45309, #92400e);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
+  z-index: 1250;
+}
+
+.reboot-restore-banner[hidden] {
+  display: none !important;
+}
+
+.reboot-restore-banner-icon {
+  flex-shrink: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.reboot-restore-banner-text {
+  white-space: nowrap;
+}
+
+.reboot-restore-banner-detail {
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reboot-restore-banner-note {
+  color: rgba(255, 255, 255, 0.75);
+  font-weight: 500;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.reboot-restore-banner-accept,
+.reboot-restore-banner-dismiss {
+  flex-shrink: 0;
+  padding: 0.2rem 0.6rem;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.reboot-restore-banner-accept:hover,
+.reboot-restore-banner-dismiss:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.reboot-restore-banner-accept:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.reboot-restore-banner-dismiss {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: transparent;
+  font-weight: 500;
+}
+
 .offline-banner {
   display: flex;
   align-items: center;
