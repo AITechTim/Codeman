@@ -50,6 +50,17 @@ export interface CustomModelHost {
    * after a re-discover is a property worth keeping even if the model list changes.
    */
   defaultModelId?: string;
+  /**
+   * Discovered context-window size (tokens) per model id, keyed by the same strings as
+   * `models`. Populated opportunistically during discovery (`custom-model-routes.ts`) from
+   * llama.cpp/llama-swap's `GET /props?model=<id>` — the plain OpenAI-shaped `/v1/models`
+   * response has no such field. Only ever probed for a model the server already reports as
+   * loaded (llama-swap's `status.value === 'loaded'`); an unloaded one is deliberately never
+   * probed, since llama-swap treats `/props?model=` as a routing hint that can trigger an
+   * actual (slow, GPU-swapping) model load as a side effect of merely asking. A model this
+   * has no entry for simply gets no context-length env override applied — never a guess.
+   */
+  modelContextLengths?: Record<string, number>;
 }
 
 export function customModelHostsPath(configDir: string): string {

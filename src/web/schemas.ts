@@ -1924,6 +1924,9 @@ export const CustomModelHostSchema = z.object({
   // host to apply it, so the check belongs there once, not duplicated into a refine
   // that would run on every unrelated field edit too).
   defaultModelId: z.string().max(200).optional(),
+  // Server-populated by discovery (custom-model-routes.ts); accepted here only so a client
+  // round-tripping the GET response back through PUT (edit-save) doesn't drop it.
+  modelContextLengths: z.record(z.string().max(200), z.number().int().positive().max(100_000_000)).optional(),
 });
 
 /** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */

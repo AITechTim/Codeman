@@ -58,6 +58,24 @@ describe('buildCustomModelInjection', () => {
     });
   });
 
+  it('claude: also declares configDirVar (CLAUDE_CONFIG_DIR isolation) on the env-kind result', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.configDirVar).toBe('CLAUDE_CONFIG_DIR');
+  });
+
+  it('claude: injects CLAUDE_CODE_MAX_CONTEXT_TOKENS when a context length is known', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', 16384);
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.envOverrides.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('16384');
+  });
+
+  it('claude: omits CLAUDE_CODE_MAX_CONTEXT_TOKENS when the context length is unknown', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.envOverrides.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
+  });
+
   it('claude: falls back to a dummy key when the endpoint has none', () => {
     const result = buildCustomModelInjection(entryOrThrow('claude'), { ...endpoint, apiKey: undefined }, 'qwen3');
     if (result.kind !== 'env') throw new Error('unreachable');

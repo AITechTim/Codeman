@@ -44,6 +44,14 @@ export interface EnvInjection {
   envOverrides: Record<string, string>;
   /** See {@link ConfigDirInjection.launchModel}. */
   launchModel?: string;
+  /**
+   * Name of the env var the caller should point at an isolated, credential-free config
+   * directory for this session (claude's `CLAUDE_CONFIG_DIR`), from the registry entry's
+   * `customModelInjection.configDirVar`. The actual directory value isn't computed here —
+   * this module is pure and has no sessionId to derive one from — the IO wrapper
+   * (`custom-model-injection-apply.ts`) creates it and adds it to `envOverrides`.
+   */
+  configDirVar?: string;
 }
 
 export interface ConfigDirInjection {
@@ -90,7 +98,9 @@ function quoted(value: string): string {
 export function buildCustomModelInjection(
   entry: Pick<CliEntry, 'capabilities'>,
   endpoint: CustomModelEndpoint,
-  modelId: string
+  modelId: string,
+  /** Discovered context-window size for `modelId`, if known — see `contextLengthVar`. */
+  contextLength?: number
 ): CustomModelInjectionResult {
   const cap = entry.capabilities.customModelInjection;
   const apiKey = endpoint.apiKey?.trim() || DEFAULT_API_KEY;
@@ -102,7 +112,11 @@ export function buildCustomModelInjection(
         [cap.apiKeyVar]: apiKey,
       };
       for (const modelVar of cap.modelVars) envOverrides[modelVar] = modelId;
-      return withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
+      if (cap.contextLengthVar && contextLength !== undefined && Number.isFinite(contextLength)) {
+        envOverrides[cap.contextLengthVar] = String(Math.trunc(contextLength));
+      }
+      const result = withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
+      return cap.configDirVar ? { ...result, configDirVar: cap.configDirVar } : result;
     }
 
     case 'configContentEnv': {

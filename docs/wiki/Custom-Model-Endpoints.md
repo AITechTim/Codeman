@@ -27,6 +27,15 @@ hosts — these are machine-level infra, not a per-user setting.
 shows up without another manual click of **Discover**. One endpoint being unreachable on a
 given cycle (powered off, wrong network) never blocks the others from refreshing.
 
+**Context length is picked up automatically where it can be, safely.** Against a
+llama.cpp/llama-swap server, discovery also learns each *currently loaded* model's real
+context window and applies it to the launched session (Claude Code today — see below), so
+the harness stops assuming a large default window for a model name it doesn't recognise and
+overflowing a much smaller real one. It's deliberately never probed for a model that isn't
+already loaded, since asking a llama-swap server about an unloaded model can trigger an
+actual, slow model swap as a side effect — a model just not currently loaded keeps whatever
+context length an earlier cycle already learned for it instead.
+
 ## Running a session against one
 
 With the setting on and at least one endpoint carrying a discovered model, the **Run**
@@ -60,6 +69,18 @@ Entries are hidden entirely for a session in a **remote (SSH) or Docker case** �
 redirecting those hasn't landed yet, see below. The picker also only appears in the desktop
 **Run** dropdown; the phone home screen builds its own run picker separately and does not
 currently offer these entries.
+
+**Claude Code specifically gets two extra fixes applied automatically:**
+
+- Its discovered context length (see above) is passed through as
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so it doesn't send a full-size prompt against a much
+  smaller real local context and overflow it.
+- Its session runs with an isolated `CLAUDE_CONFIG_DIR`, so the injected API key never sits
+  in the same directory as a stored claude.ai login — that combination is harmless for actual
+  requests (the API key wins) but the CLI still prints a "both claude.ai and
+  ANTHROPIC_API_KEY set" warning about it, which this avoids entirely. The isolated directory
+  keeps a link back to your real session history so the response viewer and similar features
+  still work for that session.
 
 ## Which harnesses actually work
 

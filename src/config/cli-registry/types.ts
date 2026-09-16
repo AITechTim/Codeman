@@ -496,9 +496,33 @@ export interface CliCapabilities {
    * declares). Absent = the config alone selects the model (claude's env vars,
    * opencode's blob, codex's top-level `model` key). Applied by the session's
    * respawn options through the entry's `legacyConfigField`, never by id.
+   *
+   * `contextLengthVar` (env kind only): the env var a discovered per-model context-window
+   * size is written to when known (claude's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`) — without it,
+   * a CLI that assumes a large default window for an unrecognized model name keeps sending
+   * full-size prompts against a much smaller local server and eventually overflows its real
+   * context (verified: a 33.7K-token system prompt against a 16384-token llama-swap model).
+   * Absent when the CLI has no such override, or the value is unknown for this model.
+   *
+   * `configDirVar` (env kind only): the env var that redirects this session's config/
+   * credential directory to an isolated, per-session one (claude's `CLAUDE_CONFIG_DIR`), so
+   * an injected API key never coexists with a stored claude.ai OAuth session in the same
+   * directory — the CLI still warns "both claude.ai and ANTHROPIC_API_KEY set" when they
+   * share a directory even though the API key wins for actual requests. Isolating it trades
+   * that cosmetic warning for a documented side effect: a relocated config directory writes
+   * transcripts outside `~/.claude/projects`, blinding the response viewer, subagent
+   * windows, and Read My Mind for that session (see docs/wiki/Agent-CLIs.md).
    */
   customModelInjection:
-    | { kind: 'env'; baseUrlVar: string; apiKeyVar: string; modelVars: string[]; launchModel?: string }
+    | {
+        kind: 'env';
+        baseUrlVar: string;
+        apiKeyVar: string;
+        modelVars: string[];
+        launchModel?: string;
+        contextLengthVar?: string;
+        configDirVar?: string;
+      }
     | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json'; launchModel?: string }
     | {
         kind: 'configDir';

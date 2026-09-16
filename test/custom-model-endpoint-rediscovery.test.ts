@@ -124,3 +124,87 @@ describe('refreshAllCustomModelHosts (the periodic re-discovery sweep)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('refreshAllCustomModelHosts: context-length enrichment (llama.cpp/llama-swap /props)', () => {
+  it('probes /props?model= only for a model reported loaded, and stores its n_ctx', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(
+          JSON.stringify({
+            data: [
+              { id: 'loaded-model', status: { value: 'loaded' } },
+              { id: 'unloaded-model', status: { value: 'unloaded' } },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.pathname === '/props') {
+        // Must never be reached for the unloaded model — asserted below by call count.
+        expect(url.searchParams.get('model')).toBe('loaded-model');
+        return new Response(JSON.stringify({ n_ctx: 16384 }), { status: 200 });
+      }
+      throw new Error(`unexpected request: ${url.href}`);
+    });
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toEqual({ 'loaded-model': 16384 });
+    const propsCalls = fetchMock.mock.calls.filter(([url]) => (url as URL).pathname === '/props');
+    expect(propsCalls).toHaveLength(1);
+  });
+
+  it('never probes /props at all when no entry mentions status — feature-detected, not assumed unloaded', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ data: [{ id: 'qwen3' }] }), { status: 200 }));
+
+    await refreshAllCustomModelHosts();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // /v1/models only
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toBeUndefined();
+  });
+
+  it('keeps a previously-learned context length for a model no longer loaded, drops it once the model disappears entirely', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [
+      host({
+        id: 'ep',
+        baseUrl: 'http://localhost:8080',
+        models: ['a', 'b'],
+        modelContextLengths: { a: 8192, b: 4096 },
+      }),
+    ]);
+    // This round: 'a' is loaded (re-confirmed), 'b' is gone from the list entirely.
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(JSON.stringify({ data: [{ id: 'a', status: { value: 'loaded' } }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ n_ctx: 8192 }), { status: 200 });
+    });
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toEqual({ a: 8192 });
+  });
+
+  it('a failed /props probe for the loaded model is swallowed, leaving no context length rather than failing the sweep', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(JSON.stringify({ data: [{ id: 'a', status: { value: 'loaded' } }] }), { status: 200 });
+      }
+      return new Response('nope', { status: 500 });
+    });
+
+    await expect(refreshAllCustomModelHosts()).resolves.toBeUndefined();
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toBeUndefined();
+  });
+});

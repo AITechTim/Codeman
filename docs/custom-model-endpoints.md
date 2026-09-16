@@ -66,6 +66,23 @@ configured, `PUT`/`DELETE /api/model-endpoints/:id` update or remove one.
 Endpoint management is admin-only in multi-user mode, same as remote/docker
 hosts — these are machine-level infra, not per-user settings.
 
+**Context length is discovered too, opportunistically and safely.** The plain
+`GET /v1/models` response has no context-window field, but llama.cpp's
+llama-swap-proxied `GET /props?model=<id>` does (`n_ctx`). Discovery only ever
+calls it for a model llama-swap's own response already reports
+`status.value === "loaded"` for — never for an unloaded one, because
+llama-swap treats `?model=` as a routing hint and asking about a model that
+isn't loaded risks triggering an actual (slow, GPU-swapping) load as a side
+effect of what should be read-only discovery. A server with no `status` field
+on any entry at all (not llama-swap) gets no context-length enrichment,
+rather than guessing. A model's previously-learned context length survives a
+later cycle where it wasn't the loaded one; it's dropped only once the model
+disappears from the endpoint's list entirely. Stored per model in
+`modelContextLengths` and applied automatically (see "Applying a model to a
+session" below) so a CLI that would otherwise assume a large default context
+window for an unrecognized model id stops silently overflowing a much
+smaller real one.
+
 `defaultModelId` names which discovered model the picker pre-marks for that
 endpoint — the settings panel's Edit form exposes it as a select populated
 from the endpoint's own discovered `models`, and the route refuses a value
@@ -142,6 +159,34 @@ since for those three the config file alone does not switch the model.
 **Remote (SSH) and Docker sessions are refused** (400) for now: their restart
 reattaches the durable remote/in-container tmux rather than relaunching the
 agent, so the selection would report success and change nothing.
+
+**Claude gets two more env vars when known/applicable, both declared on its
+registry entry (`contextLengthVar`/`configDirVar`), not hardcoded here:**
+
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is set to `modelId`'s discovered context
+  length (see the discovery section above) whenever one is known. Without
+  it, Claude Code assumes a large (200k) window for any unrecognized custom
+  model id and never compacts, which reliably overflows a much smaller real
+  local context — confirmed live: a stock ~33.7K-token system prompt against
+  a 16384-token llama-swap model failed with `exceeds the available context
+  size`. No entry for the model in `modelContextLengths` means the var is
+  simply omitted, never a guess.
+- `CLAUDE_CONFIG_DIR` is pointed at the same isolated per-session directory
+  the `configDir`-kind CLIs use (empty, no files written into it), so the
+  injected `ANTHROPIC_API_KEY` never shares a directory with a stored
+  claude.ai OAuth login. Claude Code still prints "Both claude.ai and
+  ANTHROPIC_API_KEY set" when the two coexist in the same config directory —
+  cosmetic (confirmed live: the API key wins for actual requests either way,
+  visible in the terminal's own `API Usage Billing` line) but worth
+  eliminating rather than living with. The directory's `projects`
+  subdirectory is symlinked (a junction on Windows) back to the real
+  `~/.claude/projects` so the response viewer, subagent windows and Read My
+  Mind keep working for that session — the same trade-off and fix documented
+  for a manually-set `CLAUDE_CONFIG_DIR` in
+  [`docs/wiki/Agent-CLIs.md`](wiki/Agent-CLIs.md), just applied
+  automatically here. Best-effort: a platform that refuses the symlink keeps
+  the pre-existing blind-response-viewer side effect rather than failing the
+  whole custom-model apply over it.
 
 Clear back to the harness's native cloud default with:
 

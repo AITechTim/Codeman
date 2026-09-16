@@ -340,6 +340,13 @@ const capabilitiesSchema = z
           // an env var, so it declares baseUrl/apiKey injection with no model var at all.
           modelVars: z.array(envName).max(8),
           launchModel: launchModelTemplate,
+          // Optional: the env var to carry a discovered per-model context-window size
+          // (claude's CLAUDE_CODE_MAX_CONTEXT_TOKENS), and/or the env var that isolates
+          // this session's config/credential directory from the user's real one (claude's
+          // CLAUDE_CONFIG_DIR) so an injected API key never collides with a stored OAuth
+          // session. See the customModelInjection doc comment in cli-registry/types.ts.
+          contextLengthVar: envName.optional(),
+          configDirVar: envName.optional(),
         })
         .strict(),
       z

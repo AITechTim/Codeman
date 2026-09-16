@@ -10,7 +10,8 @@
  * cli-registry changes" requirement it was written against.
  */
 
-import { chmodSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { homedir, platform } from 'node:os';
 import { join, dirname } from 'node:path';
 import { dataPath } from './config/instance.js';
 import type { CliEntry } from './config/cli-registry/types.js';
@@ -48,6 +49,36 @@ export function applyConfigDirInjection(baseDir: string, injection: ConfigDirInj
   return { [injection.dirEnvVar]: baseDir, ...injection.extraEnv };
 }
 
+/**
+ * Real, shared Claude config directory Codeman's own host process runs under — honors
+ * `CLAUDE_CONFIG_DIR` the same way `claude-credentials.ts`'s `claudeCredentialsPath()`
+ * does, so the symlink below points at wherever `~/.claude/projects` actually lives
+ * rather than assuming the plain default.
+ */
+function realClaudeConfigDir(): string {
+  const configured = typeof process.env.CLAUDE_CONFIG_DIR === 'string' && process.env.CLAUDE_CONFIG_DIR.trim();
+  return configured || join(homedir(), '.claude');
+}
+
+/**
+ * Symlinks `<isolatedDir>/projects` back to the real, shared `~/.claude/projects`, so an
+ * isolated `CLAUDE_CONFIG_DIR` (used to keep an injected API key away from a stored OAuth
+ * session — see `configDirVar` on customModelInjection) doesn't also blind the response
+ * viewer, subagent windows, and Read My Mind for that session (docs/wiki/Agent-CLIs.md).
+ * Best-effort: a platform that refuses symlinks (unprivileged Windows without a junction
+ * fallback working, e.g.) just keeps the pre-existing documented side effect instead of
+ * failing the whole custom-model apply over a nice-to-have.
+ */
+function linkSharedProjectsDir(isolatedDir: string): void {
+  const link = join(isolatedDir, 'projects');
+  if (existsSync(link)) return; // already linked (idempotent re-apply) or real dir wrote one
+  try {
+    symlinkSync(join(realClaudeConfigDir(), 'projects'), link, platform() === 'win32' ? 'junction' : 'dir');
+  } catch {
+    // best-effort only — response viewer/subagent windows go blind for this session instead
+  }
+}
+
 /** Best-effort recursive removal of a previously-written configDir. Never throws. */
 export function removeConfigDir(dir: string | undefined): void {
   if (!dir) return;
@@ -79,14 +110,30 @@ export function applyCustomModelInjection(
   entry: Pick<CliEntry, 'capabilities'>,
   endpoint: CustomModelEndpoint,
   modelId: string,
-  sessionId: string
+  sessionId: string,
+  /** Discovered context-window size for `modelId`, if known — see `contextLengthVar`. */
+  contextLength?: number
 ): AppliedCustomModel | undefined {
-  const injection = buildCustomModelInjection(entry, endpoint, modelId);
+  const injection = buildCustomModelInjection(entry, endpoint, modelId, contextLength);
   if (injection.kind === 'unsupported') return undefined;
   if (injection.kind === 'env') {
+    // `configDirVar` (claude's CLAUDE_CONFIG_DIR): point it at the same isolated,
+    // per-session directory the `configDir` kind uses, but write no files into it — an
+    // empty directory has no stored OAuth credential to conflict with the injected API
+    // key, which is the whole point. Reusing the same path keyed by sessionId keeps this
+    // idempotent across a boot-recovery re-apply, same as the configDir kind below.
+    let envOverrides = injection.envOverrides;
+    let configDir: string | undefined;
+    if (injection.configDirVar) {
+      configDir = customModelConfigDir(sessionId);
+      mkdirSync(configDir, { recursive: true, mode: 0o700 });
+      linkSharedProjectsDir(configDir);
+      envOverrides = { ...envOverrides, [injection.configDirVar]: configDir };
+    }
     return {
-      envOverrides: injection.envOverrides,
-      envKeys: Object.keys(injection.envOverrides),
+      envOverrides,
+      envKeys: Object.keys(envOverrides),
+      configDir,
       launchModel: injection.launchModel,
     };
   }

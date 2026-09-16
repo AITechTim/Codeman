@@ -237,6 +237,12 @@ const CLAUDE: CliEntry = {
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      // CLAUDE_CODE_MAX_CONTEXT_TOKENS already matches the CLAUDE_CODE_* allowedPrefix, and
+      // CLAUDE_CONFIG_DIR is already an allowed exact key (docs/wiki/Agent-CLIs.md), so both
+      // were already reachable via plain envOverrides before this pair existed — listed here
+      // only so the custom-model route clamps them the same way as every other injected var.
+      'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+      'CLAUDE_CONFIG_DIR',
     ],
     gates: { nameFlag: { minVersion: '2.1.224', failClosed: true } },
     // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — verified by hand against a real
@@ -247,6 +253,17 @@ const CLAUDE: CliEntry = {
       baseUrlVar: 'ANTHROPIC_BASE_URL',
       apiKeyVar: 'ANTHROPIC_API_KEY',
       modelVars: ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL'],
+      // Verified via Claude Code's own docs: CLAUDE_CODE_MAX_CONTEXT_TOKENS overrides the
+      // assumed context window and applies directly for a model name Claude Code doesn't
+      // recognize as one of its own — exactly the custom-model case. Without it, Claude Code
+      // assumes a large (200k) window for any unrecognized model id and never compacts,
+      // eventually overflowing a much smaller real local context (see plan doc reasoning
+      // above the interface for the confirmed failure).
+      contextLengthVar: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+      // Isolates this session's config/credential directory so an injected ANTHROPIC_API_KEY
+      // never shares a directory with a stored claude.ai OAuth login — see the doc comment on
+      // customModelInjection in cli-registry/types.ts for the traded-off side effect.
+      configDirVar: 'CLAUDE_CONFIG_DIR',
     },
   },
   overlays: {
