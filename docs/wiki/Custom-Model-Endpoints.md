@@ -73,6 +73,16 @@ redirecting those hasn't landed yet, see below. The picker also only appears in 
 **Run** dropdown; the phone home screen builds its own run picker separately and does not
 currently offer these entries.
 
+**Against llama-swap, applying a selection also starts the actual model load, rather than
+waiting on your first prompt to do it.** llama-swap has no "switch model" button of its own
+— the only thing that starts a swap is a real request naming the model, and confirmed live:
+just applying a selection never reached llama-swap's own logs at all until something asked
+it to load. Picking an entry now also sends the smallest real request that will trigger
+that load, in the background, the moment the target model isn't already loaded and ready —
+which is what the prominent **"Loading `<model>`… this can take a while"** banner
+(centred on screen, not a corner toast — a real load can take well over a minute) is
+actually watching for.
+
 **Claude Code specifically gets two extra fixes applied automatically:**
 
 - Its discovered context length (see above) is passed through as

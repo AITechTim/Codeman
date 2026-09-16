@@ -55,7 +55,7 @@ import {
 } from '../schemas.js';
 import { readCustomModelHosts } from '../../custom-model-hosts.js';
 import { applyCustomModelInjection, removeConfigDir } from '../../custom-model-injection-apply.js';
-import { getLlamaSwapStatus } from './custom-model-routes.js';
+import { getLlamaSwapStatus, triggerLlamaSwapLoad } from './custom-model-routes.js';
 import { matchesPattern } from '../../config/cli-registry/patterns.js';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { TabLayoutValidationError } from '../../tab-layout.js';
@@ -1217,7 +1217,16 @@ export function registerSessionRoutes(
     // server has no such endpoint and reads as `isLlamaSwap: false` — nothing to check).
     const swapStatus = await getLlamaSwapStatus(endpoint);
     const currentlyLoaded = swapStatus.running.find((r) => r.state === 'ready')?.model ?? swapStatus.running[0]?.model;
+    // Distinct from targetReady below: this is ONLY about whether proceeding would evict a
+    // model another session is actively using — true even if nothing is loaded at all yet
+    // would be wrong here (nothing to evict), so this stays narrowly "a DIFFERENT model is
+    // currently ready".
     const swapNeeded = swapStatus.isLlamaSwap && !!currentlyLoaded && currentlyLoaded !== body.modelId;
+    // Whether the TARGET model itself is already the one loaded and ready — false whether
+    // nothing is loaded yet, a different model is loaded, or this one is loaded but still
+    // mid-load. Drives both the actual load trigger below and modelSwapInProgress in the
+    // response; deliberately broader than swapNeeded, which only gates the confirmation ask.
+    const targetReady = swapStatus.running.some((r) => r.model === body.modelId && r.state === 'ready');
 
     // Only ask when switching would actually take the model away from another session
     // that is currently using it — never just because a swap is needed at all. `confirmed`
@@ -1275,9 +1284,17 @@ export function registerSessionRoutes(
       removeConfigDir(previousConfigDir);
     }
 
+    // Actually kick off llama-swap's load now, rather than waiting on the restarted CLI's
+    // own first prompt to do it — confirmed live that applying a selection alone never
+    // reached the llama-swap server at all (nothing in its own logs), since llama-swap has
+    // no "switch model" admin call, only a real inference request naming the model.
+    if (swapStatus.isLlamaSwap && !targetReady) {
+      triggerLlamaSwapLoad(endpoint, body.modelId);
+    }
+
     const restarted = await session.restartCli();
     persistAndBroadcastSession(ctx, session);
-    return { customModel: session.customModel, restarted, modelSwapInProgress: swapNeeded };
+    return { customModel: session.customModel, restarted, modelSwapInProgress: swapStatus.isLlamaSwap && !targetReady };
   });
 
   // ========== Delete Session ==========
@@ -3533,6 +3550,7 @@ export function registerSessionRoutes(
     let qsCustomModelEnvOverrides = qsGatedEnvOverrides;
     let qsCustomModelLaunchModel: string | undefined;
     let qsCustomModelSessionId: string | undefined;
+    let qsCustomModelSwapInProgress = false;
     let qsCustomModelBookkeeping:
       | {
           endpointId: string;
@@ -3562,6 +3580,11 @@ export function registerSessionRoutes(
       const cmCurrentlyLoaded =
         cmSwapStatus.running.find((r) => r.state === 'ready')?.model ?? cmSwapStatus.running[0]?.model;
       const cmSwapNeeded = cmSwapStatus.isLlamaSwap && !!cmCurrentlyLoaded && cmCurrentlyLoaded !== customModel.modelId;
+      // Broader than cmSwapNeeded (which only gates the confirmation ask above): true
+      // whenever the TARGET model isn't already loaded and ready, including when nothing
+      // is loaded at all yet. Drives the actual load trigger below.
+      const cmTargetReady = cmSwapStatus.running.some((r) => r.model === customModel.modelId && r.state === 'ready');
+      qsCustomModelSwapInProgress = cmSwapStatus.isLlamaSwap && !cmTargetReady;
       if (cmSwapNeeded && !customModel.confirmed) {
         const cmAffectedSessions = [...ctx.sessions.values()]
           .filter((s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded)
@@ -3614,6 +3637,14 @@ export function registerSessionRoutes(
         configDir: cmApplied.configDir,
         launchModel: cmApplied.launchModel,
       };
+
+      // Actually kick off llama-swap's load now — see the dedicated apply route's own
+      // comment on triggerLlamaSwapLoad for why this can't just wait on the launched CLI's
+      // first prompt. Fired here, before the session is even created, so the load starts
+      // concurrently with Claude/Codex/etc. booting rather than after.
+      if (qsCustomModelSwapInProgress) {
+        triggerLlamaSwapLoad(cmEndpoint, customModel.modelId);
+      }
     }
 
     const session = new Session({
@@ -3761,6 +3792,7 @@ export function registerSessionRoutes(
         sessionId: session.id,
         casePath: resolvedCasePath,
         caseName,
+        ...(customModel ? { modelSwapInProgress: qsCustomModelSwapInProgress } : {}),
       };
     } catch (err) {
       // Clean up session on error to prevent orphaned resources

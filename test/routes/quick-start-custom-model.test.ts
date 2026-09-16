@@ -274,4 +274,56 @@ describe('POST /api/quick-start: customModel (one-shot custom-model launch)', ()
       expect(res.json().requiresConfirmation).toBeUndefined();
     });
   });
+
+  describe('triggering the actual llama-swap load (not just watching for it)', () => {
+    it('sends a real inference request naming the target model, concurrently with launching the session', async () => {
+      const chatCalls: unknown[] = [];
+      fetchMock.mockImplementation(async (url: URL, init?: { body?: unknown }) => {
+        if (url.pathname === '/running') {
+          return new Response(JSON.stringify({ running: [{ model: 'llama3', state: 'ready' }] }), { status: 200 });
+        }
+        if (url.pathname === '/v1/chat/completions') {
+          chatCalls.push(JSON.parse(init!.body as string));
+          return new Response(JSON.stringify({ choices: [] }), { status: 200 });
+        }
+        throw new Error(`unexpected request in this test: ${url.href}`);
+      });
+
+      const res = await quickStart({
+        caseName: 'cm-trigger',
+        mode: 'claude',
+        customModel: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0)); // let the fire-and-forget trigger settle
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().modelSwapInProgress).toBe(true);
+      expect(chatCalls).toHaveLength(1);
+      expect(chatCalls[0]).toMatchObject({ model: 'qwen3', max_tokens: 1 });
+    });
+
+    it('never sends a load-trigger request when the target model is already loaded and ready', async () => {
+      let chatCalled = false;
+      fetchMock.mockImplementation(async (url: URL) => {
+        if (url.pathname === '/running') {
+          return new Response(JSON.stringify({ running: [{ model: 'qwen3', state: 'ready' }] }), { status: 200 });
+        }
+        if (url.pathname === '/v1/chat/completions') {
+          chatCalled = true;
+          return new Response(JSON.stringify({ choices: [] }), { status: 200 });
+        }
+        throw new Error(`unexpected request in this test: ${url.href}`);
+      });
+
+      const res = await quickStart({
+        caseName: 'cm-no-trigger',
+        mode: 'claude',
+        customModel: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(res.json().modelSwapInProgress).toBe(false);
+      expect(chatCalled).toBe(false);
+    });
+  });
 });

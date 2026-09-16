@@ -239,6 +239,35 @@ earlier launch in the same isolated directory (`userID`, `numStartups`,
 earlier approved keys), and a missing or corrupt file is treated as empty
 rather than failing the apply.
 
+**llama-swap gets two more fixes on top of the context-length/config-dir
+ones above, both from watching a real switch live.** llama.cpp only ever
+runs one model at a time; llama-swap swaps the backing process on demand,
+which can take anywhere from a few seconds to well over a minute:
+
+- **The conflict check.** Both apply routes (the restart one here and the
+  one-shot `POST /api/quick-start` above) call llama-swap's own
+  `GET /running` first — feature-detected, so a plain llama.cpp/OpenAI-
+  compatible server (no such endpoint) is simply never checked. If a
+  *different* model is currently loaded and ready, and another **live
+  session's own selection** is using it, the apply returns
+  `{requiresConfirmation: true, currentlyLoadedModel, affectedSessions}`
+  instead of silently switching — nothing is applied or created yet.
+  Retrying with `confirmed: true` skips the check. Switching with nothing
+  else affected proceeds immediately; this is a warning about disrupting
+  another session, never a gate on the switch itself.
+- **Actually starting the load.** llama-swap has no "switch model" admin
+  call — the only thing that starts a swap is a real inference request
+  naming the model, and confirmed live: applying a selection alone never
+  reached llama-swap at all (nothing in its own server logs), since nothing
+  had actually asked it to load anything yet. Both apply routes now also
+  send the smallest real request that will — `POST <baseUrl>/v1/chat/
+  completions` with `max_tokens: 1` and one throwaway message — whenever the
+  target model isn't already the one loaded and ready, fire-and-forget (its
+  response is never read; `GET /api/model-endpoints/:id/running-status`,
+  polled client-side, is what actually confirms readiness). The response
+  also carries `modelSwapInProgress: true` in that case, which is what
+  drives the Run-menu picker's own "loading model" status banner.
+
 Clear back to the harness's native cloud default with:
 
 ```bash

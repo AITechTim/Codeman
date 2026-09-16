@@ -228,6 +228,44 @@ export async function getLlamaSwapStatus(
   }
 }
 
+/**
+ * Actually kicks off llama-swap's lazy model load, rather than waiting for the launched
+ * CLI's own first prompt to do it. llama-swap has no separate "switch model" admin
+ * endpoint — the ONLY thing that starts a swap is a real inference request naming the
+ * model (confirmed live: applying a selection alone never appeared in the llama-swap
+ * server's own logs; nothing had actually asked it to load anything). This sends the
+ * smallest real request that will — `max_tokens: 1`, one throwaway user message — to
+ * `${baseUrl}/v1/chat/completions`, the OpenAI-compatible endpoint every supported
+ * harness already points at.
+ *
+ * Deliberately fire-and-forget: the caller (the apply/create routes) returns to the
+ * client immediately, and the frontend's own polling (`GET .../running-status`) is what
+ * actually confirms readiness — this call's response is never read, just its side
+ * effect. No abort/timeout of its own either: a real load can take well over a minute for
+ * a large model, and this is a normal long-running Node process, so there is nothing to
+ * clean up by cutting it short. Errors are swallowed for the same reason `discoverModels`'s
+ * siblings swallow theirs — one endpoint's hiccup here is a nice-to-have that failed, not
+ * something worth surfacing as a request failure four layers up.
+ */
+export function triggerLlamaSwapLoad(
+  host: Pick<CustomModelHost, 'baseUrl' | 'apiKey' | 'authStyle'>,
+  modelId: string
+): void {
+  const url = new URL(`${host.baseUrl.replace(/\/+$/, '')}/v1/chat/completions`);
+  webviewFetch(url, {
+    method: 'POST',
+    headers: { ...authHeaders(host), 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{ role: 'user', content: 'Hi' }],
+      max_tokens: 1,
+      stream: false,
+    }),
+  }).catch(() => {
+    // best-effort — see the doc comment above
+  });
+}
+
 function applyDiscoveredModels(host: CustomModelHost, result: DiscoveryResult): CustomModelHost {
   const { models, contextLengths } = result;
   const defaultModelId = host.defaultModelId && models.includes(host.defaultModelId) ? host.defaultModelId : undefined;
