@@ -117,6 +117,15 @@ function parseSizeGB(description: unknown): number | undefined {
  * actual (slow, GPU-swapping) load as a side effect of what should be read-only discovery.
  * Any failure (unreachable, non-2xx, missing/malformed field) is swallowed — one model's
  * context length is a nice-to-have, never worth failing the whole discovery pass over.
+ *
+ * ⚠️ FALLBACK ONLY — confirmed live to be actively WRONG for a `--fit-ctx`-launched llama-
+ * swap backend: `/props`'s `n_ctx` read 154112 for a model llama-swap itself had launched
+ * with `--fit-ctx 16384` (visible in `/running`'s own `cmd`), and the real server then
+ * refused a request at the real 16384-token limit — `n_ctx` here appears to report the
+ * model's theoretical/trained maximum, not the runtime-configured one. `parseCtxFromCmd`
+ * (below), which reads the actual launch flag `/running` reports, is the primary source;
+ * this is only used when that parse comes up empty (no recognized flag in `cmd`, or `cmd`
+ * itself unavailable).
  */
 async function fetchContextLength(
   host: Pick<CustomModelHost, 'baseUrl'>,
@@ -134,6 +143,25 @@ async function fetchContextLength(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Parses the REAL configured context size out of llama-swap's own launch command for a
+ * model (`/running`'s `cmd` field, e.g. `"llama-server -m ... --fit-ctx 16384 ..."`) —
+ * the primary source for `modelContextLengths`, preferred over `/props`'s `n_ctx` (see
+ * `fetchContextLength`'s own doc comment for why that field is unreliable here). Checks
+ * `--fit-ctx` first (llama-swap's own auto-fit flag), then the plain llama.cpp
+ * `-c`/`--ctx-size`/`--ctx_size` flags a hand-written launch command might use instead.
+ * Returns `undefined` when `cmd` has none of these — not every launch command needs to
+ * state one explicitly (llama.cpp has its own default), and guessing one would be worse
+ * than the "no override applied" the caller already treats an unknown length as.
+ */
+function parseCtxFromCmd(cmd: unknown): number | undefined {
+  if (typeof cmd !== 'string') return undefined;
+  const match = /--fit-ctx\s+(\d+)/.exec(cmd) ?? /(?:^|\s)(?:-c|--ctx-size|--ctx_size)\s+(\d+)/.exec(cmd);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 async function discoverModels(
@@ -169,9 +197,18 @@ async function discoverModels(
       .filter((m) => m.status && typeof m.status === 'object' && (m.status as { value?: unknown }).value === 'loaded')
       .map((m) => m.id)
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
-    for (const id of loadedIds) {
-      const ctx = await fetchContextLength(host, id, headers);
-      if (ctx !== undefined) contextLengths[id] = ctx;
+    if (loadedIds.length > 0) {
+      // Primary source: the REAL launch command (see parseCtxFromCmd's own doc comment
+      // for why /props's n_ctx cannot be trusted here). One /running call covers every
+      // loaded model, so this never costs more requests than the old /props-only path did
+      // when the cmd parse succeeds, and exactly one extra when it has to fall back.
+      const swapStatus = await getLlamaSwapStatus(host);
+      const cmdById = new Map(swapStatus.running.map((r) => [r.model, r.cmd]));
+      for (const id of loadedIds) {
+        const fromCmd = parseCtxFromCmd(cmdById.get(id));
+        const ctx = fromCmd ?? (await fetchContextLength(host, id, headers));
+        if (ctx !== undefined) contextLengths[id] = ctx;
+      }
     }
   }
   return { models, contextLengths, sizesGB };
@@ -209,6 +246,9 @@ const RUNNING_TIMEOUT_MS = 5000;
 export interface LlamaSwapRunningModel {
   model: string;
   state: string;
+  /** The actual launch command llama-swap started this backend with, when it says one —
+   *  see `parseCtxFromCmd`, which reads the real configured context size out of this. */
+  cmd?: string;
 }
 
 export interface LlamaSwapStatus {
@@ -245,10 +285,14 @@ export async function getLlamaSwapStatus(
     if (!Array.isArray(body.running)) return { isLlamaSwap: false, running: [] };
     const running = body.running
       .filter(
-        (r): r is { model: string; state?: unknown } =>
+        (r): r is { model: string; state?: unknown; cmd?: unknown } =>
           !!r && typeof r === 'object' && typeof (r as { model?: unknown }).model === 'string'
       )
-      .map((r) => ({ model: r.model, state: typeof r.state === 'string' ? r.state : 'unknown' }));
+      .map((r) => ({
+        model: r.model,
+        state: typeof r.state === 'string' ? r.state : 'unknown',
+        cmd: typeof r.cmd === 'string' ? r.cmd : undefined,
+      }));
     return { isLlamaSwap: true, running };
   } catch {
     return { isLlamaSwap: false, running: [] };

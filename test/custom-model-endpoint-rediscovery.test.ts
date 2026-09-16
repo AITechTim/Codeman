@@ -207,6 +207,90 @@ describe('refreshAllCustomModelHosts: context-length enrichment (llama.cpp/llama
     const [updated] = await readCustomModelHosts(dir);
     expect(updated.modelContextLengths).toBeUndefined();
   });
+
+  it('prefers the REAL configured context size parsed from /running’s launch command over /props’s unreliable n_ctx', async () => {
+    // Confirmed live: llama-swap launched a model with --fit-ctx 16384 (the real, working
+    // limit — the actual server then refused a request over it), but /props reported
+    // n_ctx: 154112 for the same model, well over what it would really accept. /props must
+    // never be reached at all once the /running command parse already answered it.
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(JSON.stringify({ data: [{ id: 'qwen3.8-27b', status: { value: 'loaded' } }] }), {
+          status: 200,
+        });
+      }
+      if (url.pathname === '/running') {
+        return new Response(
+          JSON.stringify({
+            running: [
+              {
+                model: 'qwen3.8-27b',
+                state: 'ready',
+                cmd: 'llama-server -m /models/Qwen3.8-27B.gguf --flash-attn on --jinja --fit-ctx 16384 --host 0.0.0.0 --port 5840',
+              },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      if (url.pathname === '/props') throw new Error('must never be reached — the cmd parse already answered it');
+      throw new Error(`unexpected request: ${url.href}`);
+    });
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toEqual({ 'qwen3.8-27b': 16384 });
+  });
+
+  it('falls back to /props when /running has no cmd, or the cmd states no recognizable context flag', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(JSON.stringify({ data: [{ id: 'a', status: { value: 'loaded' } }] }), { status: 200 });
+      }
+      if (url.pathname === '/running') {
+        return new Response(
+          JSON.stringify({ running: [{ model: 'a', state: 'ready', cmd: 'llama-server -m /models/a.gguf' }] }),
+          { status: 200 }
+        );
+      }
+      if (url.pathname === '/props') return new Response(JSON.stringify({ n_ctx: 8192 }), { status: 200 });
+      throw new Error(`unexpected request: ${url.href}`);
+    });
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toEqual({ a: 8192 });
+  });
+
+  it('also recognizes a plain -c/--ctx-size flag, not just llama-swap’s own --fit-ctx', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(JSON.stringify({ data: [{ id: 'a', status: { value: 'loaded' } }] }), { status: 200 });
+      }
+      if (url.pathname === '/running') {
+        return new Response(
+          JSON.stringify({
+            running: [{ model: 'a', state: 'ready', cmd: 'llama-server -m /models/a.gguf --ctx-size 8192' }],
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected request: ${url.href}`); // /props must never be reached
+    });
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelContextLengths).toEqual({ a: 8192 });
+  });
 });
 
 describe('refreshAllCustomModelHosts: model-size enrichment (parsed from /v1/models description)', () => {

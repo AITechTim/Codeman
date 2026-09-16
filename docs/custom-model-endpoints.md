@@ -67,9 +67,8 @@ Endpoint management is admin-only in multi-user mode, same as remote/docker
 hosts — these are machine-level infra, not per-user settings.
 
 **Context length is discovered too, opportunistically and safely.** The plain
-`GET /v1/models` response has no context-window field, but llama.cpp's
-llama-swap-proxied `GET /props?model=<id>` does (`n_ctx`). Discovery only ever
-calls it for a model llama-swap's own response already reports
+`GET /v1/models` response has no context-window field. Discovery only ever
+looks for one for a model llama-swap's own response already reports
 `status.value === "loaded"` for — never for an unloaded one, because
 llama-swap treats `?model=` as a routing hint and asking about a model that
 isn't loaded risks triggering an actual (slow, GPU-swapping) load as a side
@@ -82,6 +81,20 @@ disappears from the endpoint's list entirely. Stored per model in
 session" below) so a CLI that would otherwise assume a large default context
 window for an unrecognized model id stops silently overflowing a much
 smaller real one.
+
+**Where that number actually comes from matters, and got this wrong once
+already.** The first cut read it from llama.cpp's own
+`GET /props?model=<id>` (`n_ctx`) — plausible, and it worked in testing, but
+confirmed live to be actively WRONG for a `--fit-ctx`-launched llama-swap
+backend: `/props` reported `n_ctx: 154112` for a model llama-swap itself had
+launched with `--fit-ctx 16384`, and the real server then refused a request
+right at that real 16384-token limit — `/props`'s `n_ctx` appears to report
+the model's theoretical/trained maximum there, not the runtime-configured
+one. Discovery now parses the REAL configured size straight out of
+llama-swap's own launch command instead (`GET /running`'s `cmd` field —
+`--fit-ctx <N>` first, then the plain llama.cpp `-c`/`--ctx-size` a
+hand-written command might use), and only falls back to the `/props` probe
+when `cmd` states no recognizable flag at all.
 
 **File size is discovered too, when the server states one.** llama-swap
 writes a GB figure into an auto-discovered model's own `description`
