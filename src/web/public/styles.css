@@ -6803,6 +6803,28 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   min-height: 0;
 }
 
+/* Custom Model Endpoint Profiles' "which model" picker: same bounded-height +
+   scrollable-body shape as .modal-lg above, scoped by id rather than added to
+   .modal-sm itself (three other modals share that class for short, fixed
+   content and do not need a height cap). Without this the modal had no
+   max-height at all, so an endpoint with many discovered models grew the
+   dialog past the viewport with nothing to scroll — "the whole page" and
+   "the list is truncated" turned out to be one and the same bug. `min(70vh,
+   520px)` scales with the monitor (a phone gets 70% of its height, a 4K
+   display never gets a needlessly tall dialog) rather than a fixed value
+   that would be wrong at one end or the other. */
+#customModelPickModal .modal-content {
+  max-height: min(70vh, 520px);
+  display: flex;
+  flex-direction: column;
+}
+
+#customModelPickModal .modal-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
 
 /* Mobile Case Picker - Base Styles */
 .mobile-case-picker-sheet {
