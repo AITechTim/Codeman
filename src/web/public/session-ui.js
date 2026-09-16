@@ -579,8 +579,9 @@ Object.assign(CodemanApp.prototype, {
 
     const rows = [];
     for (const host of hosts) {
-      const modelId = host.defaultModelId || (host.models || [])[0];
-      if (!modelId) continue; // nothing discovered yet — the settings panel explains why
+      const models = host.models || [];
+      if (models.length === 0) continue; // nothing discovered yet — the settings panel explains why
+      const modelId = host.defaultModelId || models[0];
       for (const cli of capableClis) {
         // escapeHtml(JSON.stringify(...)) on EVERY arg, not just the untrusted
         // one: JSON.stringify's own double quotes would otherwise terminate this
@@ -589,11 +590,11 @@ Object.assign(CodemanApp.prototype, {
         // modelId (server-controlled, from the endpoint's own /v1/models reply,
         // not this box's) into markup instead of inert data. Same idiom as
         // deleteCase's onclick a few hundred lines down.
-        const args = [cli.id, host.id, modelId].map((v) => escapeHtml(JSON.stringify(v))).join(', ');
+        const args = [cli.id, host.id].map((v) => escapeHtml(JSON.stringify(v))).join(', ');
         rows.push(`
           <button class="run-mode-option" data-mode="${escapeHtml(cli.id)}" data-endpoint="${escapeHtml(host.id)}"
-                  onclick="app.runCustomModelEntry(${args})"
-                  title="${escapeHtml(cli.label)} → ${escapeHtml(host.baseUrl)} (${escapeHtml(modelId)})">
+                  onclick="app.selectCustomModelEntry(${args})"
+                  title="${escapeHtml(cli.label)} → ${escapeHtml(host.baseUrl)} (${escapeHtml(modelId)}${models.length > 1 ? `, +${models.length - 1} more` : ''})">
             <span class="run-mode-dot ${escapeHtml(cli.id)}"></span>${escapeHtml(cli.label)} (${escapeHtml(host.label)})
           </button>`);
       }
@@ -602,6 +603,76 @@ Object.assign(CodemanApp.prototype, {
     if (sep) sep.style.display = '';
     if (header) header.style.display = '';
     container.innerHTML = rows.join('');
+  },
+
+  /**
+   * Decides whether picking a Run-menu Custom Endpoint entry can launch
+   * straight away or needs to ask which model first. Re-fetches the endpoint
+   * rather than trusting anything cached from the menu render: the models
+   * list (or the default) could have changed — a re-discovery cycle running
+   * every 5 minutes in the background, or an edit in the settings panel —
+   * between opening the dropdown and clicking a row.
+   */
+  async selectCustomModelEntry(mode, endpointId) {
+    document.getElementById('runModeMenu')?.classList.remove('active');
+    const hosts = await this._apiJson('/api/model-endpoints');
+    const host = (hosts || []).find((h) => h.id === endpointId);
+    if (!host) {
+      this.showToast('That endpoint no longer exists', 'error');
+      return;
+    }
+    const models = host.models || [];
+    if (models.length === 0) {
+      this.showToast('No models discovered for this endpoint yet', 'warning');
+      return;
+    }
+    // Exactly one model: nothing to choose, so asking would just be an extra
+    // click for the same answer every time. Two or more: always ask, even
+    // with a defaultModelId set — the point of asking is letting THIS launch
+    // differ from the default, not just confirming it.
+    if (models.length === 1) {
+      return this.runCustomModelEntry(mode, endpointId, models[0]);
+    }
+    this._openCustomModelPickModal(mode, host);
+  },
+
+  /** Renders the "which model" picker for a (harness, endpoint) pair with more than one discovered model. */
+  _openCustomModelPickModal(mode, host) {
+    const modal = document.getElementById('customModelPickModal');
+    const list = document.getElementById('customModelPickList');
+    if (!modal || !list) return;
+    this._pendingCustomModelPick = { mode, endpointId: host.id };
+    const cliLabel = (window.__codemanCustomModelClis || []).find((c) => c.id === mode)?.label || mode;
+    // A static title (translatable by i18n.js's exact-string walker) plus a
+    // dynamic hint carrying the specifics — same split webviewModalTitle uses,
+    // since the walker cannot i18n a string a variable is already spliced into.
+    document.getElementById('customModelPickTitle').textContent = 'Choose a model';
+    document.getElementById('customModelPickHint').textContent =
+      `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
+    list.innerHTML = (host.models || [])
+      .map((m) => {
+        const isDefault = m === host.defaultModelId;
+        const arg = escapeHtml(JSON.stringify(m));
+        return `
+          <button class="run-mode-option" onclick="app.chooseCustomModelAndRun(${arg})">
+            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${isDefault ? ' <span class="set-scope">Default</span>' : ''}
+          </button>`;
+      })
+      .join('');
+    modal.classList.add('active');
+  },
+
+  closeCustomModelPickModal() {
+    document.getElementById('customModelPickModal')?.classList.remove('active');
+    this._pendingCustomModelPick = null;
+  },
+
+  /** A model row in the picker modal was clicked: close it and launch with that choice. */
+  chooseCustomModelAndRun(modelId) {
+    const pending = this._pendingCustomModelPick;
+    this.closeCustomModelPickModal();
+    if (!pending) return; // modal reopened/closed from elsewhere between render and click
+    void this.runCustomModelEntry(pending.mode, pending.endpointId, modelId);
   },
 
   /**

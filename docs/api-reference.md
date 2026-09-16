@@ -551,7 +551,11 @@ user guide: [`custom-model-endpoints.md`](custom-model-endpoints.md).
   `lastDiscoveredAt`. A `defaultModelId` that no longer appears in the fresh
   list is dropped rather than carried forward invalid. Failures answer
   `502 OPERATION_FAILED` with the underlying connection error, or a named
-  egress refusal if the resolved address turned out to be blocked.
+  egress refusal if the resolved address turned out to be blocked. The same
+  refresh also runs automatically for every saved endpoint every 5 minutes
+  in the background (`refreshAllCustomModelHosts()`, `custom-model-routes.ts`,
+  started from `server.ts`), so there is no route for triggering "refresh
+  all" — one endpoint being unreachable on a cycle never blocks the others.
 - `POST /api/v1/sessions/:id/custom-model` with `{ endpointId, modelId } |
   { clear: true }` applies (or clears) the session's selection and
   **restarts the session's CLI process in place** — every supported harness

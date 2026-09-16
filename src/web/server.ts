@@ -190,6 +190,7 @@ import {
   registerWebviewRoutes,
   registerTabLayoutRoutes,
   registerCustomModelRoutes,
+  refreshAllCustomModelHosts,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { isLostWebviewFrameNavigation } from './webview-proxy.js';
@@ -202,6 +203,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // while capping growth of `sseClientsById` and blocking pathological inputs.
 const SSE_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const CODEX_USAGE_POLL_INTERVAL_MS = 5 * 60_000;
+const CUSTOM_MODEL_REDISCOVER_INTERVAL_MS = 5 * 60_000;
 
 function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -2732,6 +2734,25 @@ export class WebServer extends EventEmitter {
       this.cleanup.setInterval(() => void this.refreshCodexPlanUsage(), CODEX_USAGE_POLL_INTERVAL_MS, {
         description: 'Codex plan-usage refresh',
       });
+    }
+
+    // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): keeps
+    // each saved endpoint's discovered model list current with no manual
+    // "Discover" click, so a model added on the server side (or one that drops
+    // off) shows up in the Run-menu picker within one cycle. Best-effort per
+    // endpoint (refreshAllCustomModelHosts skips one that's unreachable rather
+    // than failing the sweep) and off in tests for the same reason the Codex
+    // poll above is — no real network to hit, no server instance to keep alive.
+    if (!this.testMode) {
+      this.cleanup.setInterval(
+        () => {
+          refreshAllCustomModelHosts().catch((err) => {
+            console.error('[custom-model] periodic re-discovery failed:', getErrorMessage(err));
+          });
+        },
+        CUSTOM_MODEL_REDISCOVER_INTERVAL_MS,
+        { description: 'custom model endpoint re-discovery' }
+      );
     }
 
     // Start scheduled runs cleanup timer

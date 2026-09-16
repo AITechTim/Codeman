@@ -16,20 +16,32 @@ Still in App Settings → Models → Custom model endpoints:
    say). An API key is optional; most local servers don't check one.
 2. **Discover** — fetches the endpoint's own model list over `GET /v1/models` and stores it.
 3. Pick a **default model** from what was discovered. This is the model the Run-menu entry
-   below applies with no further choice, so set it once you know which one you want.
+   applies directly when only one model is discovered; with two or more, it's just the one
+   pre-marked in the picker dialog described below, not a silent default.
 
 Endpoint management is admin-only in multi-user mode, the same as remote hosts and Docker
 hosts — these are machine-level infra, not a per-user setting.
 
+**Model lists refresh themselves.** Every saved endpoint is re-discovered automatically every
+5 minutes in the background, so a model the server starts serving later — or stops serving —
+shows up without another manual click of **Discover**. One endpoint being unreachable on a
+given cycle (powered off, wrong network) never blocks the others from refreshing.
+
 ## Running a session against one
 
-With the setting on and at least one endpoint carrying a usable default model, the **Run**
+With the setting on and at least one endpoint carrying a discovered model, the **Run**
 dropdown grows a **Custom Endpoints** section: one entry per harness that can redirect to a
 custom endpoint, per saved endpoint, e.g. "Claude Code (llama.cpp)". Picking one starts a
-session on that harness exactly the way its own entry would, then points it at the
-endpoint's default model. It is a one-off "try this endpoint" action, not a sticky mode — the
-plain **Run** button still means "this harness, native cloud" afterward, and a fresh session
-never inherits whatever the last one was pointed at.
+session on that harness exactly the way its own entry would. It is a one-off "try this
+endpoint" action, not a sticky mode — the plain **Run** button still means "this harness,
+native cloud" afterward, and a fresh session never inherits whatever the last one was
+pointed at.
+
+**Which model it uses depends on how many the endpoint has discovered.** With exactly one,
+the session launches straight away on that model — nothing to choose. With two or more, a
+small dialog asks which one to use for this launch before starting the session; the
+endpoint's default model, if set, is marked but not auto-picked, so a launch can deliberately
+use a different one without changing the saved default.
 
 Applying a selection **restarts the harness's process in place** — same tab, same
 conversation where the harness supports resuming one, fresh environment. That restart is

@@ -107,6 +107,51 @@ function describeFetchError(err: unknown): string {
 
 type RedactedHost = ReturnType<typeof redactApiKey>;
 
+/**
+ * Merges a fresh `GET /v1/models` result into a host record: stamps
+ * `lastDiscoveredAt`, and drops `defaultModelId` if it no longer appears in
+ * the fresh list (it would otherwise leave the Run-menu picker applying a
+ * model id the endpoint just told us it doesn't serve). Pure — no IO, so the
+ * manual route (which reports a fetch failure's *reason* to the caller) and
+ * the periodic sweep below (which only cares whether it can move on) can
+ * each do their own `discoverModels()` + error handling around one shared
+ * "how to apply a successful result" step.
+ */
+function applyDiscoveredModels(host: CustomModelHost, models: string[]): CustomModelHost {
+  const defaultModelId = host.defaultModelId && models.includes(host.defaultModelId) ? host.defaultModelId : undefined;
+  return { ...host, models, defaultModelId, lastDiscoveredAt: new Date().toISOString() };
+}
+
+/**
+ * Re-discovers every saved endpoint's models, best-effort. One endpoint being
+ * unreachable (powered off, wrong network) must not stop the others from
+ * refreshing, and a read-modify-write per host (rather than one batch write
+ * at the end) means a crash or restart mid-sweep loses at most the endpoints
+ * not yet reached, never a write already applied. Exported so both the
+ * periodic timer (server.ts) and a test can drive it directly.
+ */
+export async function refreshAllCustomModelHosts(): Promise<void> {
+  const dataDir = getDataDir();
+  const hosts = await readCustomModelHosts(dataDir);
+  for (const host of hosts) {
+    if (isBlockedWebviewUrl(host.baseUrl)) continue;
+    let models: string[];
+    try {
+      models = await discoverModels(host);
+    } catch {
+      continue; // unreachable this cycle — try again next tick, not fatal to the sweep
+    }
+    // Re-read + splice by id rather than reusing the array captured above: an
+    // admin editing or deleting an endpoint via the API mid-sweep must win,
+    // not be silently overwritten by a refresh that started before their change.
+    const current = await readCustomModelHosts(dataDir);
+    const index = current.findIndex((item) => item.id === host.id);
+    if (index === -1) continue; // deleted mid-sweep
+    current[index] = applyDiscoveredModels(current[index], models);
+    await writeCustomModelHosts(dataDir, current);
+  }
+}
+
 export function registerCustomModelRoutes(app: FastifyInstance): void {
   app.get('/api/model-endpoints', async (req): Promise<RedactedHost[]> => {
     if (isMultiUserMode() && !isAdmin(req)) return [];
@@ -179,12 +224,7 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
       try {
         const models = await discoverModels(host);
         const next = [...hosts];
-        // A default that no longer appears in the fresh list would leave the Run-menu
-        // picker applying a model id the endpoint just told us it doesn't serve; drop
-        // it rather than carry it forward silently invalid.
-        const defaultModelId =
-          host.defaultModelId && models.includes(host.defaultModelId) ? host.defaultModelId : undefined;
-        next[index] = { ...host, models, defaultModelId, lastDiscoveredAt: new Date().toISOString() };
+        next[index] = applyDiscoveredModels(host, models);
         await writeCustomModelHosts(CODEMAN_CONFIG_DIR, next);
         return { success: true, data: { models } };
       } catch (err) {

@@ -49,6 +49,11 @@ function bootApp(
         <div id="runModeCustomModelHeader" style="display:none"></div>
         <div id="runModeCustomModels"></div>
       </div>
+      <div class="modal" id="customModelPickModal">
+        <h3 id="customModelPickTitle"></h3>
+        <p id="customModelPickHint"></p>
+        <div id="customModelPickList"></div>
+      </div>
     </body>`,
     { url: 'http://localhost/', runScripts: 'dangerously' }
   );
@@ -68,6 +73,10 @@ function bootApp(
   app.loadAppSettingsFromStorage = () => ({ customModelEndpointsEnabled: options.settingsEnabled ?? true });
   app.isCliAvailable = options.cliAvailable ?? (() => true);
   app.showToast = () => {};
+  // Default no-op so a button's onclick (selectCustomModelEntry -> possibly
+  // straight to runCustomModelEntry for a single-model host) never rejects
+  // with "this.run is not a function"; tests of the launch itself override it.
+  app.run = async () => {};
   // _apiJson unwraps the {success,data} envelope for real against a live
   // server; here it stands in for that, driven from a fixed `hosts` fixture
   // so these tests exercise the picker's OWN code, not the envelope helper.
@@ -169,6 +178,122 @@ describe('Custom Model Endpoint Profiles: Run-menu picker generation', () => {
     expect(container.querySelectorAll('button').length).toBe(1);
     expect(container.textContent).toContain('Claude Code');
     expect(container.textContent).not.toContain('Codex');
+  });
+});
+
+describe('Custom Model Endpoint Profiles: the "which model" picker', () => {
+  it('launches straight away for a host with exactly one discovered model, no dialog', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://localhost:8080', models: ['qwen3'] }],
+    });
+    let launched: unknown[] | null = null;
+    app.runCustomModelEntry = async (...args: unknown[]) => {
+      launched = args;
+    };
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    expect(launched).toEqual(['claude', 'llama-box', 'qwen3']);
+    expect(win.document.getElementById('customModelPickModal')!.classList.contains('active')).toBe(false);
+  });
+
+  it('opens the picker for a host with more than one discovered model, rather than launching directly', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://localhost:8080', models: ['qwen3', 'llama3'] }],
+    });
+    let launched = false;
+    app.runCustomModelEntry = async () => {
+      launched = true;
+    };
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    expect(launched).toBe(false);
+    const modal = win.document.getElementById('customModelPickModal')!;
+    expect(modal.classList.contains('active')).toBe(true);
+    const list = win.document.getElementById('customModelPickList')!;
+    expect(list.querySelectorAll('button').length).toBe(2);
+    expect(list.textContent).toContain('qwen3');
+    expect(list.textContent).toContain('llama3');
+  });
+
+  it('always asks with 2+ models, even when a defaultModelId is set — the point is letting this launch differ', async () => {
+    const { win, app } = bootApp({
+      hosts: [
+        {
+          id: 'llama-box',
+          label: 'llama.cpp',
+          baseUrl: 'http://localhost:8080',
+          models: ['qwen3', 'llama3'],
+          defaultModelId: 'qwen3',
+        },
+      ],
+    });
+    await app.selectCustomModelEntry('claude', 'llama-box');
+    const modal = win.document.getElementById('customModelPickModal')!;
+    expect(modal.classList.contains('active')).toBe(true);
+    // The default is marked, not auto-chosen.
+    expect(win.document.getElementById('customModelPickList')!.textContent).toContain('Default');
+  });
+
+  it('picking a row in the modal closes it and launches with that exact model', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://localhost:8080', models: ['qwen3', 'llama3'] }],
+    });
+    let launched: unknown[] | null = null;
+    app.runCustomModelEntry = async (...args: unknown[]) => {
+      launched = args;
+    };
+    win.app = app;
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+    const buttons = win.document.getElementById('customModelPickList')!.querySelectorAll('button');
+    const llama3Btn = [...buttons].find((b) => b.textContent?.includes('llama3')) as unknown as HTMLButtonElement & {
+      onclick: (e: unknown) => void;
+    };
+    expect(typeof llama3Btn.onclick).toBe('function');
+    llama3Btn.onclick(new (win as any).Event('click'));
+
+    expect(launched).toEqual(['claude', 'llama-box', 'llama3']);
+    expect(win.document.getElementById('customModelPickModal')!.classList.contains('active')).toBe(false);
+  });
+
+  it('re-fetches the endpoint at click time rather than trusting anything cached from the menu render', async () => {
+    // The background re-discovery sweep (server-side, every 5 minutes) or a
+    // settings-panel edit can change the model list between opening the
+    // dropdown and clicking a row — the picker must reflect what is current.
+    let fetchCount = 0;
+    const { win, app } = bootApp({});
+    app._apiJson = async (path: string) => {
+      if (path !== '/api/model-endpoints') return null;
+      fetchCount += 1;
+      return [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3', 'llama3', 'phi4'] }];
+    };
+    await app.selectCustomModelEntry('claude', 'llama-box');
+    expect(fetchCount).toBe(1);
+    expect(win.document.getElementById('customModelPickList')!.querySelectorAll('button').length).toBe(3);
+  });
+
+  it('toasts and does nothing when the endpoint has vanished by click time', async () => {
+    const { app } = bootApp({ hosts: [] });
+    let toastMessage: string | null = null;
+    app.showToast = (msg: string) => {
+      toastMessage = msg;
+    };
+    await app.selectCustomModelEntry('claude', 'ghost-endpoint');
+    expect(toastMessage).toMatch(/no longer exists/i);
+  });
+
+  it('toasts and does nothing when the endpoint has zero discovered models by click time', async () => {
+    const { app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: [] }],
+    });
+    let toastMessage: string | null = null;
+    app.showToast = (msg: string) => {
+      toastMessage = msg;
+    };
+    await app.selectCustomModelEntry('claude', 'llama-box');
+    expect(toastMessage).toMatch(/no models discovered/i);
   });
 });
 

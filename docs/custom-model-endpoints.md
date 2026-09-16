@@ -66,18 +66,26 @@ configured, `PUT`/`DELETE /api/model-endpoints/:id` update or remove one.
 Endpoint management is admin-only in multi-user mode, same as remote/docker
 hosts — these are machine-level infra, not per-user settings.
 
-`defaultModelId` names which discovered model the Run-menu picker applies
-for that endpoint with no further choice — the settings panel's Edit form
-exposes it as a select populated from the endpoint's own discovered
-`models`, and the route refuses a value that isn't one of them. Leaving it
-unset falls back to the first discovered model; re-discovering drops a
-default that no longer appears in the fresh list rather than carrying an
-invalid one forward.
+`defaultModelId` names which discovered model the picker pre-marks for that
+endpoint — the settings panel's Edit form exposes it as a select populated
+from the endpoint's own discovered `models`, and the route refuses a value
+that isn't one of them. It is applied automatically only when the endpoint
+has exactly one discovered model (nothing to choose); with two or more it
+is a pre-selection in the model-picker dialog below, never a silent default.
+Re-discovering drops a default that no longer appears in the fresh list
+rather than carrying an invalid one forward.
+
+**Model lists refresh themselves.** A background sweep (`server.ts`,
+`CUSTOM_MODEL_REDISCOVER_INTERVAL_MS`, every 5 minutes) re-discovers every
+saved endpoint the same way the manual `POST .../discover-models` route
+does, best-effort per endpoint — one being unreachable on a given cycle
+never blocks the others. Off under `npm test`, same reasoning as the Codex
+plan-usage poll it sits beside: no real network to hit, no server instance
+to keep the timer alive for.
 
 ## The Run-menu picker
 
-With the setting on and at least one endpoint carrying a usable default
-model (either an explicit `defaultModelId` or just one discovered model),
+With the setting on and at least one endpoint carrying a discovered model,
 the toolbar's Run dropdown grows a **Custom Endpoints** section: one entry
 per (harness that can redirect to a custom endpoint, saved endpoint) pair,
 e.g. "Claude Code (llama.cpp)". The harness list is read off the CLI
@@ -86,13 +94,22 @@ registry's own `capabilities.customModelInjection` at page render
 in the frontend — so a CLI whose injection recipe lands later shows up with
 no frontend change, and Antigravity (`unsupported`) never does.
 
-Picking an entry runs a single session on that harness exactly the way its
+Picking an entry re-fetches the endpoint (`selectCustomModelEntry()`,
+`session-ui.js`) rather than trusting anything cached from the dropdown's
+own render — the model list can have changed via the 5-minute sweep above
+or a settings-panel edit since the menu opened. With exactly one discovered
+model it runs straight away; with two or more, a small modal
+(`#customModelPickModal`) lists them and asks which one to use for this
+launch, with the endpoint's `defaultModelId` marked but not auto-chosen —
+the point of asking is letting one launch deliberately differ from the
+saved default, not just confirming it. Whichever way the model was decided,
+the launch itself runs a single session on that harness exactly the way its
 own Run-menu entry would (same case creation, env overrides, everything),
-then immediately applies the endpoint's default model to it via the route
-below. It is a one-off "try this endpoint" action, not a sticky mode: the
-plain Run button still means "this harness, native cloud" afterward.
-Entries are hidden entirely for a remote or Docker active case, since the
-apply route refuses both (see the next section).
+then immediately applies the endpoint and model to it via the route below.
+It is a one-off "try this endpoint" action, not a sticky mode: the plain
+Run button still means "this harness, native cloud" afterward. Entries are
+hidden entirely for a remote or Docker active case, since the apply route
+refuses both (see the next section).
 
 ## Applying a model to a session
 
