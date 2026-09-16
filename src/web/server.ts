@@ -3010,26 +3010,42 @@ export class WebServer extends EventEmitter {
     if (!session) return;
     this.sessions.delete(sessionId);
 
-    // --- the inverse of setupSessionListeners(), in its order ---
-    const summaryTracker = this.runSummaryTrackers.get(sessionId);
-    if (summaryTracker) {
-      summaryTracker.stop();
-      this.runSummaryTrackers.delete(sessionId);
-    }
-    // An fs.watch on the workspace (or on @fix_plan.md) that nothing else closes.
-    session.ralphTracker.stopWatchingFixPlan();
-    // An FSWatcher on the workspace, likewise.
-    imageWatcher.unwatchSession(sessionId);
+    // --- the inverse of setupSessionListeners(), in reverse order ---
+    // Listeners first: while they are attached, one of them can still reach a
+    // tracker this is about to stop.
     const listeners = this.sessionListenerRefs.get(sessionId);
     if (listeners) {
       detachSessionListeners(session, listeners);
       this.sessionListenerRefs.delete(sessionId);
     }
+    // An FSWatcher on the workspace that nothing else closes.
+    imageWatcher.unwatchSession(sessionId);
+    // An fs.watch on the workspace (or on @fix_plan.md), likewise.
+    session.ralphTracker.stopWatchingFixPlan();
+    const summaryTracker = this.runSummaryTrackers.get(sessionId);
+    if (summaryTracker) {
+      summaryTracker.stop();
+      this.runSummaryTrackers.delete(sessionId);
+    }
+
+    // --- what anything else may have attached to this id in the meantime ---
+    // A rebuild can fail AFTER startInteractive() resolved, and a restored
+    // workspace still carries Codeman's hooks, so the CLI can post a hook event
+    // within milliseconds. Each of these outlives the listeners and would
+    // otherwise meet the retry, which reuses the same session id by design.
+    this.stopTranscriptWatcher(sessionId);
+    attachmentRegistry.clearSession(sessionId);
+    sessionWaits.notifySignal(sessionId, 'exit');
+    sessionWaits.cancelAll(sessionId);
+    approvalInbox.resolveForSession(sessionId, 'session_ended');
 
     // --- the inverse of the construction itself ---
     this.sse.cleanupSessionBatches(sessionId);
     this.persistDeb.cancelKey(sessionId);
     fileStreamManager.closeSessionStreams(sessionId);
+    // `lastRecordedTokens` is deliberately NOT deleted: the `after-spawn` phase
+    // seeds it as the daily-usage baseline for these restored totals, and the
+    // retry reuses the id, so dropping it would count them as new usage.
     // The per-session custom-model config dir carries the endpoint's API key, and
     // `before-spawn` may already have written it. Nothing else would ever remove
     // it: the stale sweep only touches state.json. A retry rewrites it.
@@ -3039,6 +3055,9 @@ export class WebServer extends EventEmitter {
       await session.stop(true);
     } catch (err) {
       console.warn(`[Server] stopping a partially built session failed: ${getErrorMessage(err)}`);
+      // `stop()` kills the mux session in its last block, after destroying its
+      // trackers, so a throw on the way there leaves the pane running.
+      await this.mux.killSession(sessionId).catch(() => {});
     }
     try {
       await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);

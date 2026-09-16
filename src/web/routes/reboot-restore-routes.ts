@@ -92,8 +92,7 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
     if (!rebootRestoreRegistry.beginSpending(owner)) {
       return reply.code(409).send(createErrorResponse(ApiErrorCode.CONFLICT, 'A reboot restore is already running'));
     }
-    const taken = rebootRestoreRegistry.take(canAccess, body.sessionIds);
-    const generations = rebootRestoreRegistry.snapshotGenerations(taken);
+    const taken = rebootRestoreRegistry.take(canAccess, body.sessionIds, owner);
     // Entries nothing built a pane for, returned to the plan on every exit path
     // including a throw. Without this a failure between here and the loop would
     // spend the offer and rebuild nothing, and the plan cannot be rebuilt.
@@ -252,9 +251,9 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
     } finally {
       // Anything that never became a pane goes back on offer, including after a
       // throw, so a transient failure costs a retry rather than the whole plan.
-      // Passing the generations makes a Dismiss that landed mid-restore win, for
-      // the owners it actually covered.
-      rebootRestoreRegistry.restore([...unspent], generations);
+      // Ends the flight: entries still parked for it come back if they are in
+      // `unspent`, and a Dismiss that unparked them meanwhile wins.
+      rebootRestoreRegistry.releaseFlight(owner, [...unspent]);
       rebootRestoreRegistry.endSpending(owner);
     }
   });

@@ -48,16 +48,18 @@ export class RebootRestoreRegistry {
   /** When the boot pass built the plan, in ms since the epoch. */
   private builtAt = 0;
   /**
-   * Per owner, bumped by anything that invalidates that owner's entries while a
-   * restore is already holding them. A Dismiss arriving mid-restore must win:
-   * without this the route's `finally` would put its unspent entries back and
-   * resurrect the offer the user just cleared, with a fresh 24-hour life.
+   * Entries handed to a restore that has not finished, by session id, each
+   * remembering which caller is spending it.
    *
-   * Keyed by owner rather than global, because `clear()` is ownership-scoped. A
-   * single counter would let one user's Dismiss discard another user's unspent
-   * entries, and the plan is in-memory, so those offers would be gone for good.
+   * A taken entry is still part of the offer until its restore resolves it, so
+   * it has to stay reachable by everything that can invalidate an offer. Holding
+   * the entries themselves — rather than a counter to compare against later —
+   * means `clear()` filters them by the SAME `canAccess(entry.owner)` predicate
+   * it already applies to the plan. A counter cannot do that, because the caller
+   * spending an entry need not be its owner: an admin may restore another user's
+   * sessions, and then the spender and the owner are different keys.
    */
-  private generations = new Map<string | undefined, number>();
+  private parked = new Map<string, { entry: RebootRestoreEntry; spender: string | undefined }>();
   /**
    * Owners with a restore in flight, between its take and its last pane.
    * Keyed by owner so one user's restore does not turn another user's click into
@@ -70,17 +72,8 @@ export class RebootRestoreRegistry {
   set(entries: readonly RebootRestoreEntry[]): void {
     this.entries = new Map(entries.map((entry) => [entry.sessionId, entry]));
     this.builtAt = entries.length > 0 ? Date.now() : 0;
-    this.bumpAll();
-  }
-
-  /**
-   * The generations of the owners of `entries`, for a caller that will hand some
-   * of them back later. Pass the result to {@link restore}.
-   */
-  snapshotGenerations(entries: readonly RebootRestoreEntry[]): Map<string | undefined, number> {
-    const snapshot = new Map<string | undefined, number>();
-    for (const entry of entries) snapshot.set(entry.owner, this.generations.get(entry.owner) ?? 0);
-    return snapshot;
+    // A fresh boot plan supersedes anything an in-flight restore still holds.
+    this.parked.clear();
   }
 
   /**
@@ -104,7 +97,11 @@ export class RebootRestoreRegistry {
    *
    * @param sessionIds The ids to spend, or undefined for every visible entry.
    */
-  take(canAccess: (owner: string | undefined) => boolean, sessionIds?: readonly string[]): RebootRestoreEntry[] {
+  take(
+    canAccess: (owner: string | undefined) => boolean,
+    sessionIds: readonly string[] | undefined,
+    spender: string | undefined
+  ): RebootRestoreEntry[] {
     this.dropIfExpired();
     const wanted = sessionIds ? new Set(sessionIds) : undefined;
     const taken: RebootRestoreEntry[] = [];
@@ -112,6 +109,9 @@ export class RebootRestoreRegistry {
       if (wanted && !wanted.has(entry.sessionId)) continue;
       if (!canAccess(entry.owner)) continue;
       this.entries.delete(entry.sessionId);
+      // Parked rather than forgotten: until this restore resolves the entry, a
+      // dismiss still has to be able to reach and cancel it.
+      this.parked.set(entry.sessionId, { entry, spender });
       taken.push(entry);
     }
     return taken;
@@ -126,18 +126,19 @@ export class RebootRestoreRegistry {
    * hand is NOT put back, because that one cannot stop being true, and an entry
    * the banner keeps re-offering forever is noise only Dismiss can clear.
    */
-  restore(entries: readonly RebootRestoreEntry[], generations?: ReadonlyMap<string | undefined, number>): void {
+  releaseFlight(spender: string | undefined, keep: readonly RebootRestoreEntry[]): void {
+    const wanted = new Set(keep.map((entry) => entry.sessionId));
     let added = 0;
-    for (const entry of entries) {
-      // A dismiss (or a fresh boot plan) for THIS entry's owner since the caller
-      // took it means it is no longer wanted back. Another owner's dismiss is
-      // none of this entry's business.
-      if (generations) {
-        const taken = generations.get(entry.owner);
-        if (taken !== undefined && taken !== (this.generations.get(entry.owner) ?? 0)) continue;
+    for (const [sessionId, held] of [...this.parked]) {
+      if (held.spender !== spender) continue;
+      this.parked.delete(sessionId);
+      // Still parked means nothing cancelled it while the restore ran. A dismiss,
+      // an expiry or a fresh boot plan removes it from `parked`, and then it does
+      // not come back however the restore ended.
+      if (wanted.has(sessionId)) {
+        this.entries.set(sessionId, held.entry);
+        added += 1;
       }
-      this.entries.set(entry.sessionId, entry);
-      added += 1;
     }
     if (added > 0 && this.builtAt === 0) this.builtAt = Date.now();
   }
@@ -146,16 +147,17 @@ export class RebootRestoreRegistry {
   clear(canAccess: (owner: string | undefined) => boolean): number {
     const removable = [...this.entries.values()].filter((entry) => canAccess(entry.owner));
     for (const entry of removable) this.entries.delete(entry.sessionId);
+    // Entries a restore is holding are dismissed by the same rule, so a dismiss
+    // that lands mid-restore wins. Judged on the ENTRY's owner, exactly as above,
+    // rather than on who happens to be restoring it.
+    let parkedRemoved = 0;
+    for (const [sessionId, held] of [...this.parked]) {
+      if (!canAccess(held.entry.owner)) continue;
+      this.parked.delete(sessionId);
+      parkedRemoved += 1;
+    }
     if (this.entries.size === 0) this.builtAt = 0;
-    // A restore in flight for these owners must not put their entries back. The
-    // in-flight owners are the ones that matter and the ones the plan can no
-    // longer name: `take()` has already removed their entries, so a dismiss that
-    // lands mid-restore sees nothing of theirs to remove. The bump is limited to
-    // owners this caller could see, so it cannot reach anyone else's restore.
-    const invalidated = new Set(removable.map((entry) => entry.owner));
-    for (const owner of this.spending) if (canAccess(owner)) invalidated.add(owner);
-    for (const owner of invalidated) this.bump(owner);
-    return removable.length;
+    return removable.length + parkedRemoved;
   }
 
   /**
@@ -176,27 +178,16 @@ export class RebootRestoreRegistry {
   /** Test hook: forget everything, including the single-flight claim. */
   reset(): void {
     this.entries.clear();
+    this.parked.clear();
     this.builtAt = 0;
     this.spending.clear();
-    this.generations.clear();
-  }
-
-  private bump(owner: string | undefined): void {
-    this.generations.set(owner, (this.generations.get(owner) ?? 0) + 1);
-  }
-
-  /** Invalidate every owner's in-flight returns, including owners not yet seen. */
-  private bumpAll(): void {
-    for (const owner of new Set([...this.entries.values()].map((entry) => entry.owner))) this.bump(owner);
-    for (const owner of [...this.generations.keys()]) this.bump(owner);
   }
 
   private dropIfExpired(): void {
     if (this.builtAt > 0 && Date.now() - this.builtAt > PLAN_TTL_MS) {
-      // Bump before clearing, while the owners are still known: a restore that
-      // took entries just before the expiry must not hand them back afterwards
-      // and give an expired plan another full day of life.
-      this.bumpAll();
+      // A restore that took entries just before the expiry must not hand them
+      // back afterwards and give an expired plan another full day of life.
+      this.parked.clear();
       this.entries.clear();
       this.builtAt = 0;
     }

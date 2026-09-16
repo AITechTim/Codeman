@@ -18,10 +18,11 @@
  * leaves that entry makes the next attempt wire nothing at all, and the user
  * gets a tab that never shows output.
  */
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { safeRmHomeTree } from './mocks/test-helpers.js';
 
 import { WebServer } from '../src/web/server.js';
 import { Session } from '../src/session.js';
@@ -55,9 +56,11 @@ function buildSession(): Session {
   });
 }
 
-beforeEach(() => {
+beforeAll(() => {
   mkdirSync(WORKSPACE, { recursive: true });
-  // Test mode: no port is opened and no CLI is launched.
+  // Test mode: no port is opened and no CLI is launched. One server for the file,
+  // stopped at the end: the constructor registers handlers on the module-level
+  // image, subagent, team and workflow watchers, and only stop() removes them.
   server = new WebServer(0, false, true);
   internals = server as unknown as ServerInternals;
   mux = new TmuxManager();
@@ -65,7 +68,11 @@ beforeEach(() => {
 
 afterEach(async () => {
   await internals.discardPartiallyBuiltSession(SESSION_ID).catch(() => {});
-  rmSync(WORKSPACE, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  await server.stop().catch(() => {});
+  safeRmHomeTree(WORKSPACE);
 });
 
 describe('discarding a session whose pane never started', () => {
@@ -85,25 +92,36 @@ describe('discarding a session whose pane never started', () => {
     await internals.setupSessionListeners(first);
     expect(internals.sessionListenerRefs.has(SESSION_ID)).toBe(true);
 
+    const firstRefs = internals.sessionListenerRefs.get(SESSION_ID);
     await internals.discardPartiallyBuiltSession(SESSION_ID);
     expect(internals.sessionListenerRefs.has(SESSION_ID)).toBe(false);
 
     // The retry reuses the id by design. `setupSessionListeners()` returns early
-    // while the refs are still there, so a session built now would run blind:
-    // no terminal output, no status updates, no exit broadcast.
+    // while the refs are still there, so a session built now would run blind: no
+    // terminal output, no status updates, no exit broadcast. Asserting a DIFFERENT
+    // refs object is what distinguishes wiring the retry from finding the corpse
+    // of the first attempt still in place.
     const retry = buildSession();
     await internals.registerSessionWithLayout(retry);
     await internals.setupSessionListeners(retry);
-    expect(internals.sessionListenerRefs.has(SESSION_ID)).toBe(true);
+    const retryRefs = internals.sessionListenerRefs.get(SESSION_ID);
+    expect(retryRefs).toBeDefined();
+    expect(retryRefs).not.toBe(firstRefs);
   });
 
   it('stops the run-summary tracker, whose interval would otherwise keep firing', async () => {
     const session = buildSession();
     await internals.registerSessionWithLayout(session);
     await internals.setupSessionListeners(session);
-    expect(internals.runSummaryTrackers.has(SESSION_ID)).toBe(true);
+    const tracker = internals.runSummaryTrackers.get(SESSION_ID) as { stop: () => void };
+    expect(tracker).toBeDefined();
+    // Dropping the map entry is not enough: the tracker arms a setInterval in its
+    // constructor, and only stop() clears it, so a discard that merely forgot the
+    // entry would leave the timer running for the life of the process.
+    const stopped = vi.spyOn(tracker, 'stop');
 
     await internals.discardPartiallyBuiltSession(SESSION_ID);
+    expect(stopped).toHaveBeenCalled();
     expect(internals.runSummaryTrackers.has(SESSION_ID)).toBe(false);
   });
 

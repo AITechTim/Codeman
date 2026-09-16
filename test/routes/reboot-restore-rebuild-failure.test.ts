@@ -183,12 +183,23 @@ describe('a rebuild that succeeds', () => {
         callOrder.push(`reapply:${phase}`);
       }
     );
+    (ctx.setupSessionListeners as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      callOrder.push('setupSessionListeners');
+    });
     const app = await createHarness(ctx);
 
     await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
-    // The custom-model environment has to reach the process; the token totals
-    // must not land on a session whose pane never started.
-    expect(callOrder).toEqual(['reapply:before-spawn', 'startInteractive', 'reapply:after-spawn']);
+    // `setupSessionListeners()` READS the image-watcher flag that `before-spawn`
+    // restores, so the phase has to precede it or the session comes back
+    // reporting the watcher as on with nothing watching. The custom-model
+    // environment has to reach the process, and the token totals must not land
+    // on a session whose pane never started.
+    expect(callOrder).toEqual([
+      'reapply:before-spawn',
+      'setupSessionListeners',
+      'startInteractive',
+      'reapply:after-spawn',
+    ]);
     await app.close();
   });
 
@@ -282,6 +293,32 @@ describe('a failure before any entry is considered', () => {
 });
 
 describe('a dismiss that lands while a restore is running', () => {
+  it('wins when an admin is restoring the entries and their owner dismisses', async () => {
+    const theirs = offerEntry('theirs', 'bob');
+    rebootRestoreRegistry.set([theirs]);
+    // An admin may spend another user's entries, so the caller doing the restore
+    // and the owner of what is being restored are different people.
+    const taken = rebootRestoreRegistry.take(() => true, undefined, 'admin');
+    expect(taken.map((e) => e.sessionId)).toEqual(['theirs']);
+
+    // Bob dismisses his own banner. Nothing of his is in the plan any more, and
+    // the restore is running under a different name than his.
+    rebootRestoreRegistry.clear((owner) => owner === 'bob');
+    rebootRestoreRegistry.releaseFlight('admin', taken);
+
+    expect(rebootRestoreRegistry.list(() => true)).toEqual([]);
+  });
+
+  it('wins when an admin dismisses everything mid-restore', async () => {
+    rebootRestoreRegistry.set([offerEntry('theirs', 'bob')]);
+    const taken = rebootRestoreRegistry.take(() => true, undefined, 'admin');
+
+    rebootRestoreRegistry.clear(() => true);
+    rebootRestoreRegistry.releaseFlight('admin', taken);
+
+    expect(rebootRestoreRegistry.list(() => true)).toEqual([]);
+  });
+
   it('wins, rather than being undone when the route hands its entries back', async () => {
     rebootRestoreRegistry.set([offerEntry('a')]);
     const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
@@ -304,15 +341,13 @@ describe('a dismiss that lands while a restore is running', () => {
   it('reaches an in-flight restore the dismisser can see, even once its entries are taken', async () => {
     const mine = offerEntry('mine', 'alice');
     rebootRestoreRegistry.set([mine]);
-    expect(rebootRestoreRegistry.beginSpending('alice')).toBe(true);
-    const generations = rebootRestoreRegistry.snapshotGenerations([mine]);
-    const taken = rebootRestoreRegistry.take((owner) => owner === 'alice');
+    const taken = rebootRestoreRegistry.take((owner) => owner === 'alice', undefined, 'alice');
+    expect(taken).toHaveLength(1);
 
-    // The plan is empty now, so a dismiss has nothing of Alice's to remove; the
-    // invalidation has to come from her claimed flight.
+    // The plan is empty now, so the dismiss has nothing of Alice's left in the
+    // plan; it has to reach the entry the restore is holding.
     rebootRestoreRegistry.clear((owner) => owner === 'alice');
-    rebootRestoreRegistry.restore(taken, generations);
-    rebootRestoreRegistry.endSpending('alice');
+    rebootRestoreRegistry.releaseFlight('alice', taken);
 
     expect(rebootRestoreRegistry.list(() => true)).toEqual([]);
   });
@@ -322,13 +357,8 @@ describe('a dismiss that lands while a restore is running', () => {
     const theirs = offerEntry('theirs', 'bob');
     rebootRestoreRegistry.set([mine, theirs]);
 
-    // Bob is mid-restore, holding his own entry. The claimed flight is what makes
-    // this the interesting case: a dismiss can no longer see Bob's entries in the
-    // plan, so the invalidation has to come from the in-flight set, filtered by
-    // what the dismissing user may access.
-    expect(rebootRestoreRegistry.beginSpending('bob')).toBe(true);
-    const bobsGenerations = rebootRestoreRegistry.snapshotGenerations([theirs]);
-    const bobsTaken = rebootRestoreRegistry.take((owner) => owner === 'bob');
+    // Bob is mid-restore, holding his own entry.
+    const bobsTaken = rebootRestoreRegistry.take((owner) => owner === 'bob', undefined, 'bob');
     expect(bobsTaken.map((e) => e.sessionId)).toEqual(['theirs']);
 
     // Alice dismisses her own banner meanwhile.
@@ -336,8 +366,7 @@ describe('a dismiss that lands while a restore is running', () => {
 
     // Bob's restore finishes and hands his entry back. Alice's dismiss covered
     // her entries, not his, so his offer survives.
-    rebootRestoreRegistry.restore(bobsTaken, bobsGenerations);
-    rebootRestoreRegistry.endSpending('bob');
+    rebootRestoreRegistry.releaseFlight('bob', bobsTaken);
     expect(rebootRestoreRegistry.list(() => true).map((e) => e.sessionId)).toEqual(['theirs']);
   });
 });

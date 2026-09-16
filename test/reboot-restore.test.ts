@@ -198,15 +198,15 @@ describe('the plan the banner spends', () => {
   it('hands an entry to the first caller and nothing to the second', () => {
     const registry = new RebootRestoreRegistry();
     registry.set([entryFor('a'), entryFor('b')]);
-    expect(registry.take(all).map((e) => e.sessionId)).toEqual(['a', 'b']);
+    expect(registry.take(all, undefined, undefined).map((e) => e.sessionId)).toEqual(['a', 'b']);
     // The double-click: two panes on one conversation is what this prevents.
-    expect(registry.take(all)).toEqual([]);
+    expect(registry.take(all, undefined, undefined)).toEqual([]);
   });
 
   it('spends only the ids a caller asked for', () => {
     const registry = new RebootRestoreRegistry();
     registry.set([entryFor('a'), entryFor('b')]);
-    expect(registry.take(all, ['b']).map((e) => e.sessionId)).toEqual(['b']);
+    expect(registry.take(all, ['b'], undefined).map((e) => e.sessionId)).toEqual(['b']);
     expect(registry.list(all).map((e) => e.sessionId)).toEqual(['a']);
   });
 
@@ -215,7 +215,7 @@ describe('the plan the banner spends', () => {
     registry.set([entryFor('mine', 'alice'), entryFor('theirs', 'bob')]);
     const asAlice = (owner: string | undefined) => owner === 'alice';
     expect(registry.list(asAlice).map((e) => e.sessionId)).toEqual(['mine']);
-    expect(registry.take(asAlice).map((e) => e.sessionId)).toEqual(['mine']);
+    expect(registry.take(asAlice, undefined, 'alice').map((e) => e.sessionId)).toEqual(['mine']);
     // Bob's entry is still on offer for Bob.
     expect(registry.list(() => true).map((e) => e.sessionId)).toEqual(['theirs']);
   });
@@ -223,8 +223,8 @@ describe('the plan the banner spends', () => {
   it('puts back an entry that no pane was created for', () => {
     const registry = new RebootRestoreRegistry();
     registry.set([entryFor('a')]);
-    const taken = registry.take(all);
-    registry.restore(taken);
+    const taken = registry.take(all, undefined, undefined);
+    registry.releaseFlight(undefined, taken);
     expect(registry.list(all).map((e) => e.sessionId)).toEqual(['a']);
   });
 
