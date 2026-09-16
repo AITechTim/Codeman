@@ -340,6 +340,37 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
     expect(calls[0].body).toEqual({ endpointId: 'llama-box', modelId: 'qwen3' });
   });
 
+  it('waits for the freshly launched session to go idle before applying, so its own boot activity is never mistaken for a busy turn', async () => {
+    // Measured live: a just-launched CLI reports 'busy' for its own startup
+    // (spinner, workspace-trust check) well before the apply call could
+    // otherwise reach it, and the apply route's isBusy() guard correctly
+    // refuses to restart a session mid-turn — which a fresh boot looks
+    // exactly like from the outside. This pins the fix: wait for idle FIRST.
+    const { app } = bootApp({});
+    app.activeSessionId = 'old-session';
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    const calls: string[] = [];
+    app._apiJson = async (path: string) => {
+      calls.push(path);
+      if (path === '/api/model-endpoints') return [];
+      return null; // the wait call's return value is unused — a timeout is a normal 200
+    };
+    app._api = async (path: string) => {
+      calls.push(path);
+      return { ok: true, json: async () => ({ success: true, data: {} }) };
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    const waitIndex = calls.findIndex((p) => p.includes('/wait?'));
+    const applyIndex = calls.findIndex((p) => p.endsWith('/custom-model'));
+    expect(waitIndex).toBeGreaterThanOrEqual(0);
+    expect(calls[waitIndex]).toBe('/api/sessions/new-session/wait?until=idle&timeout=20000');
+    expect(applyIndex).toBeGreaterThan(waitIndex);
+  });
+
   it('surfaces the real server error in the toast on a failed apply, rather than a generic message', async () => {
     const { app } = bootApp({});
     app.activeSessionId = 'old-session';

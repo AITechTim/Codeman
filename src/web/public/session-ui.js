@@ -721,6 +721,19 @@ Object.assign(CodemanApp.prototype, {
     const sessionId = this.activeSessionId;
     if (!sessionId || sessionId === before) return;
 
+    // A freshly launched CLI reports its OWN startup as 'busy' (spinner, the
+    // workspace-trust check, whatever else it does before its first prompt) —
+    // measured landing well before this line reliably reaches it — and the
+    // apply route's isBusy() guard correctly refuses to restart a session
+    // mid-turn, "mid-turn" included, which this fresh boot looks exactly
+    // like from the outside. Give it a bounded chance to settle first rather
+    // than raising a false "Session is busy" on every single launch. Per the
+    // wait contract a timeout here is a normal 200, never an error — a
+    // session still busy after 20s just reaches the apply call below and
+    // gets the route's own honest, now-visible SESSION_BUSY error instead of
+    // this guessing about it.
+    await this._apiJson(`/api/sessions/${sessionId}/wait?until=idle&timeout=20000`);
+
     // _apiJson() (used everywhere else in this file) unwraps a success body to
     // its `data`, but on failure it swallows the response entirely and returns
     // null — exactly the `error` text a caller needs to tell "the endpoint is

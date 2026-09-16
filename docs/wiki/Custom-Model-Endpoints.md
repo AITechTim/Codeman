@@ -48,6 +48,14 @@ conversation where the harness supports resuming one, fresh environment. That re
 necessary, not incidental: every supported harness reads its endpoint config at process
 start, never per turn, so there is no live hot-swap while a turn is running.
 
+Picking an entry that launches a **brand-new** session waits (up to 20 seconds) for it to
+finish its own startup before applying — a freshly started CLI reports itself as busy for its
+boot sequence, and applying to a genuinely busy session is refused so a real, in-progress
+turn is never interrupted out from under you. A session that is still busy after that wait
+(a very slow-starting CLI, or one you started typing into right away) surfaces that refusal
+as an ordinary error, which now stays on screen with a close button instead of vanishing
+after a few seconds — read it, it names the actual reason rather than a generic failure.
+
 Entries are hidden entirely for a session in a **remote (SSH) or Docker case** — support for
 redirecting those hasn't landed yet, see below. The picker also only appears in the desktop
 **Run** dropdown; the phone home screen builds its own run picker separately and does not

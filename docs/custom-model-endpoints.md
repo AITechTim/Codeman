@@ -105,11 +105,21 @@ the point of asking is letting one launch deliberately differ from the
 saved default, not just confirming it. Whichever way the model was decided,
 the launch itself runs a single session on that harness exactly the way its
 own Run-menu entry would (same case creation, env overrides, everything),
-then immediately applies the endpoint and model to it via the route below.
-It is a one-off "try this endpoint" action, not a sticky mode: the plain
-Run button still means "this harness, native cloud" afterward. Entries are
-hidden entirely for a remote or Docker active case, since the apply route
-refuses both (see the next section).
+then **waits for the new session to go idle** (`GET .../wait?until=idle`,
+bounded at 20s — a normal 200 either way, never an error, per the wait
+endpoint's own contract) before applying the endpoint and model to it via
+the route below. That wait exists because a freshly launched CLI reports
+itself as `busy` for its own startup (a boot spinner, a workspace-trust
+check) well before the apply call would otherwise reach it, and the apply
+route correctly refuses to restart a session mid-turn — a fresh boot looks
+exactly like one from the outside. A session still busy after the wait
+reaches the apply call anyway and gets that route's own honest
+`SESSION_BUSY` error, now visible as a sticky toast with a close button
+rather than a generic message that vanished in three seconds. It is a
+one-off "try this endpoint" action, not a sticky mode: the plain Run button
+still means "this harness, native cloud" afterward. Entries are hidden
+entirely for a remote or Docker active case, since the apply route refuses
+both (see the next section).
 
 ## Applying a model to a session
 
