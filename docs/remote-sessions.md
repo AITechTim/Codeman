@@ -395,9 +395,16 @@ Two wake paths, `wakeCommand` first because it is the explicit override:
 session's host is unreachable — amber, since the Codeman session is healthy and only the
 machine is asleep. With a wake target the action is **Wake** (`POST /api/sessions/:id/wake`);
 with none it is **Configure WoL** and opens `#wakeConfigModal`, a small form for that host's
-`wakeMac`/`wakeCommand` that saves with `PUT /api/remote-hosts/:id`. Reachability for the
-banner comes from `GET /api/sessions/:id/reachability`, polled for the active remote session
-(30 s, visible tab only).
+`wakeMac`/`wakeCommand` that saves with `PUT /api/remote-hosts/:id` (in multi-user mode that
+GET is admin-only, so a non-admin is told the setting is admin-only instead of "host not
+found"). Reachability for the banner comes from `GET /api/sessions/:id/reachability`, polled
+for the active remote session (30 s, visible tab only). ⚠️ The button is pressed from the SAME
+dashboard as Run/Attach, so it holds its request open under the same proxy and uses the same
+40 s budget — and it **queues nothing**: browser keystrokes travel over the WebSocket, which
+deliberately does not pass through the registry (that is the hot path this feature keeps its
+hands off), so the banner says "waiting for the host to come back" for the button and only
+claims "input is queued" when the HTTP input path actually buffered bytes
+(`queuedInput` on the two SSE events).
 
 The invariants worth keeping:
 
@@ -410,8 +417,11 @@ The invariants worth keeping:
   suspend, so it could never stay asleep (the same failure `hufflepuff-mcp-lazy` exists to
   prevent for MCP keepalives). A reachability check, a discovery listing and the tmux prereq
   probe never wake: they are questions, not actions. All of it is enforced by tests in
-  `test/remote-wake.test.ts` (two wiring guards, one of them asserting `ensureHostAwake` has
-  exactly one caller file) and `test/routes/session-remote-wake.test.ts`, not by comments.
+  `test/remote-wake.test.ts` (two wiring guards: one pins the importers — the route module and
+  `server.ts`, which holds the registry for its LIFETIME only, `drop()` on session cleanup and
+  `stop()` on shutdown — and one asserts `server.ts` calls nothing but those two, while
+  `ensureHostAwake` has exactly one caller file) and `test/routes/session-remote-wake.test.ts`,
+  not by comments.
 - **Detection is a bare TCP connect** to the SSH port (then the configured `port`, else 22),
   throttled per session, and only for wake-enabled hosts. No `ServerAliveInterval` is added to
   the launch command: keepalives push bytes into an otherwise idle connection every interval,
@@ -419,10 +429,16 @@ The invariants worth keeping:
   ~200 bytes per 30 s, orders of magnitude below any such threshold, and the SYN alone cannot
   wake a host.
 - **Input is buffered while a wake is in flight** (`REMOTE_WAKE_PENDING_MAX_BYTES`,
-  oldest bytes dropped, bounded so user input cannot grow memory) and flushed in order
-  after the reattach, with a settle delay so bytes cannot land in a still-connecting
-  pane. The **send-and-wait** path blocks on the wake instead — its response is open
-  anyway, and buffering would break the wait contract.
+  oldest whole chunks dropped, bounded so user input cannot grow memory) and flushed in
+  order after the reattach, with a settle delay so bytes cannot land in a still-connecting
+  pane. ⚠️ A chunk LARGER than the cap (one big paste is one `input` value) is dropped
+  **outright**, never trimmed: it was never typed character by character, so its tail is not
+  "what the user just typed" but a fragment of a command they never sent — the drop is logged
+  instead. ⚠️ Only the HTTP input route reaches the registry; the **WebSocket keystroke path
+  is deliberately NOT wake-aware**, so typing into a sleeping host sends nothing and queues
+  nothing (the banner's Wake button is the recovery for that case, which is why it must not
+  promise queued input). The **send-and-wait** path blocks on the wake instead — its response
+  is open anyway, and buffering would break the wait contract.
 - **The command runs without a shell** (`spawn(path, [], { stdio: 'ignore' })` — `shell`
   defaults to `false`), the schema
   requires a single executable path (no arguments, no `$`/backtick), and `wakeMac` is a
@@ -440,7 +456,9 @@ The invariants worth keeping:
 - **UI/SSE**: `remote:hostWaking` and `remote:hostWakeFailed` (plus the reused
   `remote:sessionReconnected`) drive the banner and toasts, all from `host-wake-ui.js` —
   its handlers are the ONLY definitions, since a second one in another mixin would be
-  silently shadowed by script order.
+  silently shadowed by script order. Both carry `queuedInput`, which is true only when the
+  server actually holds bytes for that session — the wording keys off that, not off "a wake
+  is running", so the button path never claims input is queued.
 
 Tests: `test/remote-wake.test.ts` (decision/throttle table, single-flight registry,
 buffering + flush order, MAC parsing/magic packet, live host-config resolution, and the wiring
