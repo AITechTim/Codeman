@@ -97,6 +97,16 @@ against any real endpoint's actual hardware/storage) and to scale that same
 banner's own give-up timeout for a very large model; never anything a
 server-side check relies on.
 
+**The loading banner shows a live countdown against that same timeout, and
+treats a real timeout as a failure, not a shrug.** It checks llama-swap's
+own `/running` every second (`GET /api/model-endpoints/:id/running-status`)
+and counts down against the size-scaled (or flat 5-minute) timeout live; if
+the countdown reaches zero with the target model still not ready, the
+banner turns into a sticky error naming the llama-swap server's own logs as
+where to look, and the session the load was for is closed automatically —
+a console left open and pointed at a model that never finished loading is
+worse than no console at all.
+
 `defaultModelId` names which discovered model the picker pre-marks for that
 endpoint — the settings panel's Edit form exposes it as a select populated
 from the endpoint's own discovered `models`, and the route refuses a value

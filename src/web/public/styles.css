@@ -8577,9 +8577,35 @@ kbd {
 }
 
 .center-status-text {
+  flex: 1;
   pointer-events: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Error variant: the load didn't finish in time — nothing is "in progress" anymore (no
+   spinner), and since this one doesn't dismiss itself, it needs a close button the user
+   can actually click, so pointer-events is restored here too (see the wrapper's own
+   comment on why that's `none` by default). */
+.center-status-error {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.center-status-close {
+  flex-shrink: 0;
+  pointer-events: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+  cursor: pointer;
+}
+
+.center-status-close:hover {
+  opacity: 1;
 }
 
 .toast-success { border-color: rgba(34, 197, 94, 0.4); }

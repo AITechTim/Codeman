@@ -108,17 +108,17 @@ describe('_runCustomModelEntryOneShot', () => {
     expect(app._pendingCustomModelForLaunch).toBeUndefined();
   });
 
-  it('starts the loading watcher when the launch reports modelSwapInProgress', async () => {
+  it('starts the loading watcher when the launch reports modelSwapInProgress, passing the new session id', async () => {
     const { app } = bootApp();
     app.run = async () => {
-      app._lastCustomModelLaunchResult = { modelSwapInProgress: true };
+      app._lastCustomModelLaunchResult = { modelSwapInProgress: true, sessionId: 'new-session' };
     };
     let watched: unknown[] | null = null;
     app._watchLlamaSwapLoading = async (...args: unknown[]) => {
       watched = args;
     };
     await app._runCustomModelEntryOneShot('codex', 'llama-box', 'qwen3');
-    expect(watched).toEqual(['llama-box', 'qwen3']);
+    expect(watched).toEqual(['llama-box', 'qwen3', 'new-session']);
   });
 
   it('never starts the watcher when no swap was needed', async () => {

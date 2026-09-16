@@ -78,10 +78,16 @@ waiting on your first prompt to do it.** llama-swap has no "switch model" button
 — the only thing that starts a swap is a real request naming the model, and confirmed live:
 just applying a selection never reached llama-swap's own logs at all until something asked
 it to load. Picking an entry now also sends the smallest real request that will trigger
-that load, in the background, the moment the target model isn't already loaded and ready —
-which is what the prominent **"Loading `<model>`… this can take a while"** banner
-(centred on screen, not a corner toast — a real load can take well over a minute) is
-actually watching for.
+that load, in the background, the moment the target model isn't already loaded and ready.
+
+**The centred loading banner shows a live countdown, and a real timeout is an error, not a
+shrug.** When it knows the model's discovered file size (its GB figure, when llama-swap
+states one), it shows both a rough expected-time estimate and a live countdown against it —
+e.g. "Loading qwen3.8-27b (16.4 GB, typically ~1–3 min) on llama-swap — 47s remaining". If
+the countdown reaches zero and the model still isn't ready, the banner turns into a sticky
+error telling you to check the llama-swap server's own logs, and **the session that load was
+for is closed automatically** — a console left open and pointed at a model that never
+finished loading would just be confusing to leave sitting there.
 
 **Claude Code specifically gets two extra fixes applied automatically:**
 

@@ -5556,37 +5556,59 @@ Object.assign(CodemanApp.prototype, {
    * genuinely worth interrupting the eye for rather than living in the corner with every
    * other toast (currently: a custom-model session's "switching backends" and "loading
    * model" states, both of which can sit on screen for well over a minute and are easy to
-   * mistake for nothing happening). Non-blocking (`pointer-events: none`, no backdrop) —
-   * this is informational, never a gate the user has to dismiss to keep working. Only one
-   * is ever shown at a time (the DOM node is created once and reused), which matches every
-   * current caller: each hands off to the next rather than stacking.
+   * mistake for nothing happening). Non-blocking (`pointer-events: none` on the wrapper,
+   * restored only on the card) — an info banner is never a gate the user has to dismiss to
+   * keep working. Only one is ever shown at a time (the DOM node is created once and
+   * reused), which matches every current caller: each hands off to the next rather than
+   * stacking.
+   *
+   * `opts.type` — `'info'` (default, spinner, no close button — a caller ends it itself via
+   * `dismiss()`) or `'error'` (no spinner — nothing is in progress once this shows — with a
+   * close button, since a sticky error the user cannot dismiss would just sit there). The
+   * DOM is rebuilt fresh each call rather than patched, since which children exist differs
+   * by type; `setMessage` still only ever touches the text node afterwards.
    */
-  _showCenterStatus(message) {
+  _showCenterStatus(message, opts = {}) {
+    const { type = 'info' } = opts;
     let el = document.getElementById('customModelCenterStatus');
     if (!el) {
       el = document.createElement('div');
       el.id = 'customModelCenterStatus';
-      el.className = 'center-status-banner';
+      document.body.appendChild(el);
+    }
+    el.className = `center-status-banner center-status-${type}`;
+    el.innerHTML = '';
+    const dismiss = () => {
+      el.classList.remove('show');
+      setTimeout(() => {
+        el.hidden = true;
+      }, 200);
+    };
+    if (type !== 'error') {
       const spinner = document.createElement('span');
       spinner.className = 'center-status-spinner';
       spinner.setAttribute('aria-hidden', 'true');
-      const text = document.createElement('span');
-      text.className = 'center-status-text';
       el.appendChild(spinner);
-      el.appendChild(text);
-      document.body.appendChild(el);
     }
-    const textEl = el.querySelector('.center-status-text');
-    if (textEl) textEl.textContent = message;
+    const text = document.createElement('span');
+    text.className = 'center-status-text';
+    text.textContent = message;
+    el.appendChild(text);
+    if (type === 'error') {
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'center-status-close';
+      closeBtn.textContent = '×';
+      closeBtn.setAttribute('aria-label', 'Dismiss');
+      closeBtn.onclick = (e) => {
+        e.stopPropagation();
+        dismiss();
+      };
+      el.appendChild(closeBtn);
+    }
     el.hidden = false;
     requestAnimationFrame(() => el.classList.add('show'));
     return {
-      dismiss: () => {
-        el.classList.remove('show');
-        setTimeout(() => {
-          el.hidden = true;
-        }, 200);
-      },
+      dismiss,
       setMessage: (next) => {
         const t = el.querySelector('.center-status-text');
         if (t) t.textContent = next;

@@ -765,7 +765,7 @@ Object.assign(CodemanApp.prototype, {
     const result = this._lastCustomModelLaunchResult;
     this._lastCustomModelLaunchResult = undefined;
     if (result?.modelSwapInProgress) {
-      void this._watchLlamaSwapLoading(endpointId, modelId);
+      void this._watchLlamaSwapLoading(endpointId, modelId, result.sessionId);
     }
   },
 
@@ -906,7 +906,7 @@ Object.assign(CodemanApp.prototype, {
     // Hand off to its own sticky toast rather than stacking a second one on top.
     if (payload?.modelSwapInProgress) {
       switchingToast?.dismiss();
-      void this._watchLlamaSwapLoading(endpointId, modelId);
+      void this._watchLlamaSwapLoading(endpointId, modelId, sessionId);
       return;
     }
 
@@ -967,29 +967,43 @@ Object.assign(CodemanApp.prototype, {
     return this._MODEL_LOAD_TIME_MATRIX.find((bracket) => sizeGB <= bracket.maxGB) ?? null;
   },
 
+  /** `ms` -> `"1m 08s remaining"` / `"8s remaining"`, for the loading banner's live countdown. */
+  _formatRemaining(ms) {
+    const totalSec = Math.max(0, Math.ceil(ms / 1000));
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return mins > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s remaining` : `${secs}s remaining`;
+  },
+
   /**
    * Polls llama-swap's own `/running` (via the read-only running-status route) until
-   * `modelId` reports `state: 'ready'`, showing a sticky banner the whole time so a slow
-   * unload/reload (measured well over a minute for a large model) reads as "loading",
-   * never as silence or a wrong answer from whatever was loaded before. Checks immediately
-   * (a fast load, or a re-apply onto an already-ready model, shouldn't wait a full interval
-   * to say so), then every `pollIntervalMs`. Bounded at `maxWaitMs` — defaults to a rough,
-   * size-scaled estimate (`_estimateModelLoad`) when the model's discovered size is known,
-   * falling back to a flat 5 minutes when it isn't; still not ready by then gets a toast
-   * saying so rather than polling forever.
+   * `modelId` reports `state: 'ready'`, showing a sticky banner with a live countdown the
+   * whole time so a slow unload/reload (measured well over a minute for a large model)
+   * reads as "loading, N seconds left", never as silence or a wrong answer from whatever
+   * was loaded before. Checks immediately (a fast load, or a re-apply onto an
+   * already-ready model, shouldn't wait a full interval to say so), then every
+   * `pollIntervalMs`. Bounded at `maxWaitMs` — defaults to a rough, size-scaled estimate
+   * (`_estimateModelLoad`) when the model's discovered size is known, falling back to a
+   * flat 5 minutes when it isn't.
+   *
+   * If the countdown reaches zero with the model still not ready, this is a real failure,
+   * not a "keep waiting" — the banner turns into a sticky error naming the llama-swap
+   * server's own logs as where to look, and `sessionId` (the session this was launched
+   * for) is closed automatically: a console left open and pointed at a model that never
+   * finished loading is worse than no console at all.
    *
    * `_watchLlamaSwapGeneration` guards against two overlapping calls (a second launch
    * started before the first one's loop finished) clobbering each other's banner:
    * `_showCenterStatus` reuses one shared DOM node, so an older loop's `dismiss()`/message
    * update firing after a newer one has already taken over the banner would otherwise hide
-   * or overwrite the WRONG one. Each call claims the counter as its own "generation" and
-   * checks it still owns it before touching the banner.
+   * or overwrite the WRONG one, or close the WRONG session. Each call claims the counter
+   * as its own "generation" and checks it still owns it before touching either.
    *
    * `pollIntervalMs`/`maxWaitMs` exist to let a test drive this in milliseconds instead of
    * minutes — real callers never pass `maxWaitMs`, which is what keeps the size-scaled
    * default live here rather than only in a test fixture.
    */
-  async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 1000, maxWaitMs) {
+  async _watchLlamaSwapLoading(endpointId, modelId, sessionId, pollIntervalMs = 1000, maxWaitMs) {
     const generation = (this._watchLlamaSwapGeneration = (this._watchLlamaSwapGeneration || 0) + 1);
     const isCurrent = () => this._watchLlamaSwapGeneration === generation;
     const sizeGB = await this._lookupModelSizeGB(endpointId, modelId);
@@ -999,10 +1013,11 @@ Object.assign(CodemanApp.prototype, {
     const sizeSuffix = sizeGB
       ? ` (${sizeGB.toFixed(1)} GB${estimate ? `, typically ${estimate.label}` : ''})`
       : '';
+    const baseMessage = `Loading ${modelId}${sizeSuffix} on ${endpointId} —`;
     // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
     // sit on screen for well over a minute, easy to mistake for nothing happening there.
-    const toast = this._showCenterStatus(`Loading ${modelId}${sizeSuffix} on ${endpointId}… this can take a while`);
     const deadline = Date.now() + effectiveMaxWaitMs;
+    const toast = this._showCenterStatus(`${baseMessage} ${this._formatRemaining(deadline - Date.now())}`);
     while (Date.now() < deadline) {
       const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
       if (!isCurrent()) return; // a newer launch took over the banner — this loop is done
@@ -1018,11 +1033,24 @@ Object.assign(CodemanApp.prototype, {
         this.showToast(`${modelId} is ready`, 'success', { duration: 2500 });
         return;
       }
+      if (!isCurrent()) return;
+      toast?.setMessage(`${baseMessage} ${this._formatRemaining(deadline - Date.now())}`);
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
     if (!isCurrent()) return;
-    toast?.dismiss();
-    this.showToast(`Still waiting for ${modelId} to finish loading on ${endpointId} — check the llama-swap server`, 'warning');
+    this._showCenterStatus(
+      `${modelId} did not finish loading on ${endpointId} within the expected time. ` +
+        `Check the llama-swap server logs for details.` +
+        (sessionId ? ' The session has been closed.' : ''),
+      { type: 'error' }
+    );
+    if (sessionId) {
+      try {
+        await this.closeSession(sessionId);
+      } catch {
+        // closeSession already reports its own failure via toast — nothing more to do here
+      }
+    }
   },
 
   /**

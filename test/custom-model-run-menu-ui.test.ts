@@ -577,7 +577,7 @@ describe('Custom Model Endpoint Profiles: llama-swap model-swap confirmation and
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
 
-    expect(watched).toEqual(['llama-box', 'qwen3']);
+    expect(watched).toEqual(['llama-box', 'qwen3', 'new-session']);
   });
 
   it('a successful apply with no swap needed never starts the loading watcher', async () => {
@@ -616,25 +616,48 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
 
     expect(bannerMessages[0]).toMatch(/loading qwen3/i);
     expect(dismissed).toContain(bannerMessages[0]);
     expect(toastCalls.at(-1)).toMatch(/ready/i);
   });
 
-  it('gives up after the bounded wait and warns instead of polling forever', async () => {
+  it('gives up after the bounded wait, turns the banner into a sticky error, and closes the session', async () => {
     const { app } = bootApp({});
-    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
-    const toastCalls: string[] = [];
-    app.showToast = (message: string) => {
-      toastCalls.push(message);
+    const banners: Array<{ message: string; opts: unknown }> = [];
+    app._showCenterStatus = (message: string, opts: unknown) => {
+      banners.push({ message, opts });
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
+    app.showToast = () => {};
+    let closedSessionId: string | undefined;
+    app.closeSession = async (id: string) => {
+      closedSessionId = id;
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 30);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 30);
 
-    expect(toastCalls.at(-1)).toMatch(/still waiting/i);
+    const errorBanner = banners.find((b) => (b.opts as { type?: string } | undefined)?.type === 'error');
+    expect(errorBanner?.message).toMatch(/did not finish loading/i);
+    expect(errorBanner?.message).toMatch(/llama-swap server logs/i);
+    expect(closedSessionId).toBe('sess-1');
+  });
+
+  it('never closes anything when no sessionId was given (a caller that has none to close)', async () => {
+    const { app } = bootApp({});
+    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
+    app.showToast = () => {};
+    let closeCalled = false;
+    app.closeSession = async () => {
+      closeCalled = true;
+    };
+    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] });
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', undefined, 5, 30);
+
+    expect(closeCalled).toBe(false);
   });
 
   it('stops polling (without a warning) once the endpoint no longer reads as llama-swap', async () => {
@@ -652,7 +675,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     };
     app._apiJson = async () => ({ isLlamaSwap: false, running: [] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
 
     expect(bannerDismissed).toBe(true);
     expect(toastCalls).toHaveLength(0); // no follow-up warning toast
@@ -672,7 +695,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
       return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
     };
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
 
     expect(toastCalls.at(-1)).toMatch(/ready/i);
   });
@@ -692,7 +715,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
 
     // A huge interval that would time the test out if the function actually waited for
     // it before the first check.
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 60000, 300000);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 60000, 300000);
 
     expect(calls).toBe(1);
   });
@@ -706,12 +729,13 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     });
     app.showToast = () => {};
     // The FIRST call never sees its own target model ready, so left alone it would run all
-    // the way to its own timeout and dismiss/warn.
+    // the way to its own timeout and (now) turn into an error + close its session — but no
+    // sessionId is passed, so there is nothing for it to close even if it does get there.
     app._apiJson = async (path: string) => {
       if (path === '/api/model-endpoints') return [];
       return { isLlamaSwap: true, running: [] };
     };
-    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', 5, 30);
+    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', undefined, 5, 30);
 
     // Second call, for a DIFFERENT model that IS ready right away, takes over the banner
     // before the first call's own bounded wait has elapsed.
@@ -719,15 +743,16 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
       if (path === '/api/model-endpoints') return [];
       return { isLlamaSwap: true, running: [{ model: 'model-b', state: 'ready' }] };
     };
-    await app._watchLlamaSwapLoading('llama-box', 'model-b', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'model-b', undefined, 5, 200);
 
     // Let the stale first call run out its own bounded wait and finish.
     await firstCall;
 
     // Whatever the first call did or didn't show along the way, its own eventual
     // completion (a timeout, in this case) must never touch a banner state that belongs
-    // to the newer, still-current call — exactly one dismiss (model-b's own) is the tell.
-    expect(dismissCalls).toEqual(['Loading model-b on llama-box… this can take a while']);
+    // to the newer, still-current call — exactly one dismiss, for model-b, is the tell.
+    expect(dismissCalls).toHaveLength(1);
+    expect(dismissCalls[0]).toContain('model-b');
   });
 });
 
@@ -787,10 +812,10 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
       return { isLlamaSwap: true, running: [{ model: 'qwen3.8-27b-ud-q4_k_xl', state: 'ready' }] };
     };
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3.8-27b-ud-q4_k_xl', 5);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3.8-27b-ud-q4_k_xl', undefined, 5);
 
-    expect(bannerMessages[0]).toBe(
-      'Loading qwen3.8-27b-ud-q4_k_xl (16.4 GB, typically ~1–3 min) on llama-box… this can take a while'
+    expect(bannerMessages[0]).toMatch(
+      /^Loading qwen3\.8-27b-ud-q4_k_xl \(16\.4 GB, typically ~1–3 min\) on llama-box — .+ remaining$/
     );
   });
 
@@ -807,9 +832,9 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
       return { isLlamaSwap: true, running: [{ model: 'big', state: 'ready' }] };
     };
 
-    await app._watchLlamaSwapLoading('llama-box', 'big', 5);
+    await app._watchLlamaSwapLoading('llama-box', 'big', undefined, 5);
 
-    expect(bannerMessages[0]).toBe('Loading big on llama-box… this can take a while');
+    expect(bannerMessages[0]).toMatch(/^Loading big on llama-box — .+ remaining$/);
   });
 
   it('uses the size-scaled estimate as the default timeout when maxWaitMs is not passed', async () => {
@@ -828,7 +853,7 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
     };
 
     // pollIntervalMs only — maxWaitMs omitted, so it must fall back to the size estimate.
-    await app._watchLlamaSwapLoading('llama-box', 'huge', 5);
+    await app._watchLlamaSwapLoading('llama-box', 'huge', undefined, 5);
 
     expect(calls).toBe(3);
   });
