@@ -13,7 +13,7 @@
  *
  * Port: N/A (no server; filesystem-only, under a temp CODEMAN data dir from test/setup.ts).
  */
-import { existsSync, lstatSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -60,7 +60,7 @@ describe('applyCustomModelInjection: context length', () => {
 });
 
 describe('applyCustomModelInjection: CLAUDE_CONFIG_DIR isolation', () => {
-  it('claude: creates an isolated, empty config dir and points CLAUDE_CONFIG_DIR at it', () => {
+  it('claude: creates an isolated config dir (no real credential/config files) and points CLAUDE_CONFIG_DIR at it', () => {
     const sessionId = 'sess-cfgdir-1';
     sessionsToClean.push(sessionId);
     const applied = applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId);
@@ -68,9 +68,9 @@ describe('applyCustomModelInjection: CLAUDE_CONFIG_DIR isolation', () => {
     expect(applied?.envOverrides.CLAUDE_CONFIG_DIR).toBe(expectedDir);
     expect(applied?.configDir).toBe(expectedDir);
     expect(existsSync(expectedDir)).toBe(true);
-    // No credential/config files written into it — isolation, not a real config copy.
+    // Only the trust-seed file and the projects link — no real OAuth credential/config.
     const entries = readdirSync(expectedDir).filter((name) => name !== 'projects');
-    expect(entries).toEqual([]);
+    expect(entries).toEqual(['.claude.json']);
   });
 
   it('claude: symlinks (or junctions) projects back to the real config dir so the response viewer keeps working', () => {
@@ -105,6 +105,85 @@ describe('applyCustomModelInjection: CLAUDE_CONFIG_DIR isolation', () => {
   it('deepseek: no configDirVar declared, so no config dir is created at all', () => {
     const sessionId = 'sess-cfgdir-deepseek';
     const applied = applyCustomModelInjection(entryOrThrow('deepseek'), endpoint, 'qwen3', sessionId);
+    expect(applied?.configDir).toBeUndefined();
+    expect(existsSync(customModelConfigDir(sessionId))).toBe(false);
+  });
+});
+
+describe('applyCustomModelInjection: apiKeyTrustFile (pre-approves the injected key)', () => {
+  it('claude: seeds .claude.json so the "Detected a custom API key" prompt never fires', () => {
+    const sessionId = 'sess-trust-1';
+    sessionsToClean.push(sessionId);
+    const applied = applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId);
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      customApiKeyResponses: { approved: string[]; rejected: string[] };
+    };
+    expect(written.customApiKeyResponses.approved).toEqual(['my-key']);
+    expect(written.customApiKeyResponses.rejected).toEqual([]);
+  });
+
+  it('claude: falls back to the dummy key when the endpoint has none, and still seeds it', () => {
+    const sessionId = 'sess-trust-2';
+    sessionsToClean.push(sessionId);
+    const applied = applyCustomModelInjection(
+      entryOrThrow('claude'),
+      { ...endpoint, apiKey: undefined },
+      'qwen3',
+      sessionId
+    );
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      customApiKeyResponses: { approved: string[] };
+    };
+    expect(written.customApiKeyResponses.approved).toEqual(['local-dummy-key']);
+  });
+
+  it('claude: merges onto fields the CLI itself already wrote into the same isolated dir, never overwrites them', () => {
+    const sessionId = 'sess-trust-3';
+    sessionsToClean.push(sessionId);
+    const configDir = customModelConfigDir(sessionId);
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, '.claude.json'), JSON.stringify({ userID: 'abc123', numStartups: 3 }));
+
+    const applied = applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId);
+
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      userID: string;
+      numStartups: number;
+      customApiKeyResponses: { approved: string[] };
+    };
+    expect(written.userID).toBe('abc123');
+    expect(written.numStartups).toBe(3);
+    expect(written.customApiKeyResponses.approved).toEqual(['my-key']);
+  });
+
+  it('claude: a corrupt existing file is treated as absent rather than failing the apply', () => {
+    const sessionId = 'sess-trust-4';
+    sessionsToClean.push(sessionId);
+    const configDir = customModelConfigDir(sessionId);
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, '.claude.json'), '{ not valid json');
+
+    expect(() => applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId)).not.toThrow();
+    const written = JSON.parse(readFileSync(join(configDir, '.claude.json'), 'utf8')) as {
+      customApiKeyResponses: { approved: string[] };
+    };
+    expect(written.customApiKeyResponses.approved).toEqual(['my-key']);
+  });
+
+  it('claude: re-approving the same key does not duplicate it in the approved list', () => {
+    const sessionId = 'sess-trust-5';
+    sessionsToClean.push(sessionId);
+    applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId);
+    const second = applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'llama3', sessionId);
+    const written = JSON.parse(readFileSync(join(second!.configDir!, '.claude.json'), 'utf8')) as {
+      customApiKeyResponses: { approved: string[] };
+    };
+    expect(written.customApiKeyResponses.approved).toEqual(['my-key']);
+  });
+
+  it('opencode: has no apiKeyTrustFile declared (no configDirVar at all), nothing is seeded', () => {
+    const sessionId = 'sess-trust-opencode';
+    const applied = applyCustomModelInjection(entryOrThrow('opencode'), endpoint, 'qwen3', sessionId);
     expect(applied?.configDir).toBeUndefined();
     expect(existsSync(customModelConfigDir(sessionId))).toBe(false);
   });

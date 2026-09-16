@@ -76,6 +76,13 @@ describe('buildCustomModelInjection', () => {
     expect(result.envOverrides.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
   });
 
+  it('claude: also declares apiKeyTrustFile, carrying the literal apiKey used', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.apiKeyTrustFile).toEqual({ relPath: '.claude.json', shape: 'claude-api-key-responses' });
+    expect(result.apiKey).toBe('my-key');
+  });
+
   it('claude: falls back to a dummy key when the endpoint has none', () => {
     const result = buildCustomModelInjection(entryOrThrow('claude'), { ...endpoint, apiKey: undefined }, 'qwen3');
     if (result.kind !== 'env') throw new Error('unreachable');

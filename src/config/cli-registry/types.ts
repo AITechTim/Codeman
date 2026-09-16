@@ -512,6 +512,16 @@ export interface CliCapabilities {
    * that cosmetic warning for a documented side effect: a relocated config directory writes
    * transcripts outside `~/.claude/projects`, blinding the response viewer, subagent
    * windows, and Read My Mind for that session (see docs/wiki/Agent-CLIs.md).
+   *
+   * `apiKeyTrustFile` (env kind only, alongside configDirVar): an isolated config directory
+   * has none of a real profile's prior "detected a custom API key, use it?" approvals, so
+   * without this the CLI stops and asks interactively on every single launch — with no one
+   * at a TTY to answer, that's a hang, not a warning (confirmed live: claude's own default
+   * answer, "No", would silently refuse to use the very key this feature just injected).
+   * `relPath`/`shape` name the file (claude's `.claude.json`) and its
+   * `customApiKeyResponses.approved` field this pre-seeds — the exact field a real answered
+   * prompt itself writes to, so this isn't bypassing the check, just answering it the same
+   * way a one-off prior approval on a shared profile already would.
    */
   customModelInjection:
     | {
@@ -521,6 +531,7 @@ export interface CliCapabilities {
         modelVars: string[];
         launchModel?: string;
         contextLengthVar?: string;
+        apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
         configDirVar?: string;
       }
     | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json'; launchModel?: string }

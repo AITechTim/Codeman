@@ -80,7 +80,10 @@ currently offer these entries.
   requests (the API key wins) but the CLI still prints a "both claude.ai and
   ANTHROPIC_API_KEY set" warning about it, which this avoids entirely. The isolated directory
   keeps a link back to your real session history so the response viewer and similar features
-  still work for that session.
+  still work for that session. That isolated directory starts with no prior approvals of its
+  own, so Codeman also pre-approves the injected key the same way answering Claude Code's own
+  "Detected a custom API key" prompt once would — without it, that prompt would otherwise
+  reappear on every single launch with nobody there to answer it.
 
 ## Which harnesses actually work
 

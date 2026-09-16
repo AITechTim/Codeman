@@ -10,7 +10,7 @@
  * cli-registry changes" requirement it was written against.
  */
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { join, dirname } from 'node:path';
 import { dataPath } from './config/instance.js';
@@ -79,6 +79,45 @@ function linkSharedProjectsDir(isolatedDir: string): void {
   }
 }
 
+/**
+ * Pre-approves the injected API key in an isolated config directory's trust-dialog state
+ * (`customModelInjection.apiKeyTrustFile`), so an otherwise-empty directory doesn't make the
+ * CLI stop at an interactive "Detected a custom API key — use it?" prompt on every single
+ * launch. Confirmed live: with nobody at the TTY to answer, that prompt's own default
+ * ("No") silently refuses the very key this feature just injected — this isn't bypassing
+ * the check, it's answering it the same field a real answered prompt itself writes to
+ * (verified against a real `~/.claude.json` after answering by hand once).
+ *
+ * Merges rather than overwrites: the file may already carry fields the CLI itself wrote on
+ * an earlier launch in this same isolated directory (machineID, userID, other approved
+ * keys), and a corrupt or partially-written file (a crash mid-write) is treated as absent
+ * rather than failing the whole apply over a nice-to-have.
+ */
+function seedApiKeyTrustFile(
+  configDir: string,
+  trustFile: { relPath: string; shape: 'claude-api-key-responses' },
+  apiKey: string
+): void {
+  const filePath = join(configDir, trustFile.relPath);
+  let existing: Record<string, unknown> = {};
+  try {
+    existing = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+  } catch {
+    existing = {};
+  }
+  const responses = (existing.customApiKeyResponses ?? {}) as { approved?: unknown; rejected?: unknown };
+  const approved = new Set(Array.isArray(responses.approved) ? (responses.approved as string[]) : []);
+  approved.add(apiKey);
+  const rejected = Array.isArray(responses.rejected) ? responses.rejected : [];
+  existing.customApiKeyResponses = { approved: [...approved], rejected };
+  try {
+    writeFileSync(filePath, JSON.stringify(existing, null, 2), { encoding: 'utf8', mode: 0o600 });
+    chmodSync(filePath, 0o600);
+  } catch {
+    // best-effort only — the interactive prompt returns instead of a hard failure here
+  }
+}
+
 /** Best-effort recursive removal of a previously-written configDir. Never throws. */
 export function removeConfigDir(dir: string | undefined): void {
   if (!dir) return;
@@ -128,6 +167,9 @@ export function applyCustomModelInjection(
       configDir = customModelConfigDir(sessionId);
       mkdirSync(configDir, { recursive: true, mode: 0o700 });
       linkSharedProjectsDir(configDir);
+      if (injection.apiKeyTrustFile && injection.apiKey) {
+        seedApiKeyTrustFile(configDir, injection.apiKeyTrustFile, injection.apiKey);
+      }
       envOverrides = { ...envOverrides, [injection.configDirVar]: configDir };
     }
     return {

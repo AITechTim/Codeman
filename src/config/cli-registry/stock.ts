@@ -264,6 +264,13 @@ const CLAUDE: CliEntry = {
       // never shares a directory with a stored claude.ai OAuth login — see the doc comment on
       // customModelInjection in cli-registry/types.ts for the traded-off side effect.
       configDirVar: 'CLAUDE_CONFIG_DIR',
+      // ⚠️ Required alongside configDirVar, not optional in practice: verified live that an
+      // isolated, otherwise-empty config directory makes claude stop at an interactive
+      // "Detected a custom API key — use it?" prompt on EVERY launch, defaulting to "No" with
+      // no one at the TTY to answer — silently refusing the very key this feature injected.
+      // Pre-seeding this file's customApiKeyResponses.approved list (verified against a real
+      // ~/.claude.json after answering the prompt once by hand) answers it in advance instead.
+      apiKeyTrustFile: { relPath: '.claude.json', shape: 'claude-api-key-responses' },
     },
   },
   overlays: {

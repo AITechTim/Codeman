@@ -188,6 +188,24 @@ registry entry (`contextLengthVar`/`configDirVar`), not hardcoded here:**
   the pre-existing blind-response-viewer side effect rather than failing the
   whole custom-model apply over it.
 
+**That isolated directory needed one more fix to actually be usable
+non-interactively.** An otherwise-empty `CLAUDE_CONFIG_DIR` has none of a
+real profile's prior "Detected a custom API key — use it?" approvals, so
+without more, Claude Code stops and asks that on *every single launch* —
+confirmed live, and with nobody at a TTY to answer, its own default answer
+("No") silently refuses the very key this feature just injected, which
+looks like the endpoint being ignored entirely. `customModelInjection`'s
+`apiKeyTrustFile` (`{ relPath: '.claude.json', shape:
+'claude-api-key-responses' }` on claude's entry) pre-seeds that exact
+approval: the apply step merges `customApiKeyResponses.approved: [apiKey]`
+into `<configDir>/.claude.json`, the same field a real answered prompt
+itself writes to (confirmed against a real file after answering by hand
+once) — this answers the prompt in advance rather than bypassing it. The
+merge preserves whatever else the CLI already wrote into that file on an
+earlier launch in the same isolated directory (`userID`, `numStartups`,
+earlier approved keys), and a missing or corrupt file is treated as empty
+rather than failing the apply.
+
 Clear back to the harness's native cloud default with:
 
 ```bash

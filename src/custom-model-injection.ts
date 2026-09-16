@@ -52,6 +52,10 @@ export interface EnvInjection {
    * (`custom-model-injection-apply.ts`) creates it and adds it to `envOverrides`.
    */
   configDirVar?: string;
+  /** See `customModelInjection.apiKeyTrustFile` — carried through so the IO wrapper can seed it. */
+  apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
+  /** The literal API key value this injection used, for `apiKeyTrustFile` to pre-approve. */
+  apiKey?: string;
 }
 
 export interface ConfigDirInjection {
@@ -115,8 +119,10 @@ export function buildCustomModelInjection(
       if (cap.contextLengthVar && contextLength !== undefined && Number.isFinite(contextLength)) {
         envOverrides[cap.contextLengthVar] = String(Math.trunc(contextLength));
       }
-      const result = withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
-      return cap.configDirVar ? { ...result, configDirVar: cap.configDirVar } : result;
+      let result: EnvInjection = withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
+      if (cap.configDirVar) result = { ...result, configDirVar: cap.configDirVar };
+      if (cap.apiKeyTrustFile) result = { ...result, apiKeyTrustFile: cap.apiKeyTrustFile, apiKey };
+      return result;
     }
 
     case 'configContentEnv': {
