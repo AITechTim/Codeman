@@ -671,6 +671,7 @@ export class WebServer extends EventEmitter {
       setupSessionListeners: this.setupSessionListeners.bind(this),
       persistSessionState: this.persistSessionState.bind(this),
       persistSessionStateNow: this._persistSessionStateNow.bind(this),
+      reapplyPersistedSessionState: this.reapplyPersistedSessionState.bind(this),
       getSessionStateWithRespawn: this.getSessionStateWithRespawn.bind(this),
       // EventPort
       broadcast: this.broadcast.bind(this),
@@ -2905,6 +2906,53 @@ export class WebServer extends EventEmitter {
       console.log(`[Server] Host reboot detected; offering ${restore.length} session(s) for restore`);
     }
     return restore.length;
+  }
+
+  /**
+   * Re-apply the persisted state that a `Session` constructor does not take.
+   *
+   * The reboot-restore route builds a session from a record rather than
+   * attaching to a surviving pane, so everything the constructor has no
+   * parameter for starts at its default. Persisting such a session writes
+   * `toState()` wholesale, which would REPLACE the record with the reduced
+   * version — and for a pinned session that is worse than losing a setting,
+   * because `cleanupSessionsByIds()` keeps a record only while it is pinned, so
+   * dropping the pin hands the record to the next stale sweep.
+   *
+   * Respawn and Ralph are deliberately NOT re-armed here: a machine that just
+   * came up is the worst moment to turn an autonomous run loose, and the user
+   * re-arms what they want.
+   */
+  async reapplyPersistedSessionState(session: Session, saved: SessionState): Promise<void> {
+    // The custom-model env has to be rebuilt from the endpoint store: the persist
+    // deliberately keeps the injected VALUES out of state.json, so only the
+    // bookkeeping survives a restart and the values are re-derived here.
+    const savedCustomModel = (saved as { __customModel?: CustomModelBookkeeping }).__customModel;
+    if (savedCustomModel) {
+      session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+    }
+    if (saved.pinned) session.setPinned(true);
+    if (saved.autoCompactEnabled !== undefined || saved.autoCompactThreshold !== undefined) {
+      session.setAutoCompact(saved.autoCompactEnabled ?? false, saved.autoCompactThreshold, saved.autoCompactPrompt);
+    }
+    if (saved.autoClearEnabled !== undefined || saved.autoClearThreshold !== undefined) {
+      session.setAutoClear(saved.autoClearEnabled ?? false, saved.autoClearThreshold);
+    }
+    if (saved.autoResumeEnabled) {
+      session.restoreAutoResume(true, saved.autoResumeAt);
+    }
+    if (saved.inputTokens !== undefined || saved.outputTokens !== undefined || saved.totalCost !== undefined) {
+      session.restoreTokens(saved.inputTokens ?? 0, saved.outputTokens ?? 0, saved.totalCost ?? 0);
+      // Seed the daily-usage baseline, or the restored totals are counted again as new usage.
+      this.lastRecordedTokens.set(session.id, {
+        input: saved.inputTokens ?? 0,
+        output: saved.outputTokens ?? 0,
+      });
+    }
+    if (saved.niceEnabled !== undefined || saved.niceValue !== undefined) {
+      session.setNice({ enabled: saved.niceEnabled, niceValue: saved.niceValue });
+    }
+    if (saved.flickerFilterEnabled !== undefined) session.flickerFilterEnabled = saved.flickerFilterEnabled;
   }
 
   private async restoreMuxSessions(): Promise<boolean> {

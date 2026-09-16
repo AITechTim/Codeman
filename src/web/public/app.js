@@ -957,7 +957,9 @@ class CodemanApp {
     this.registerServiceWorker();
     // Fetch tunnel status for header indicator (desktop only)
     this.loadTunnelStatus();
-    // Ask whether a host reboot left sessions worth rebuilding (banner, never automatic)
+    // Ask whether a host reboot left sessions worth rebuilding (banner, never
+    // automatic). handleInit() re-reads it on every SSE init; this covers the
+    // path where that event never arrives.
     this.initRebootRestoreBanner?.();
     // Share a single settings fetch between both consumers
     const settingsPromise = fetch('/api/settings').then(r => r.ok ? r.json() : null).then(env => env?.data ?? null).catch(() => null);
@@ -3760,6 +3762,12 @@ class CodemanApp {
     // Plan-usage chip: server's last-known telemetry, so it shows immediately on
     // a fresh load / reconnect (authoritative; wins over the localStorage restore).
     if (data.planUsage) this.updatePlanUsageChip(data.planUsage);
+
+    // A board left open across a host reboot reconnects HERE, to a server that came
+    // back with an empty session list. The reboot-restore offer is built at boot,
+    // before any client could be listening, so re-read it on every init rather than
+    // only on the page-load path.
+    this.refreshRebootRestoreBanner?.();
 
     // Update version displays (header and toolbar)
     if (data.version) {

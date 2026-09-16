@@ -27,7 +27,14 @@ import { FastifyInstance } from 'fastify';
 import { existsSync } from 'node:fs';
 import { ApiErrorCode, createErrorResponse, getErrorMessage } from '../../types.js';
 import { RebootRestoreRequestSchema } from '../schemas.js';
-import { parseBody, getAuthUser, canAccessOwned } from '../route-helpers.js';
+import {
+  parseBody,
+  getAuthUser,
+  canAccessOwned,
+  ownerFor,
+  isWorkingDirAllowed,
+  sessionCapacityMessage,
+} from '../route-helpers.js';
 import { rebootRestoreRegistry } from '../reboot-restore-registry.js';
 import { rejectAlreadyLive, type RebootRestoreEntry, type RebootRestoreRejection } from '../../reboot-restore.js';
 import { clampEnvOverridesForOwner } from '../../session-env-clamp.js';
@@ -76,36 +83,63 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
 
   app.post('/api/reboot-restore/restore', async (req, reply) => {
     const body = parseBody(RebootRestoreRequestSchema, req.body, 'Invalid reboot restore request');
+    const user = getAuthUser(req);
     const canAccess = accessorFor(req);
+    const owner = ownerFor(req);
 
     // Take BEFORE the first await: a second click must find nothing to spend.
-    if (!rebootRestoreRegistry.beginSpending()) {
+    // The flight is per owner, because `take()` already guarantees two callers
+    // never receive the same entry, so one user's restore need not block another's.
+    if (!rebootRestoreRegistry.beginSpending(owner)) {
       return reply.code(409).send(createErrorResponse(ApiErrorCode.CONFLICT, 'A reboot restore is already running'));
     }
     const taken = rebootRestoreRegistry.take(canAccess, body.sessionIds);
+    // Entries nothing built a pane for, returned to the plan on every exit path
+    // including a throw. Without this a failure between here and the loop would
+    // spend the offer and rebuild nothing, and the plan cannot be rebuilt.
+    const unspent = new Set(taken);
 
     try {
       if (taken.length === 0) return { restored: [], skipped: [] };
 
       // The plan was built at boot and the board has moved on since. A conversation
       // the user resumed by hand from the Resume list is already on screen, and a
-      // second pane on it would fight the first for the same transcript.
+      // second pane on it would fight the first for the same transcript. This one
+      // is never re-offered: unlike a missing workspace, it cannot stop being true.
       const liveSessionIds = new Set(ctx.sessions.keys());
       const liveConversationIds = new Set(
         [...ctx.sessions.values()].map((session) => session.claudeSessionId).filter((id): id is string => !!id)
       );
       const { restore, skipped } = rejectAlreadyLive(taken, liveSessionIds, liveConversationIds);
-      // An entry nothing rebuilt stays on offer rather than disappearing silently.
-      rebootRestoreRegistry.restore(skipped.map((s) => taken.find((e) => e.sessionId === s.sessionId)!));
+      for (const entry of taken) {
+        if (skipped.some((s) => s.sessionId === entry.sessionId)) unspent.delete(entry);
+      }
 
       const restored: ReturnType<typeof toBannerItem>[] = [];
       const failures: RebootRestoreRejection[] = [...skipped];
       const workspaceHooksEnabled = await ctx.getWorkspaceHooksEnabled();
 
       for (const entry of restore) {
+        // Capacity is re-checked per iteration, because this loop is itself
+        // creating the sessions it counts. The offer can be a day old, so the
+        // board may be fuller now than the plan assumed.
+        const capMsg = sessionCapacityMessage(ctx.sessions, entry.owner);
+        if (capMsg) {
+          failures.push({ sessionId: entry.sessionId, reason: 'capacity-reached' });
+          continue;
+        }
         // A repo can be deleted between the boot that planned this and the click.
         if (!existsSync(entry.workingDir)) {
           failures.push({ sessionId: entry.sessionId, reason: 'workspace-missing' });
+          continue;
+        }
+        // Multi-user workspace separation: the create route confines a non-admin's
+        // workingDir to their own case space, and a grant can be withdrawn between
+        // the session's creation and this restore, so the confinement is re-run
+        // rather than inherited from the record.
+        if (!isWorkingDirAllowed(user, entry.workingDir)) {
+          failures.push({ sessionId: entry.sessionId, reason: 'workspace-forbidden' });
+          unspent.delete(entry);
           continue;
         }
         try {
@@ -145,9 +179,14 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           });
 
           await ctx.addSession(session);
-          ctx.persistSessionState(session);
           await ctx.setupSessionListeners(session);
+          // Before the pane spawns: the custom-model selection reaches it through
+          // the environment. Before the first persist: a constructed session holds
+          // none of this, so persisting it first would replace the fuller record
+          // with the reduced one and drop the pin that keeps it from being pruned.
+          await ctx.reapplyPersistedSessionState(session, saved);
           await session.startInteractive();
+          ctx.persistSessionState(session);
 
           // A session without its workspace hooks goes silently blind: no stop or
           // idle events for respawn, no Approvals Inbox item, no red tab on a
@@ -166,10 +205,22 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           ctx.broadcast(SseEvent.SessionCreated, ctx.getSessionStateWithRespawn(session));
           restored.push(toBannerItem(entry));
         } catch (err) {
-          // One workspace that has gone missing must not stop the rest of the pass.
+          // One entry that will not start must not stop the rest of the pass, and
+          // must not leave a registered session with no pane behind it: by this
+          // point the session is in `ctx.sessions`, holds a tab-layout slot and has
+          // listeners, and the commonest cause is a CLI binary that is not on the
+          // PATH of a freshly booted machine.
           console.error(`[reboot-restore] failed to rebuild ${entry.sessionId}:`, err);
-          failures.push({ sessionId: entry.sessionId, reason: 'workspace-missing' });
+          await ctx
+            .cleanupSession(entry.sessionId, true, 'reboot restore failed to start the session')
+            .catch((cleanupErr: unknown) =>
+              console.error(`[reboot-restore] cleanup after a failed rebuild failed: ${getErrorMessage(cleanupErr)}`)
+            );
+          failures.push({ sessionId: entry.sessionId, reason: 'rebuild-failed' });
+          // Left on offer: the user can put the binary back and click again.
+          continue;
         }
+        unspent.delete(entry);
       }
 
       if (restored.length > 0) {
@@ -181,7 +232,10 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
 
       return { restored, skipped: failures };
     } finally {
-      rebootRestoreRegistry.endSpending();
+      // Anything that never became a pane goes back on offer, including after a
+      // throw, so a transient failure costs a retry rather than the whole plan.
+      rebootRestoreRegistry.restore([...unspent]);
+      rebootRestoreRegistry.endSpending(owner);
     }
   });
 

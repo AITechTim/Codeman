@@ -23,6 +23,13 @@ import type { RebootRestoreEntry } from '../../src/reboot-restore.js';
 import type { SessionState } from '../../src/types.js';
 
 async function createHarness(authUser?: { username: string; role: 'admin' | 'user' }): Promise<FastifyInstance> {
+  return createHarnessWithCtx(createMockRouteContext(), authUser);
+}
+
+async function createHarnessWithCtx(
+  ctx: ReturnType<typeof createMockRouteContext>,
+  authUser?: { username: string; role: 'admin' | 'user' }
+): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(fastifyCookie);
   if (authUser) {
@@ -30,7 +37,7 @@ async function createHarness(authUser?: { username: string; role: 'admin' | 'use
       (req as unknown as { authUser: typeof authUser }).authUser = authUser;
     });
   }
-  registerRebootRestoreRoutes(app, createMockRouteContext() as never);
+  registerRebootRestoreRoutes(app, ctx as never);
 
   app.addHook('preSerialization', (req, reply, payload: unknown, done) => {
     if (!req.url.startsWith('/api')) return done(null, payload);
@@ -106,18 +113,36 @@ describe('GET /api/reboot-restore', () => {
 });
 
 describe('POST /api/reboot-restore/restore', () => {
-  it('spends the offer, so a second click finds nothing left to spend', async () => {
+  it('reports a workspace that is gone, and keeps offering it in case it comes back', async () => {
     rebootRestoreRegistry.set([offerEntry('a')]);
     const app = await createHarness();
 
     const first = (await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} })).json().data;
-    // The workspace is gone, so nothing was rebuilt — but the entry was taken.
     expect(first.restored).toEqual([]);
     expect(first.skipped).toEqual([{ sessionId: 'a', reason: 'workspace-missing' }]);
 
-    const second = (await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} })).json().data;
-    expect(second.restored).toEqual([]);
-    expect(second.skipped).toEqual([]);
+    // Nothing was built, so the entry goes back: a repo can be restored from a
+    // backup between two clicks, and losing the offer would be unrecoverable.
+    const left = (await app.inject({ method: 'GET', url: '/api/reboot-restore' })).json().data;
+    expect(left.sessions.map((s: { id: string }) => s.id)).toEqual(['a']);
+    await app.close();
+  });
+
+  it('never re-offers a conversation that is already open', async () => {
+    const entry = offerEntry('a');
+    rebootRestoreRegistry.set([entry]);
+    const app = await createHarness();
+    const ctx = createMockRouteContext({ sessionId: entry.sessionId });
+    // A session with that id is live, which is what the Resume list would produce.
+    const liveApp = await createHarnessWithCtx(ctx);
+
+    const res = (await liveApp.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} })).json().data;
+    expect(res.skipped).toEqual([{ sessionId: 'a', reason: 'already-live' }]);
+
+    // Unlike a missing workspace, this one is dropped: it cannot stop being true.
+    const left = (await liveApp.inject({ method: 'GET', url: '/api/reboot-restore' })).json().data;
+    expect(left.sessions).toEqual([]);
+    await liveApp.close();
     await app.close();
   });
 
@@ -132,8 +157,9 @@ describe('POST /api/reboot-restore/restore', () => {
     });
     expect(res.json().data.skipped).toEqual([{ sessionId: 'b', reason: 'workspace-missing' }]);
 
+    // 'a' was never taken, and 'b' came back because no pane was built for it.
     const left = (await app.inject({ method: 'GET', url: '/api/reboot-restore' })).json().data;
-    expect(left.sessions.map((s: { id: string }) => s.id)).toEqual(['a']);
+    expect(left.sessions.map((s: { id: string }) => s.id).sort()).toEqual(['a', 'b']);
     await app.close();
   });
 
@@ -150,12 +176,13 @@ describe('POST /api/reboot-restore/restore', () => {
 
   it('turns a second concurrent restore away rather than interleaving it', async () => {
     rebootRestoreRegistry.set([offerEntry('a')]);
-    // Claimed by a restore already in flight.
-    expect(rebootRestoreRegistry.beginSpending()).toBe(true);
+    // Claimed by a restore already in flight for this same owner (undefined in
+    // single-user mode, which is what the harness runs as).
+    expect(rebootRestoreRegistry.beginSpending(undefined)).toBe(true);
     const app = await createHarness();
     const res = await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
     expect(res.statusCode).toBe(409);
-    rebootRestoreRegistry.endSpending();
+    rebootRestoreRegistry.endSpending(undefined);
     await app.close();
   });
 });

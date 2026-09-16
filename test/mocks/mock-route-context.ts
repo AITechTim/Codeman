@@ -61,6 +61,7 @@ export function createMockRouteContext(options?: {
     setupSessionListeners: vi.fn(async () => {}),
     persistSessionState: vi.fn(),
     persistSessionStateNow: vi.fn(),
+    reapplyPersistedSessionState: vi.fn(async () => {}),
     getSessionStateWithRespawn: vi.fn((s: MockSession) => s.toState()),
 
     // -- EventPort --
@@ -149,6 +150,7 @@ export function createMockRouteContext(options?: {
       clearRespawnConfig: vi.fn(),
       updateRespawnConfig: vi.fn(),
       setHistoryLimit: vi.fn(async () => {}),
+      startStatsCollection: vi.fn(),
     },
     runSummaryTrackers: new Map(),
     activePlanOrchestrators: new Map(),

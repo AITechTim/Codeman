@@ -8,7 +8,9 @@
  * reboot guess is a heuristic and a wrong automatic restore would spawn CLI
  * processes nobody asked for.
  *
- * Seeded once from `GET /api/reboot-restore` on init. Restore posts to
+ * Seeded from `GET /api/reboot-restore` on init and again on every SSE reconnect,
+ * because the tab most likely to want this is one that was open across the reboot
+ * and reconnects to a server that came back up with an empty board. Restore posts to
  * `POST /api/reboot-restore/restore`, Dismiss posts to
  * `POST /api/reboot-restore/dismiss`, and either way the banner goes away. The
  * restored sessions arrive as ordinary `session:created` events, so no extra
@@ -24,6 +26,24 @@
  * @dependency api-client.js at runtime (this._apiJson / this._apiPost)
  * @loadorder 11.7 of 17, after approvals-ui.js
  */
+
+/** Plain-language wording for one skip reason, for the toast after a restore. */
+function rebootSkipReason(reason) {
+  switch (reason) {
+    case 'workspace-missing':
+      return 'workspace is gone';
+    case 'workspace-forbidden':
+      return 'workspace is outside your space';
+    case 'already-live':
+      return 'already open';
+    case 'capacity-reached':
+      return 'session limit reached';
+    case 'rebuild-failed':
+      return 'the agent would not start';
+    default:
+      return reason;
+  }
+}
 
 Object.assign(CodemanApp.prototype, {
   /** Ask the server whether a reboot left anything on offer, and show the banner if so. */
@@ -59,6 +79,9 @@ Object.assign(CodemanApp.prototype, {
       detail.textContent = count > 4 ? `${names}, …` : names;
       detail.title = sessions.map((s) => `${s.name || s.id}\n${s.workingDir}`).join('\n\n');
     }
+    const accept = this.$('rebootRestoreBannerAccept');
+    // The note is hidden at phone width, so the warning travels on the button too.
+    if (accept) accept.title = 'Conversations return; terminal history does not.';
     banner.hidden = false;
   },
 
@@ -66,8 +89,9 @@ Object.assign(CodemanApp.prototype, {
   async restoreRebootSessions() {
     const button = this.$('rebootRestoreBannerAccept');
     if (button) button.disabled = true;
-    const res = await this._apiPost('/api/reboot-restore/restore', {});
-    const body = res && res.ok ? await res.json().catch(() => null) : null;
+    // _apiJson unwraps the { success, data } envelope every /api response carries;
+    // reading the outer object would report every count as zero.
+    const body = await this._apiJson('/api/reboot-restore/restore', { method: 'POST', body: {} });
     if (!body) {
       if (button) button.disabled = false;
       this.showToast?.('Could not restore the sessions', 'error');
@@ -82,8 +106,19 @@ Object.assign(CodemanApp.prototype, {
       this.showToast?.(`Restored ${restored} ${noun}. Terminal history did not survive the reboot.`, 'success');
     }
     if (skipped > 0) {
-      this.showToast?.(`${skipped} could not be restored (workspace gone, or already open)`, 'warning');
+      // Each reason means a different next step for the user, so they are not
+      // collapsed into one message: capacity clears by closing something, a
+      // failed start usually means the CLI is not on the server's PATH.
+      const reasons = new Set((body.skipped ?? []).map((s) => s.reason));
+      this.showToast?.(`${skipped} not restored: ${[...reasons].map(rebootSkipReason).join('; ')}`, 'warning');
     }
+  },
+
+  /** Re-read the offer after a reconnect, for a tab that was open across the reboot. */
+  async refreshRebootRestoreBanner() {
+    const data = await this._apiJson('/api/reboot-restore');
+    this._rebootRestoreSessions = data?.sessions ?? [];
+    this.renderRebootRestoreBanner();
   },
 
   /** Drop the offer. The Resume list still reaches every one of these conversations. */

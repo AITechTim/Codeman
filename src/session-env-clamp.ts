@@ -3,10 +3,16 @@
  *
  * A session's `envOverrides` can hand back privilege that the per-CLI config
  * clamp removed, so a non-granted owner's overrides get the privileged keys
- * stripped before the session is built. Two callers need that today. The create
- * and resume routes clamp what a request asked for, and the reboot-restore route
- * clamps what a persisted record carried, because a record written while its
- * owner held a grant must not replay that grant after the grant is gone.
+ * stripped before the session is built. The create and resume routes are what
+ * this bites on: they clamp what a request asked for.
+ *
+ * The reboot-restore route calls it as defence in depth, and today it can strip
+ * nothing. `Session.getEnvOverridesForPersist()` keeps only `CLAUDE_CODE_*` and
+ * `CLAUDE_CONFIG_DIR` out of a session's overrides, claude's `privilegedEnvKeys`
+ * are the five `ANTHROPIC_*` names, and that pass admits claude alone — so a
+ * persisted record cannot carry a clamped key. The call is there for the day the
+ * persisted set widens. The grant re-resolution that does bite on that path is
+ * `resolveClaudeModeForUsername`, which recomputes the permission mode.
  *
  * This lives outside `web/routes` on purpose. The question it answers is about
  * session privilege rather than about HTTP, and `cron/cron-service.ts` sets the

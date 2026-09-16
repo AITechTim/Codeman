@@ -57,6 +57,12 @@ export interface RebootEvidence {
  *
  * This heuristic decides whether to ASK, never whether to act. A wrong yes costs
  * the user a banner they dismiss, because the restore itself waits for a click.
+ *
+ * ⚠️ `os.uptime()` reports the HOST's uptime, which a container shares. A Codeman
+ * running in Docker therefore sees a long uptime after its own container restarts,
+ * the boot test fails, and no banner appears. The feature is effectively off for
+ * containerized installs. That is the safe direction to fail in, and fixing it
+ * needs a boot signal the container actually owns rather than a wider heuristic.
  */
 export function looksLikeHostReboot(evidence: RebootEvidence): boolean {
   if (evidence.deadSessionCount === 0) return false;
@@ -80,7 +86,14 @@ export function resolveResumeConversationId(state: SessionState): string {
   return chainTail || state.resumeSessionId || state.id;
 }
 
-/** Why one session was passed over. Reported for logging and assertions. */
+/**
+ * Why one session was passed over. Reported for logging and shown to the user.
+ *
+ * The first six are decided before anything is built. `capacity-reached` and
+ * `rebuild-failed` can only happen once a click is spending the plan, and they
+ * are the two the banner must not confuse with a missing workspace: one means
+ * "try again after closing something", the other means the CLI would not start.
+ */
 export interface RebootRestoreRejection {
   sessionId: string;
   reason:
@@ -91,7 +104,10 @@ export interface RebootRestoreRejection {
     | 'unsupported-mode'
     | 'no-working-dir'
     | 'workspace-missing'
-    | 'already-live';
+    | 'workspace-forbidden'
+    | 'already-live'
+    | 'capacity-reached'
+    | 'rebuild-failed';
 }
 
 /** One restorable session, as the banner shows it and the rebuild replays it. */

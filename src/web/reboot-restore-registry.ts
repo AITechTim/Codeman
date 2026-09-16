@@ -24,8 +24,9 @@
  * - Spending is take-then-build: `take()` removes entries synchronously, before
  *   the route's first `await`, so a double-click or two devices cannot both
  *   reach the same entry and put two panes on one conversation.
- * - One restore runs at a time. `beginSpending()` single-flights the route, so
- *   two concurrent clicks cannot interleave pane creation.
+ * - One restore runs at a time per owner. `beginSpending()` single-flights the
+ *   route, so two concurrent clicks cannot interleave pane creation for the same
+ *   user, while two different users never block each other.
  *
  * @dependencies reboot-restore (RebootRestoreEntry)
  * @consumedby web/server (plan build at boot), web/routes/reboot-restore-routes
@@ -46,8 +47,13 @@ export class RebootRestoreRegistry {
   private entries = new Map<string, RebootRestoreEntry>();
   /** When the boot pass built the plan, in ms since the epoch. */
   private builtAt = 0;
-  /** True while a restore route call is between its take and its last pane. */
-  private spending = false;
+  /**
+   * Owners with a restore in flight, between its take and its last pane.
+   * Keyed by owner so one user's restore does not turn another user's click into
+   * a conflict; `take()` already guarantees no two callers get the same entry.
+   * Single-user mode has one key, `undefined`, so it behaves as one global flight.
+   */
+  private spending = new Set<string | undefined>();
 
   /** Replace the plan with what the boot pass found. An empty list clears it. */
   set(entries: readonly RebootRestoreEntry[]): void {
@@ -92,9 +98,11 @@ export class RebootRestoreRegistry {
   /**
    * Put entries back after a rebuild never got as far as creating a pane.
    *
-   * Used for the click-time rejections, so a conversation the user resumed by
-   * hand meanwhile does not silently vanish from the banner while a workspace
-   * that came back stays offered.
+   * Used for the click-time rejections that may resolve themselves: a workspace
+   * that comes back, a capacity limit the user makes room under, a CLI that
+   * starts once its binary is on the PATH. A conversation the user resumed by
+   * hand is NOT put back, because that one cannot stop being true, and an entry
+   * the banner keeps re-offering forever is noise only Dismiss can clear.
    */
   restore(entries: readonly RebootRestoreEntry[]): void {
     for (const entry of entries) this.entries.set(entry.sessionId, entry);
@@ -110,24 +118,25 @@ export class RebootRestoreRegistry {
   }
 
   /**
-   * Claim the right to run a restore, or report that one is already running.
-   * Callers that get `true` must call `endSpending()` in a `finally`.
+   * Claim the right to run a restore for one owner, or report that owner already
+   * has one running. Callers that get `true` must call `endSpending()` in a
+   * `finally` with the same owner.
    */
-  beginSpending(): boolean {
-    if (this.spending) return false;
-    this.spending = true;
+  beginSpending(owner?: string): boolean {
+    if (this.spending.has(owner)) return false;
+    this.spending.add(owner);
     return true;
   }
 
-  endSpending(): void {
-    this.spending = false;
+  endSpending(owner?: string): void {
+    this.spending.delete(owner);
   }
 
   /** Test hook: forget everything, including the single-flight claim. */
   reset(): void {
     this.entries.clear();
     this.builtAt = 0;
-    this.spending = false;
+    this.spending.clear();
   }
 
   private dropIfExpired(): void {
