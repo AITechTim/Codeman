@@ -88,6 +88,24 @@ export interface DiscoveryResult {
   models: string[];
   /** See `CustomModelHost.modelContextLengths` — only ever populated for models already loaded. */
   contextLengths: Record<string, number>;
+  /** See `CustomModelHost.modelSizesGB` — populated for every model whose own listing states one. */
+  sizesGB: Record<string, number>;
+}
+
+/**
+ * Best-effort: pulls a file size in GB out of a model's own `description`, when the
+ * server states one. llama-swap writes `"Auto-discovered 16.35 GB - parameters
+ * auto-fitted by llama.cpp"` for a model it found on disk itself; a hand-configured
+ * profile's own description (e.g. `"General-purpose reasoning model, MoE CPU-offloaded."`)
+ * has no such figure and correctly yields no estimate rather than a guess — there is no
+ * separate "give me the file size" endpoint to fall back on.
+ */
+function parseSizeGB(description: unknown): number | undefined {
+  if (typeof description !== 'string') return undefined;
+  const match = /(\d+(?:\.\d+)?)\s*GB\b/i.exec(description);
+  if (!match) return undefined;
+  const size = Number(match[1]);
+  return Number.isFinite(size) && size > 0 ? size : undefined;
 }
 
 /**
@@ -127,9 +145,18 @@ async function discoverModels(
     signal: AbortSignal.timeout(DISCOVER_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = (await res.json()) as { data?: Array<{ id?: unknown; status?: { value?: unknown } }> };
+  const body = (await res.json()) as {
+    data?: Array<{ id?: unknown; status?: { value?: unknown }; description?: unknown }>;
+  };
   const entries = body.data ?? [];
   const models = entries.map((m) => m.id).filter((id): id is string => typeof id === 'string' && id.length > 0);
+
+  const sizesGB: Record<string, number> = {};
+  for (const entry of entries) {
+    if (typeof entry.id !== 'string' || !entry.id) continue;
+    const size = parseSizeGB(entry.description);
+    if (size !== undefined) sizesGB[entry.id] = size;
+  }
 
   // llama-swap-specific, feature-detected: a server that never mentions `status` on ANY
   // entry gets no context-length enrichment at all, rather than treating "no status field"
@@ -147,7 +174,7 @@ async function discoverModels(
       if (ctx !== undefined) contextLengths[id] = ctx;
     }
   }
-  return { models, contextLengths };
+  return { models, contextLengths, sizesGB };
 }
 
 /**
@@ -267,7 +294,7 @@ export function triggerLlamaSwapLoad(
 }
 
 function applyDiscoveredModels(host: CustomModelHost, result: DiscoveryResult): CustomModelHost {
-  const { models, contextLengths } = result;
+  const { models, contextLengths, sizesGB } = result;
   const defaultModelId = host.defaultModelId && models.includes(host.defaultModelId) ? host.defaultModelId : undefined;
   // Merge onto what's already known rather than replacing: a model not probed this round
   // (not currently loaded) keeps whatever context length an earlier round already learned
@@ -275,7 +302,21 @@ function applyDiscoveredModels(host: CustomModelHost, result: DiscoveryResult): 
   const merged = { ...host.modelContextLengths, ...contextLengths };
   const kept = Object.fromEntries(Object.entries(merged).filter(([id]) => models.includes(id)));
   const modelContextLengths = Object.keys(kept).length > 0 ? kept : undefined;
-  return { ...host, models, defaultModelId, modelContextLengths, lastDiscoveredAt: new Date().toISOString() };
+  // sizesGB, unlike contextLengths, is populated for every model in the SAME pass (no
+  // loaded-only restriction — see parseSizeGB), so this is closer to a plain replace, but
+  // still merges onto the previous round rather than dropping a size for a model whose
+  // description happened to omit the figure on this particular pass.
+  const mergedSizes = { ...host.modelSizesGB, ...sizesGB };
+  const keptSizes = Object.fromEntries(Object.entries(mergedSizes).filter(([id]) => models.includes(id)));
+  const modelSizesGB = Object.keys(keptSizes).length > 0 ? keptSizes : undefined;
+  return {
+    ...host,
+    models,
+    defaultModelId,
+    modelContextLengths,
+    modelSizesGB,
+    lastDiscoveredAt: new Date().toISOString(),
+  };
 }
 
 /**

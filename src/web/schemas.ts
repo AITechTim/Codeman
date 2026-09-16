@@ -1946,6 +1946,8 @@ export const CustomModelHostSchema = z.object({
   // Server-populated by discovery (custom-model-routes.ts); accepted here only so a client
   // round-tripping the GET response back through PUT (edit-save) doesn't drop it.
   modelContextLengths: z.record(z.string().max(200), z.number().int().positive().max(100_000_000)).optional(),
+  // Same reasoning as modelContextLengths above.
+  modelSizesGB: z.record(z.string().max(200), z.number().positive().max(100_000)).optional(),
 });
 
 /** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */

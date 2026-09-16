@@ -927,15 +927,56 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Best-effort: looks up `modelId`'s discovered file size (GB) off the endpoint's own
+   * saved host record (`CustomModelHost.modelSizesGB`, populated during discovery by
+   * parsing llama-swap's own `description` field for an auto-discovered model). Returns
+   * `undefined` for a hand-configured profile with no parseable size, an unreachable
+   * server, or any other failure — never a guess.
+   */
+  async _lookupModelSizeGB(endpointId, modelId) {
+    const hosts = await this._apiJson('/api/model-endpoints').catch(() => null);
+    if (!Array.isArray(hosts)) return undefined;
+    const host = hosts.find((h) => h.id === endpointId);
+    const size = host?.modelSizesGB?.[modelId];
+    return typeof size === 'number' && Number.isFinite(size) && size > 0 ? size : undefined;
+  },
+
+  /**
+   * Rough, UNMEASURED load-time brackets by model file size, for the loading banner's text
+   * and as a size-scaled fallback timeout (larger models get longer before
+   * _watchLlamaSwapLoading gives up and warns). Sourced from typical local NVMe/SSD
+   * throughput for llama.cpp's mmap-and-warm sequence — NOT benchmarked against any real
+   * endpoint's actual hardware/storage (network storage, spinning disks, or a GPU with
+   * less VRAM than the model needs would all be meaningfully slower), so the label is an
+   * expectation-setter, never a guarantee. `maxGB` is the bracket's own upper bound
+   * (inclusive); brackets are checked in order, so list them smallest first.
+   */
+  _MODEL_LOAD_TIME_MATRIX: [
+    { maxGB: 2, label: '~5–15s', waitMs: 60000 },
+    { maxGB: 8, label: '~15–45s', waitMs: 120000 },
+    { maxGB: 16, label: '~30–90s', waitMs: 180000 },
+    { maxGB: 32, label: '~1–3 min', waitMs: 300000 },
+    { maxGB: 64, label: '~2–5 min', waitMs: 480000 },
+    { maxGB: Infinity, label: '~5+ min', waitMs: 900000 },
+  ],
+
+  /** `sizeGB` -> `{label, waitMs}` from `_MODEL_LOAD_TIME_MATRIX`, or `null` when `sizeGB`
+   *  is unknown (no estimate is always safer than a fabricated one). */
+  _estimateModelLoad(sizeGB) {
+    if (typeof sizeGB !== 'number' || !Number.isFinite(sizeGB) || sizeGB <= 0) return null;
+    return this._MODEL_LOAD_TIME_MATRIX.find((bracket) => sizeGB <= bracket.maxGB) ?? null;
+  },
+
+  /**
    * Polls llama-swap's own `/running` (via the read-only running-status route) until
    * `modelId` reports `state: 'ready'`, showing a sticky banner the whole time so a slow
    * unload/reload (measured well over a minute for a large model) reads as "loading",
    * never as silence or a wrong answer from whatever was loaded before. Checks immediately
    * (a fast load, or a re-apply onto an already-ready model, shouldn't wait a full interval
-   * to say so), then every `pollIntervalMs`. Bounded at `maxWaitMs`; still not ready by then
-   * gets a toast saying so rather than polling forever — 5 minutes by default, since a large
-   * (20GB+) model reading from disk can genuinely take longer than the 2 minutes this used
-   * to allow.
+   * to say so), then every `pollIntervalMs`. Bounded at `maxWaitMs` — defaults to a rough,
+   * size-scaled estimate (`_estimateModelLoad`) when the model's discovered size is known,
+   * falling back to a flat 5 minutes when it isn't; still not ready by then gets a toast
+   * saying so rather than polling forever.
    *
    * `_watchLlamaSwapGeneration` guards against two overlapping calls (a second launch
    * started before the first one's loop finished) clobbering each other's banner:
@@ -945,16 +986,23 @@ Object.assign(CodemanApp.prototype, {
    * checks it still owns it before touching the banner.
    *
    * `pollIntervalMs`/`maxWaitMs` exist to let a test drive this in milliseconds instead of
-   * minutes — real callers never pass them, which is what keeps the defaults live here
-   * rather than only in a test fixture.
+   * minutes — real callers never pass `maxWaitMs`, which is what keeps the size-scaled
+   * default live here rather than only in a test fixture.
    */
-  async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 1000, maxWaitMs = 300000) {
+  async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 1000, maxWaitMs) {
     const generation = (this._watchLlamaSwapGeneration = (this._watchLlamaSwapGeneration || 0) + 1);
     const isCurrent = () => this._watchLlamaSwapGeneration === generation;
+    const sizeGB = await this._lookupModelSizeGB(endpointId, modelId);
+    const estimate = this._estimateModelLoad(sizeGB);
+    const effectiveMaxWaitMs = maxWaitMs ?? estimate?.waitMs ?? 300000;
+    if (!isCurrent()) return; // a newer launch already took over before the lookup even finished
+    const sizeSuffix = sizeGB
+      ? ` (${sizeGB.toFixed(1)} GB${estimate ? `, typically ${estimate.label}` : ''})`
+      : '';
     // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
     // sit on screen for well over a minute, easy to mistake for nothing happening there.
-    const toast = this._showCenterStatus(`Loading ${modelId} on ${endpointId}… this can take a while`);
-    const deadline = Date.now() + maxWaitMs;
+    const toast = this._showCenterStatus(`Loading ${modelId}${sizeSuffix} on ${endpointId}… this can take a while`);
+    const deadline = Date.now() + effectiveMaxWaitMs;
     while (Date.now() < deadline) {
       const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
       if (!isCurrent()) return; // a newer launch took over the banner — this loop is done

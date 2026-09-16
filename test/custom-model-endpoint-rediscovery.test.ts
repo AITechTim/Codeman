@@ -208,3 +208,77 @@ describe('refreshAllCustomModelHosts: context-length enrichment (llama.cpp/llama
     expect(updated.modelContextLengths).toBeUndefined();
   });
 });
+
+describe('refreshAllCustomModelHosts: model-size enrichment (parsed from /v1/models description)', () => {
+  it('parses a GB figure out of an auto-discovered model’s description', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ id: 'qwen3.8-27b', description: 'Auto-discovered 16.35 GB - parameters auto-fitted by llama.cpp' }],
+        }),
+        { status: 200 }
+      )
+    );
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelSizesGB).toEqual({ 'qwen3.8-27b': 16.35 });
+  });
+
+  it('gets no size at all for a hand-configured profile whose own description states none', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ id: 'big', description: 'General-purpose reasoning model, MoE CPU-offloaded. Default profile.' }],
+        }),
+        { status: 200 }
+      )
+    );
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelSizesGB).toBeUndefined();
+  });
+
+  it('populated regardless of loaded state — unlike context length, no /props probe is needed', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [host({ id: 'ep', baseUrl: 'http://localhost:8080' })]);
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/v1/models') {
+        return new Response(
+          JSON.stringify({
+            data: [{ id: 'unloaded-model', description: 'Auto-discovered 4.91 GB - parameters auto-fitted' }],
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected request: ${url.href}`); // /props must never be reached for this
+    });
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelSizesGB).toEqual({ 'unloaded-model': 4.91 });
+  });
+
+  it('keeps a previously-learned size for a model still present, drops it once the model disappears entirely', async () => {
+    const dir = getDataDir();
+    await writeCustomModelHosts(dir, [
+      host({ id: 'ep', baseUrl: 'http://localhost:8080', models: ['a', 'b'], modelSizesGB: { a: 8, b: 16 } }),
+    ]);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: 'a', description: 'no GB figure here' }] }), { status: 200 })
+    );
+
+    await refreshAllCustomModelHosts();
+
+    const [updated] = await readCustomModelHosts(dir);
+    expect(updated.modelSizesGB).toEqual({ a: 8 }); // 'a' kept from before, 'b' dropped (gone from the list)
+  });
+});

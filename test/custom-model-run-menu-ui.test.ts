@@ -684,7 +684,8 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     const { app } = bootApp({});
     app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
     let calls = 0;
-    app._apiJson = async () => {
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return []; // size lookup — no match, no estimate
       calls += 1;
       return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
     };
@@ -696,43 +697,140 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     expect(calls).toBe(1);
   });
 
-  it('a newer call takes over the shared banner — the older one neither dismisses nor overwrites it', async () => {
+  it('a newer call takes over the shared banner — a superseded older call never touches it', async () => {
     const { app } = bootApp({});
-    const bannerCalls: string[] = [];
     const dismissCalls: string[] = [];
-    app._showCenterStatus = (message: string) => {
-      bannerCalls.push(message);
-      return { dismiss: () => dismissCalls.push(message), setMessage: () => {} };
-    };
-    app.showToast = () => {};
-    // The FIRST call never sees its target model ready, so it would otherwise run all
-    // the way to its own timeout and dismiss/warn — but a second call starts first.
-    let firstResolveApiJson: (() => void) | undefined;
-    const firstNeverReady = new Promise<void>((resolve) => {
-      firstResolveApiJson = resolve;
+    app._showCenterStatus = (message: string) => ({
+      dismiss: () => dismissCalls.push(message),
+      setMessage: () => {},
     });
-    app._apiJson = async () => {
-      await firstNeverReady; // block the first loop's very first check indefinitely
+    app.showToast = () => {};
+    // The FIRST call never sees its own target model ready, so left alone it would run all
+    // the way to its own timeout and dismiss/warn.
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return [];
       return { isLlamaSwap: true, running: [] };
     };
-    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', 5, 50);
+    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', 5, 30);
 
-    // Second call, for a DIFFERENT model, starts while the first is still blocked on its
-    // very first status check — claims the banner as the newer generation.
-    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'model-b', state: 'ready' }] });
+    // Second call, for a DIFFERENT model that IS ready right away, takes over the banner
+    // before the first call's own bounded wait has elapsed.
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return [];
+      return { isLlamaSwap: true, running: [{ model: 'model-b', state: 'ready' }] };
+    };
     await app._watchLlamaSwapLoading('llama-box', 'model-b', 5, 200);
 
-    // Now let the first call's blocked check resolve and run to completion.
-    firstResolveApiJson?.();
+    // Let the stale first call run out its own bounded wait and finish.
     await firstCall;
 
-    expect(bannerCalls).toEqual([
-      'Loading model-a on llama-box… this can take a while',
-      'Loading model-b on llama-box… this can take a while',
-    ]);
-    // Only the CURRENT (second) call's own dismiss ever ran — the stale first call's
-    // late resolution recognised it no longer owns the banner and touched nothing.
-    expect(dismissCalls).toEqual([bannerCalls[1]]);
+    // Whatever the first call did or didn't show along the way, its own eventual
+    // completion (a timeout, in this case) must never touch a banner state that belongs
+    // to the newer, still-current call — exactly one dismiss (model-b's own) is the tell.
+    expect(dismissCalls).toEqual(['Loading model-b on llama-box… this can take a while']);
+  });
+});
+
+describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => {
+  it('_estimateModelLoad picks the smallest matching bracket, and returns null for an unknown size', () => {
+    const { app } = bootApp({});
+    expect(app._estimateModelLoad(1)).toMatchObject({ label: '~5–15s' });
+    expect(app._estimateModelLoad(2)).toMatchObject({ label: '~5–15s' }); // inclusive upper bound
+    expect(app._estimateModelLoad(2.1)).toMatchObject({ label: '~15–45s' });
+    expect(app._estimateModelLoad(16.35)).toMatchObject({ label: '~1–3 min' }); // just over the 16GB bracket
+    expect(app._estimateModelLoad(200)).toMatchObject({ label: '~5+ min' });
+    expect(app._estimateModelLoad(undefined)).toBeNull();
+    expect(app._estimateModelLoad(0)).toBeNull();
+    expect(app._estimateModelLoad(-5)).toBeNull();
+    expect(app._estimateModelLoad(NaN)).toBeNull();
+  });
+
+  it('_lookupModelSizeGB reads the size off the matching endpoint/model, ignoring one with no parseable size', async () => {
+    const { app } = bootApp({});
+    app._apiJson = async (path: string) => {
+      expect(path).toBe('/api/model-endpoints');
+      return [
+        { id: 'llama-box', modelSizesGB: { 'qwen3.8-27b-ud-q4_k_xl': 16.35, big: undefined } },
+        { id: 'other-box', modelSizesGB: { 'qwen3.8-27b-ud-q4_k_xl': 999 } }, // must not match wrong endpoint
+      ];
+    };
+
+    expect(await app._lookupModelSizeGB('llama-box', 'qwen3.8-27b-ud-q4_k_xl')).toBe(16.35);
+    expect(await app._lookupModelSizeGB('llama-box', 'big')).toBeUndefined(); // no parseable size
+    expect(await app._lookupModelSizeGB('llama-box', 'unknown-model')).toBeUndefined();
+    expect(await app._lookupModelSizeGB('ghost-endpoint', 'qwen3')).toBeUndefined();
+  });
+
+  it('_lookupModelSizeGB is best-effort: an unreachable/malformed response yields undefined, never a throw', async () => {
+    const { app } = bootApp({});
+    app._apiJson = async () => {
+      throw new Error('network down');
+    };
+    await expect(app._lookupModelSizeGB('llama-box', 'qwen3')).resolves.toBeUndefined();
+
+    app._apiJson = async () => null; // e.g. a failed request _apiJson already swallowed
+    await expect(app._lookupModelSizeGB('llama-box', 'qwen3')).resolves.toBeUndefined();
+  });
+
+  it('the loading banner includes the size and estimate when the size is known', async () => {
+    const { app } = bootApp({});
+    const bannerMessages: string[] = [];
+    app._showCenterStatus = (message: string) => {
+      bannerMessages.push(message);
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
+    app.showToast = () => {};
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') {
+        return [{ id: 'llama-box', modelSizesGB: { 'qwen3.8-27b-ud-q4_k_xl': 16.35 } }];
+      }
+      return { isLlamaSwap: true, running: [{ model: 'qwen3.8-27b-ud-q4_k_xl', state: 'ready' }] };
+    };
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3.8-27b-ud-q4_k_xl', 5);
+
+    expect(bannerMessages[0]).toBe(
+      'Loading qwen3.8-27b-ud-q4_k_xl (16.4 GB, typically ~1–3 min) on llama-box… this can take a while'
+    );
+  });
+
+  it('the loading banner omits the size/estimate entirely when the size is unknown', async () => {
+    const { app } = bootApp({});
+    const bannerMessages: string[] = [];
+    app._showCenterStatus = (message: string) => {
+      bannerMessages.push(message);
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
+    app.showToast = () => {};
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return [{ id: 'llama-box', modelSizesGB: {} }];
+      return { isLlamaSwap: true, running: [{ model: 'big', state: 'ready' }] };
+    };
+
+    await app._watchLlamaSwapLoading('llama-box', 'big', 5);
+
+    expect(bannerMessages[0]).toBe('Loading big on llama-box… this can take a while');
+  });
+
+  it('uses the size-scaled estimate as the default timeout when maxWaitMs is not passed', async () => {
+    // A 200GB model estimates to the top "~5+ min" bracket (900000ms); a huge poll interval
+    // would time the TEST out if the function only waited the flat, smaller previous
+    // default (300000ms) instead of the size-scaled one.
+    const { app } = bootApp({});
+    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
+    app.showToast = () => {};
+    let calls = 0;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return [{ id: 'llama-box', modelSizesGB: { huge: 200 } }];
+      calls += 1;
+      if (calls < 3) return { isLlamaSwap: true, running: [] }; // not ready on the first couple of checks
+      return { isLlamaSwap: true, running: [{ model: 'huge', state: 'ready' }] };
+    };
+
+    // pollIntervalMs only — maxWaitMs omitted, so it must fall back to the size estimate.
+    await app._watchLlamaSwapLoading('llama-box', 'huge', 5);
+
+    expect(calls).toBe(3);
   });
 });
 

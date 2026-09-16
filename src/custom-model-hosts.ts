@@ -61,6 +61,17 @@ export interface CustomModelHost {
    * has no entry for simply gets no context-length env override applied — never a guess.
    */
   modelContextLengths?: Record<string, number>;
+  /**
+   * Discovered file size (GB) per model id, keyed by the same strings as `models`.
+   * Populated during discovery by parsing llama-swap's own `description` field for an
+   * auto-discovered model ("Auto-discovered 16.35 GB - parameters auto-fitted by
+   * llama.cpp") — a hand-configured profile's own description has no such figure and
+   * correctly gets no entry, never a guess. Used only to label the Run-menu picker's
+   * "loading model" banner with a rough, unmeasured expected-time estimate
+   * (`estimateModelLoad()` in session-ui.js) — never a guarantee, and never anything a
+   * server-side check relies on.
+   */
+  modelSizesGB?: Record<string, number>;
 }
 
 export function customModelHostsPath(configDir: string): string {

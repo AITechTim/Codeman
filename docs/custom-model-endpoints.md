@@ -83,6 +83,20 @@ session" below) so a CLI that would otherwise assume a large default context
 window for an unrecognized model id stops silently overflowing a much
 smaller real one.
 
+**File size is discovered too, when the server states one.** llama-swap
+writes a GB figure into an auto-discovered model's own `description`
+(`"Auto-discovered 16.35 GB - parameters auto-fitted by llama.cpp"`), parsed
+into `modelSizesGB` — unlike context length, this needs no `/props` probe
+(the figure is right there in the `/v1/models` response) and so is populated
+for every model regardless of loaded state. A hand-configured profile's own
+description has no such figure and correctly gets no entry, never a guess.
+Used only to label the Run-menu picker's "loading model" banner with a
+rough, UNMEASURED expected-time estimate (`_estimateModelLoad()` in
+session-ui.js, based on typical local NVMe/SSD throughput — not benchmarked
+against any real endpoint's actual hardware/storage) and to scale that same
+banner's own give-up timeout for a very large model; never anything a
+server-side check relies on.
+
 `defaultModelId` names which discovered model the picker pre-marks for that
 endpoint — the settings panel's Edit form exposes it as a select populated
 from the endpoint's own discovered `models`, and the route refuses a value
