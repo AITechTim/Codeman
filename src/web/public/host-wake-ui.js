@@ -85,10 +85,12 @@ Object.assign(CodemanApp.prototype, {
     const sessionId = this.activeSessionId;
     const session = sessionId && this.sessions ? this.sessions.get(sessionId) : null;
     if (!sessionId || !session || !session.remote) {
-      if (this._hostWake) {
-        this._hostWake = null;
-        this._renderHostWakeBanner();
-      }
+      // Render unconditionally: `refreshHostWakeBanner` clears `_hostWake` BEFORE
+      // calling this tick, so a guard here would skip the repaint and leave the
+      // banner up on every chat (the clear and the repaint must not be coupled to
+      // whoever cleared the state). Idempotent — with a null state it just hides.
+      this._hostWake = null;
+      this._renderHostWakeBanner();
       return;
     }
     let state = this._hostWake;
