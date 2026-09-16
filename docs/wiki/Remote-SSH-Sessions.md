@@ -4,7 +4,7 @@ Point a case at another machine and the agent runs **there**, with the same dash
 mobile UI, and autonomy features. Your laptop becomes a window onto a session living on the
 remote host.
 
-Like Docker, this is a **location overlay** on a case, not a run mode. All seven run modes
+Like Docker, this is a **location overlay** on a case, not a run mode. All ten run modes
 work remotely. See [Core Concepts](Core-Concepts).
 
 ## Why bother
@@ -52,7 +52,10 @@ A watcher with bounded backoff notices a dead SSH pane and quietly reattaches to
 running remote session. On by default; the kill switch is in
 **App Settings → Agents & CLIs → Remote auto-reconnect**.
 
-Intentional kills are never revived. Closing a session means closing it.
+Intentional kills are never revived. Closing a session means closing it. Neither is a clean
+exit inside the pane (Ctrl-D, `exit`, Ctrl-C at the CLI's prompt): that tears the remote
+tmux session down, and the watcher revives a session only when that durable session is
+verifiably still alive. Only a transport drop is reconnected.
 
 ## Discover and attach
 
@@ -69,6 +72,14 @@ The distinction that matters:
 Attaching to someone else's session and closing your tab must not end their run, so it does
 not. Several clients can attach the same remote session at different window sizes without
 clamping each other, and discovery shows a shared badge with the client count.
+
+## Files
+
+Previews, downloads and text reads in a remote case go over the same ssh connection the
+session uses, so a clicked path opens the file on the machine the agent is on, `Range`
+seeking included. Nothing is copied to the Codeman host. Editing, Office previews,
+thumbnails, the file tree and the tail viewer are not available remotely and answer a clear
+400 rather than a misleading 404. Details in [Working With Files](Working-With-Files).
 
 ## Security
 

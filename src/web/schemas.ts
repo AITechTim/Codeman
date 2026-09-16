@@ -1231,6 +1231,13 @@ export const SettingsUpdateSchema = z
      */
     approvalsInboxEnabled: z.boolean().optional(),
     /**
+     * Auto-name sessions: a placeholder tab (`w3-case`) takes its first real
+     * prompt as a title (`w3-case: fix the login redirect`). Synced, default
+     * OFF: the prompt lands in mux-sessions.json, every session:updated
+     * broadcast and /api/search, which is the user's choice to make.
+     */
+    autoNameSessions: z.boolean().optional(),
+    /**
      * Read My Mind (docs/readmymind-plan.md): capture the user's submitted
      * prompts into per-case intent profiles. SYNCED, default OFF (opt-in:
      * captured prompts are sensitive). OFF stops capture immediately; already

@@ -252,6 +252,7 @@
     'Ultracode Agents': 'Ultracode 智能体',
     'Ultracode Floating Windows': 'Ultracode 浮动窗口',
     'Approvals Inbox': '审批收件箱',
+    'Auto-name Sessions': '自动命名会话',
     Approvals: '审批',
     'Prompts waiting on you, across all sessions': '所有会话中等待您处理的提示',
     'No pending approvals': '没有待处理的审批',

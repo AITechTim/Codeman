@@ -54,7 +54,10 @@ create-time sweep would yank the skill out from under other live sessions sharin
 directory. Remove them per case with `codeman skill uninstall --case <name>`.
 
 The skill ships with the verb index always loaded, plus on-demand references for the verbs,
-worked multi-worker recipes, endpoint tables, and cross-session messaging.
+worked multi-worker recipes, endpoint tables, and cross-session messaging. It drives
+DeepSeek Harness workers the same way it drives Claude ones (`spawn_workers alpha
+beta:deepseek` is a mixed fleet in one call), since those are the two modes with real
+completion signals.
 
 ## The manual path
 
@@ -92,8 +95,9 @@ Read these before writing any code. Each one has cost somebody an afternoon.
 5. **Wait instead of polling, and a timeout is not an error.** The wait endpoints answer
    `200` with `wait.timedOut: true`. Loop over short waits rather than one long call, because
    tunnels cut idle connections.
-6. **Only `claude` sessions emit `stop` and `blocked`.** They come from Claude Code hooks.
-   Shell and the external CLIs accept only `idle`, `working`, and `exit`; asking for `stop`
+6. **Only `claude` and `deepseek` sessions emit `stop` and `blocked`.** Claude's come from
+   Claude Code hooks, DeepSeek's from the harness reporting its state to Codeman. Shell and
+   the other external CLIs accept only `idle`, `working`, and `exit`; asking for `stop`
    explicitly there is a `400`, while omitting `until` is always safe. On a shell session
    `idle` fires **once at startup and never again**, so synchronize hook-less sessions with an
    output marker instead.
@@ -130,7 +134,10 @@ curl -s -X POST "$API/api/sessions/$ID/input" \
 # Or wait for a marker in the output, which works on shell sessions too
 curl -s "$API/api/sessions/$ID/wait-output?contains=DONE_17909&from=buffer" | jq
 
-# Read the terminal back
+# Read the last answer as clean text (claude, codex, deepseek sessions)
+curl -s "$API/api/sessions/$ID/last-response" | jq -r '.data.text'
+
+# Or read the terminal back
 curl -s "$API/api/sessions/$ID/terminal?tail=4000" | jq -r '.data.output'
 
 # Clean up, by exact id
@@ -157,7 +164,13 @@ Make it unique per call, because tmux repaints replay old screen text.
 
 ### Reading output
 
-Use `terminal?tail=`, not `/output`. The latter's text field is empty for every tmux-backed
+For `claude`, `codex` and `deepseek` sessions, read the answer from the transcript rather
+than the screen: `GET /api/sessions/:id/last-response` returns the last reply as clean text
+with no TUI frames or repaint noise. Poll it briefly rather than reading once, because the
+transcript lands slightly after the `stop` signal, so a read immediately after send-and-wait
+returns often comes back empty.
+
+For everything else, use `terminal?tail=`, not `/output`. The latter's text field is empty for every tmux-backed
 session, which is every interactive session. `tail` counts **bytes**, and what comes back is
 terminal data with ANSI sequences included.
 

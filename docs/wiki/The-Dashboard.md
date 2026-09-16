@@ -22,12 +22,14 @@ page says so and names the setting.
 
 The session list lives in the header as a horizontal strip by default. With a lot of
 sessions open that strip stops being scannable, so **App Settings → Appearance → Tabs →
-Session List Layout** can move it into a vertical sidebar on the left instead.
+Session List Layout** can move it into a vertical sidebar on the left instead, and
+**Tab Orientation** can turn the strip itself into a vertical rail.
 
 | Layout               | Behaviour                                                                       |
 | -------------------- | --------------------------------------------------------------------------------- |
 | **Header tab strip** | The default. Wraps to a second row on desktop, scrolls sideways on a phone.        |
-| **Left sidebar**     | A vertical list with a filter box and a live session count. `Alt+B` collapses it to a narrow rail that keeps the status dots and task badges visible. On a phone it is an off-canvas drawer rather than a docked rail. |
+| **Left sidebar**     | A vertical list with a filter box and a live session count. `Alt+B` collapses it to a narrow rail that keeps the status dots and task badges visible. On a phone it is an off-canvas drawer rather than a docked rail. A detailed variant adds the home screen's per-session line (`created 3d ago · working 12m`) and a status pill. |
+| **Vertical rail**    | The strip turned vertical beside the terminal, resizable, with detailed rows by default. **Vertical Rail Order** sorts it by activity (blocked on you first, then longest running, then most recently quiet), the same order as the home screens; pick *Manual* to get your own order and drag-reordering back. Desktop and tablet only. |
 
 It is the same list either way, just re-hosted: tab order, drag-to-reorder, the `Alt+1`
 to `Alt+9` numbers and every status colour below behave identically in both. The setting is
@@ -65,6 +67,18 @@ reloading while a permission prompt is blocking does not lose the red tab.
 | Find any session, open or past  | `Ctrl+K` (also `Cmd+K` and `Alt+K`)                     |
 
 Tabs can also be dragged to reorder.
+
+### Automatic session names
+
+Off by default. Turn on **Auto-name Sessions** (App Settings → Appearance → Tabs; synced
+across devices) and a tab that still carries its generated name, such as `w3-myapp`, takes a
+title from the first real prompt you submit, keeping the prefix: `w3-myapp: fix the login
+redirect`. The strip shows the title and keeps the prefix in the tooltip, and the next
+session in that case still counts up to `w4-myapp`. It happens once per session, only for
+prompts you type or send through the input API (never a Ralph, respawn, cron or approval
+answer), and never for shells. Slash commands such as `/clear` do not become titles; the
+next prompt gets its turn. A name you set yourself, before or after, is never touched. The
+title is derived locally from the prompt's first sentence; no text leaves the machine.
 
 On phones the strip scrolls horizontally instead of wrapping, and the active tab is always
 scrolled into view. It is not reordered to the front, so the `Alt+N` numbering stays stable.
@@ -142,6 +156,10 @@ Worth knowing:
   always local scrollback. Other CLIs scroll locally.
 - **Selection copy.** `Ctrl+C` copies when text is selected and interrupts when it is not.
   `Ctrl+Shift+C` always copies.
+- **Selecting where the CLI owns the mouse.** `Shift+drag` starts a selection even in a pane
+  whose mouse events are forwarded to the CLI, and right-click copies the selection (with
+  nothing selected the native menu is left alone). **Auto Copy Selection** in App Settings
+  copies the moment you release.
 - **Zero-lag input.** On touch devices, keystrokes paint locally before the round trip. See
   [Input And Voice](Input-And-Voice).
 - **Renderer.** WebGL by default, with a watchdog that falls back to DOM rendering if the
@@ -155,8 +173,9 @@ which lists past sessions including Claude conversations started outside Codeman
 
 Two extras depending on the device:
 
-- **Desktop, wide windows**: your open tabs appear as a rail docked to the left edge, in tab
-  order, with created and last-active stamps. It needs at least 1180px of width; below that
+- **Desktop, wide windows**: your open tabs appear as a rail docked to the left edge, in
+  overview order (blocked on you first, then longest running, then most recently quiet),
+  with created and state-duration stamps. It needs at least 1180px of width; below that
   it is hidden so it cannot overlap the search panel.
 - **Phones**: tapping the "C" logo gives a session overview instead: NEEDS YOU first, then
   current sessions, then past ones. On by default.
@@ -192,7 +211,9 @@ so it is fast and cannot be turned into a traversal.
 ## Appearance
 
 **App Settings → Appearance** carries the theme skins, including light ones. The choice is
-applied before the first paint, so there is no flash of the wrong theme on load.
+applied before the first paint, so there is no flash of the wrong theme on load. Terminal
+font family and weight are per device too: a normal and a bold weight, each from 100 to
+900, and the bundled JetBrains Mono renders every step.
 
 The same section has the entrance animations for tabs, terminals, agent windows, and
 lineage lines. All of them default to the legacy no-animation behaviour, so an untouched
