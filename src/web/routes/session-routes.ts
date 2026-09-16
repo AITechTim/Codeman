@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
   ApiErrorCode,
@@ -3136,6 +3136,7 @@ export function registerSessionRoutes(
       effort,
       parentSessionId,
       agentOrigin,
+      customModel,
     } = parseBody(QuickStartSchema, req.body);
 
     // Resolved ONCE here: the same value labels a case directory this request creates
@@ -3188,11 +3189,12 @@ export function registerSessionRoutes(
         grokConfig ||
         deepSeekConfig ||
         ompConfig ||
-        openCodeConfig
+        openCodeConfig ||
+        customModel
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, modelOverride, and per-CLI config are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
+          'envOverrides, effort, modelOverride, per-CLI config, and custom model endpoints are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
         );
       }
 
@@ -3223,11 +3225,12 @@ export function registerSessionRoutes(
         grokConfig ||
         deepSeekConfig ||
         ompConfig ||
-        openCodeConfig
+        openCodeConfig ||
+        customModel
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, and per-CLI config are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
+          'envOverrides, effort, per-CLI config, and custom model endpoints are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
         );
       }
 
@@ -3515,7 +3518,106 @@ export function registerSessionRoutes(
     );
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
+    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig);
+
+    // Custom Model Endpoint Profiles, applied AT CREATE TIME (docs/custom-model-endpoints-plan.md)
+    // rather than via the dedicated restart-in-place route (POST /api/sessions/:id/custom-
+    // model, still what an ALREADY-RUNNING session uses to switch later): computing the
+    // injection before the process exists and launching directly on it avoids the visible
+    // native-boot-then-restart the restart-after-launch design otherwise shows on every
+    // custom-model run — most jarring on a CLI like Codex whose TUI fully reinitializes.
+    // Mirrors the dedicated route's own checks (llama-swap conflict, unsupported CLI,
+    // unknown endpoint, a model id the CLI's argv pattern can't carry) rather than trusting
+    // a lighter version of them, since this is the same server-side authority reached a
+    // different way, not a separate, less-checked path.
+    let qsCustomModelEnvOverrides = qsGatedEnvOverrides;
+    let qsCustomModelLaunchModel: string | undefined;
+    let qsCustomModelSessionId: string | undefined;
+    let qsCustomModelBookkeeping:
+      | {
+          endpointId: string;
+          modelId: string;
+          label?: string;
+          envKeys: string[];
+          configDir?: string;
+          launchModel?: string;
+        }
+      | undefined;
+    if (customModel) {
+      const cmEntry = getCli(mode);
+      if (!cmEntry) return createErrorResponse(ApiErrorCode.INVALID_INPUT, `No CLI registry entry for mode ${mode}`);
+      if (cmEntry.capabilities.customModelInjection.kind === 'unsupported') {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
+      }
+      const cmHosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
+      const cmEndpoint = cmHosts.find((h) => h.id === customModel.endpointId);
+      if (!cmEndpoint) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+
+      // See the dedicated route's own comment for the full reasoning: llama.cpp runs one
+      // model at a time, llama-swap swaps on demand, and switching away from what another
+      // live session is actively using deserves a warning, not a silent switch. There is no
+      // "self" to exclude from the affected-sessions scan here — this session doesn't exist
+      // yet.
+      const cmSwapStatus = await getLlamaSwapStatus(cmEndpoint);
+      const cmCurrentlyLoaded =
+        cmSwapStatus.running.find((r) => r.state === 'ready')?.model ?? cmSwapStatus.running[0]?.model;
+      const cmSwapNeeded = cmSwapStatus.isLlamaSwap && !!cmCurrentlyLoaded && cmCurrentlyLoaded !== customModel.modelId;
+      if (cmSwapNeeded && !customModel.confirmed) {
+        const cmAffectedSessions = [...ctx.sessions.values()]
+          .filter((s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded)
+          .map((s) => ({ id: s.id, name: s.name }));
+        if (cmAffectedSessions.length > 0) {
+          return {
+            requiresConfirmation: true,
+            currentlyLoadedModel: cmCurrentlyLoaded,
+            affectedSessions: cmAffectedSessions,
+          };
+        }
+      }
+
+      // Minted ourselves (rather than left to Session's own default) so the injection
+      // below — and any configDir it writes — can target the REAL id the session launches
+      // with, not a placeholder: `new Session({ id: ... })` accepts an explicit id for
+      // exactly this reason.
+      qsCustomModelSessionId = randomUUID();
+      const cmContextLength = cmEndpoint.modelContextLengths?.[customModel.modelId];
+      const cmApplied = applyCustomModelInjection(
+        cmEntry,
+        cmEndpoint,
+        customModel.modelId,
+        qsCustomModelSessionId,
+        cmContextLength
+      );
+      if (!cmApplied) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
+      }
+      const cmModelSpec = cmEntry.launch.params.model;
+      if (
+        cmApplied.launchModel !== undefined &&
+        cmModelSpec?.type === 'token' &&
+        !matchesPattern(cmModelSpec.pattern, cmApplied.launchModel)
+      ) {
+        removeConfigDir(cmApplied.configDir);
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `Model id ${JSON.stringify(customModel.modelId)} cannot be passed to ${mode} on its command line`
+        );
+      }
+
+      qsCustomModelEnvOverrides = { ...qsGatedEnvOverrides, ...cmApplied.envOverrides };
+      qsCustomModelLaunchModel = cmApplied.launchModel;
+      qsCustomModelBookkeeping = {
+        endpointId: cmEndpoint.id,
+        modelId: customModel.modelId,
+        label: cmEndpoint.label,
+        envKeys: cmApplied.envKeys,
+        configDir: cmApplied.configDir,
+        launchModel: cmApplied.launchModel,
+      };
+    }
+
     const session = new Session({
+      id: qsCustomModelSessionId,
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
       mux: ctx.mux,
@@ -3530,11 +3632,24 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? qsGatedCodexConfig : undefined,
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
-      piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
-      grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
+      piConfig:
+        mode === 'pi'
+          ? qsCustomModelLaunchModel !== undefined
+            ? { ...(qsGatedPiConfig ?? {}), model: qsCustomModelLaunchModel }
+            : qsGatedPiConfig
+          : undefined,
+      grokConfig:
+        mode === 'grok'
+          ? qsCustomModelLaunchModel !== undefined
+            ? { ...(qsGatedGrokConfig ?? {}), model: qsCustomModelLaunchModel }
+            : qsGatedGrokConfig
+          : undefined,
       deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
-      ompConfig: resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig),
-      envOverrides: qsGatedEnvOverrides,
+      ompConfig:
+        mode === 'omp' && qsCustomModelLaunchModel !== undefined
+          ? { ...(qsResolvedOmpConfig ?? {}), model: qsCustomModelLaunchModel }
+          : qsResolvedOmpConfig,
+      envOverrides: qsCustomModelEnvOverrides,
       effort,
       remote,
       docker,
@@ -3542,6 +3657,15 @@ export function registerSessionRoutes(
       tmuxHistoryLimit: qsTerminalHistoryConfig.tmuxHistoryLimit,
       parentSessionId: qsParentSessionId,
     });
+
+    // Records the selection for session.customModel/getCustomModelForPersist() and future
+    // clear/switch calls — the actual env vars and launch-model config are already part of
+    // the launch above (constructor envOverrides, piConfig/grokConfig/ompConfig.model), so
+    // this is bookkeeping only, never a restart: setCustomModel() is synchronous state, no
+    // tmux IO of its own (see its own doc comment in session.ts).
+    if (qsCustomModelBookkeeping) {
+      session.setCustomModel(qsCustomModelBookkeeping, qsCustomModelEnvOverrides);
+    }
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)

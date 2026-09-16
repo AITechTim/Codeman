@@ -119,26 +119,59 @@ model it runs straight away; with two or more, a small modal
 (`#customModelPickModal`) lists them and asks which one to use for this
 launch, with the endpoint's `defaultModelId` marked but not auto-chosen —
 the point of asking is letting one launch deliberately differ from the
-saved default, not just confirming it. Whichever way the model was decided,
-the launch itself runs a single session on that harness exactly the way its
-own Run-menu entry would (same case creation, env overrides, everything),
-then **waits for the new session to go idle** (`GET .../wait?until=idle`,
-bounded at 20s — a normal 200 either way, never an error, per the wait
-endpoint's own contract) before applying the endpoint and model to it via
-the route below. That wait exists because a freshly launched CLI reports
-itself as `busy` for its own startup (a boot spinner, a workspace-trust
-check) well before the apply call would otherwise reach it, and the apply
-route correctly refuses to restart a session mid-turn — a fresh boot looks
-exactly like one from the outside. A session still busy after the wait
-reaches the apply call anyway and gets that route's own honest
-`SESSION_BUSY` error, now visible as a sticky toast with a close button
-rather than a generic message that vanished in three seconds. It is a
+saved default, not just confirming it.
+
+**How the launch itself applies the endpoint depends on the harness.** For
+opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP (`runCustomModelEntry` →
+`_runCustomModelEntryOneShot`), the endpoint/model is folded into the SAME
+`POST /api/quick-start` call that creates the session (`customModel` field),
+so the session launches directly on the endpoint — no restart, no visible
+relaunch. Claude (`_runCustomModelEntryViaRestart`) still uses the original
+two-step design: the launch runs a single native session exactly the way its
+own Run-menu entry would, then **waits for the new session to go idle**
+(`GET .../wait?until=idle`, bounded at 20s — a normal 200 either way, never
+an error, per the wait endpoint's own contract) before applying the endpoint
+via the restart route below. That wait exists because a freshly launched CLI
+reports itself as `busy` for its own startup (a boot spinner, a
+workspace-trust check) well before the apply call would otherwise reach it,
+and the apply route correctly refuses to restart a session mid-turn — a
+fresh boot looks exactly like one from the outside. A session still busy
+after the wait reaches the apply call anyway and gets that route's own
+honest `SESSION_BUSY` error, now visible as a sticky toast with a close
+button rather than a generic message that vanished in three seconds. Claude
+stays on this path because its own restart (`--resume`-based, keeping the
+conversation) is far less jarring than the other seven's, and `runClaude()`'s
+multi-tab launch and docker-config-drift confirm/retry loop make folding it
+into the one-shot path separate work. It is a
 one-off "try this endpoint" action, not a sticky mode: the plain Run button
 still means "this harness, native cloud" afterward. Entries are hidden
 entirely for a remote or Docker active case, since the apply route refuses
 both (see the next section).
 
-## Applying a model to a session
+## Launching directly on an endpoint (no restart)
+
+```bash
+curl -sk -X POST https://localhost:3000/api/quick-start \
+  -H 'Content-Type: application/json' \
+  -d '{"caseName": "myapp", "mode": "codex", "customModel": {"endpointId": "llama-box", "modelId": "qwen3"}}'
+```
+
+`POST /api/quick-start`'s `customModel` field (`{endpointId, modelId,
+confirmed?}`) computes the same injection the restart route below does, but
+BEFORE the session exists — the session is minted its own id up front
+(`crypto.randomUUID()`), the injection (env vars, and for a `configDir`-kind
+CLI, the written config file) targets that real id, and the session launches
+already pointed at the endpoint. No restart, because there was never a
+native-backend launch to restart away from. Runs the same llama-swap
+conflict check as the restart route (below) — a `409`-shaped
+`{requiresConfirmation, currentlyLoadedModel, affectedSessions}` response
+with no session created, resolved by retrying with `confirmed: true` — and
+is refused the same way for a remote or Docker case. This is what the
+Run-menu picker uses for opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP;
+Claude still uses the restart route below (see "The Run-menu picker" above
+for why).
+
+## Applying a model to an ALREADY-RUNNING session
 
 ```bash
 curl -sk -X POST https://localhost:3000/api/sessions/<sessionId>/custom-model \

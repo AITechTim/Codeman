@@ -694,7 +694,96 @@ Object.assign(CodemanApp.prototype, {
    * default, which a one-off endpoint run must not do — and is restored in
    * `finally` even if run() throws.
    */
+  /**
+   * Dispatches to the ONE-SHOT launch path (below) for every custom-model-eligible CLI
+   * except claude, which still goes through the restart-after-native-boot path
+   * (`_runCustomModelEntryViaRestart`): claude's own `runClaude()` carries multi-tab
+   * launch and a docker-config-drift confirm/retry loop neither of the other seven
+   * functions has, and folding those into the one-shot flow is unstarted, separate work.
+   * The other seven (opencode/codex/gemini/pi/grok/deepseek/omp) are each a single,
+   * simple launch, so they get the one-shot path — the one visibly worth it, since a
+   * native-boot-then-restart is far more jarring on a CLI whose TUI fully reinitializes
+   * (Codex, confirmed live) than on claude's own `--resume`-based restart.
+   */
   async runCustomModelEntry(mode, endpointId, modelId) {
+    if (mode === 'claude') {
+      return this._runCustomModelEntryViaRestart(mode, endpointId, modelId);
+    }
+    return this._runCustomModelEntryOneShot(mode, endpointId, modelId);
+  },
+
+  /**
+   * Launches directly on the endpoint — no restart, so no visible relaunch. Stashes the
+   * pick on `_pendingCustomModelForLaunch` for the targeted run<Mode>() function to read
+   * and fold into its own /api/quick-start body (see `_quickStartWithCustomModelConfirm`);
+   * cleared in `finally` the same way `_runMode`'s temporary swap is, even if run() throws.
+   */
+  async _runCustomModelEntryOneShot(mode, endpointId, modelId) {
+    document.getElementById('runModeMenu')?.classList.remove('active');
+    const previousRunMode = this._runMode;
+    const tabCountEl = document.getElementById('tabCount');
+    const prevTabCount = tabCountEl?.value;
+    this._runMode = mode;
+    this._pendingCustomModelForLaunch = { endpointId, modelId };
+    if (tabCountEl) tabCountEl.value = '1';
+    try {
+      await this.run();
+    } finally {
+      this._runMode = previousRunMode;
+      this._pendingCustomModelForLaunch = undefined;
+      if (tabCountEl && prevTabCount !== undefined) tabCountEl.value = prevTabCount;
+    }
+
+    // run() (via _quickStartWithCustomModelConfirm) reports its own launch error or
+    // cancellation via toast and leaves this unset — nothing more to do here then.
+    const result = this._lastCustomModelLaunchResult;
+    this._lastCustomModelLaunchResult = undefined;
+    if (result?.modelSwapInProgress) {
+      void this._watchLlamaSwapLoading(endpointId, modelId);
+    }
+  },
+
+  /**
+   * POSTs a /api/quick-start body already carrying `customModel` (see the run<Mode>()
+   * call sites below), showing the same llama-swap "this will unload it for session X"
+   * warning the restart path's `_applyCustomModelToSession` shows when the route asks
+   * for confirmation, and retrying with `confirmed: true` on accept. Stashes the final
+   * response's payload on `_lastCustomModelLaunchResult` for
+   * `_runCustomModelEntryOneShot` to read `modelSwapInProgress` off afterward — run()'s
+   * eleven per-mode dispatch targets have no shared return-value contract of their own,
+   * so a side channel here is simpler than threading one through every one of them.
+   */
+  async _quickStartWithCustomModelConfirm(bodyObj) {
+    const post = async (body) => {
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    };
+    let data = await post(bodyObj);
+    if (data?.data?.requiresConfirmation) {
+      const { currentlyLoadedModel, affectedSessions } = data.data;
+      const names = affectedSessions.map((s) => s.name || s.id).join(', ');
+      const proceed = confirm(
+        `${names} ${affectedSessions.length === 1 ? 'is' : 'are'} currently using ` +
+          `${currentlyLoadedModel} on this endpoint. Switching will unload it for ` +
+          `${affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
+      );
+      if (!proceed) {
+        this._lastCustomModelLaunchResult = undefined;
+        return { success: false, error: 'Model switch cancelled' };
+      }
+      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, confirmed: true } });
+    }
+    this._lastCustomModelLaunchResult = data?.success !== false ? data?.data : undefined;
+    return data;
+  },
+
+  /** The restart-after-native-boot path — see `runCustomModelEntry`'s own comment for
+   *  which CLIs still use this one. */
+  async _runCustomModelEntryViaRestart(mode, endpointId, modelId) {
     document.getElementById('runModeMenu')?.classList.remove('active');
 
     const previousRunMode = this._runMode;
@@ -1583,20 +1672,16 @@ Object.assign(CodemanApp.prototype, {
       // Quick-start with opencode mode (auto-allow tools by default).
       // No `effort` field — it's Claude-specific (OpenCode has no /effort).
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'opencode',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            openCodeConfig: { autoAllowTools: true },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'opencode',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote ? {} : {
+          openCodeConfig: { autoAllowTools: true },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
+        }),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start OpenCode');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
@@ -1637,24 +1722,20 @@ Object.assign(CodemanApp.prototype, {
 
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'codex',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            codexConfig: {
-              dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
-              animations: globalSettings.codexAnimationsEnabled ?? false,
-              renderMode: 'hybrid',
-            },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'codex',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote ? {} : {
+          codexConfig: {
+            dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
+            animations: globalSettings.codexAnimationsEnabled ?? false,
+            renderMode: 'hybrid',
+          },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
+        }),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Codex');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
@@ -1694,20 +1775,16 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'gemini',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            geminiConfig: { approvalMode: 'yolo' },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'gemini',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote ? {} : {
+          geminiConfig: { approvalMode: 'yolo' },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
+        }),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
@@ -1805,17 +1882,13 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'pi',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote || Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'pi',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote || Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
+        ...(!isRemote && this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Pi');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
@@ -1853,19 +1926,15 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'omp',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'omp',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote ? {} : {
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
+        }),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start OMP');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
@@ -1912,20 +1981,16 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'grok',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            grokConfig: { alwaysApprove: true },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'grok',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote ? {} : {
+          grokConfig: { alwaysApprove: true },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
+        }),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start Grok');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 
@@ -1990,20 +2055,16 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'deepseek',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            deepSeekConfig: { permissionMode: 'danger-full-access' },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
+      const data = await this._quickStartWithCustomModelConfirm({
+        caseName,
+        mode: 'deepseek',
+        sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+        ...(isRemote ? {} : {
+          deepSeekConfig: { permissionMode: 'danger-full-access' },
+          ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+          ...(this._pendingCustomModelForLaunch ? { customModel: this._pendingCustomModelForLaunch } : {}),
+        }),
       });
-      const data = await res.json();
       if (!data.success) throw new Error(data.error || 'Failed to start DeepSeek');
       await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
 

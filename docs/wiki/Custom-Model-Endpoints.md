@@ -52,12 +52,15 @@ small dialog asks which one to use for this launch before starting the session; 
 endpoint's default model, if set, is marked but not auto-picked, so a launch can deliberately
 use a different one without changing the saved default.
 
-Applying a selection **restarts the harness's process in place** — same tab, same
-conversation where the harness supports resuming one, fresh environment. That restart is
-necessary, not incidental: every supported harness reads its endpoint config at process
-start, never per turn, so there is no live hot-swap while a turn is running.
+**For opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP, picking an entry launches
+straight onto the endpoint** — no restart, because the endpoint is applied before the
+session's process ever starts. **Claude still restarts the harness's process in place** —
+same tab, same conversation (`--resume`) — after a normal native launch, since that restart
+is far less jarring for Claude than for the other seven, whose own TUI can fully
+reinitialize on a restart. Either way, every supported harness reads its endpoint config at
+process start, never per turn, so there is no live hot-swap while a turn is running.
 
-Picking an entry that launches a **brand-new** session waits (up to 20 seconds) for it to
+Picking an entry that launches a **brand-new** Claude session waits (up to 20 seconds) for it to
 finish its own startup before applying — a freshly started CLI reports itself as busy for its
 boot sequence, and applying to a genuinely busy session is refused so a real, in-progress
 turn is never interrupted out from under you. A session that is still busy after that wait
