@@ -8,7 +8,7 @@ import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 import { createRouteTestHarness } from './_route-test-utils.js';
 import { getDataDir } from '../../src/config/instance.js';
 import { writeCustomModelHosts, type CustomModelHost } from '../../src/custom-model-hosts.js';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const CLAUDE_ENDPOINT: CustomModelHost = {
@@ -54,9 +54,19 @@ describe('POST /api/sessions/:id/custom-model', () => {
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      'CLAUDE_CONFIG_DIR',
     ]);
     expect(envOverrides.ANTHROPIC_BASE_URL).toBe('http://192.168.1.50:8080');
     expect(envOverrides.ANTHROPIC_API_KEY).toBe('k');
+
+    // CLAUDE_CONFIG_DIR isolates this session from a stored claude.ai OAuth login, and the
+    // trust-dialog file it points at is pre-seeded so the injected key doesn't hit an
+    // interactive "Detected a custom API key" prompt with nobody there to answer it.
+    const isolatedDir = join(getDataDir(), 'custom-model-configs', 'test-session-1');
+    expect(envOverrides.CLAUDE_CONFIG_DIR).toBe(isolatedDir);
+    expect(next.configDir).toBe(isolatedDir);
+    const trustFile = JSON.parse(readFileSync(join(isolatedDir, '.claude.json'), 'utf8'));
+    expect(trustFile.customApiKeyResponses.approved).toEqual(['k']);
   });
 
   it('clears back to the native default', async () => {
