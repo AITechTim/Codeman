@@ -156,7 +156,7 @@ describe('_quickStartWithCustomModelConfirm', () => {
 
   it('confirming re-sends with confirmed:true and returns the second response', async () => {
     const { win, app } = bootApp();
-    win.confirm = (() => true) as typeof win.confirm;
+    app._confirmModelSwap = async () => true;
     let calls = 0;
     withFetch(win, (body) => {
       calls += 1;
@@ -184,7 +184,7 @@ describe('_quickStartWithCustomModelConfirm', () => {
 
   it('cancelling never re-sends, and reports a cancellation error', async () => {
     const { win, app } = bootApp();
-    win.confirm = (() => false) as typeof win.confirm;
+    app._confirmModelSwap = async () => false;
     let calls = 0;
     withFetch(win, () => {
       calls += 1;

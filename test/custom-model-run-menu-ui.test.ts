@@ -54,6 +54,9 @@ function bootApp(
         <p id="customModelPickHint"></p>
         <div id="customModelPickList"></div>
       </div>
+      <div class="modal" id="customModelSwapConfirmModal">
+        <p id="customModelSwapConfirmMessage"></p>
+      </div>
     </body>`,
     { url: 'http://localhost/', runScripts: 'dangerously' }
   );
@@ -515,8 +518,8 @@ describe('Custom Model Endpoint Profiles: llama-swap model-swap confirmation and
     return { win, app, applyBodies };
   }
 
-  it('confirming the native window.confirm() re-sends the apply with confirmed:true', async () => {
-    const { win, app, applyBodies } = launchHarness([
+  it('confirming the in-app swap-confirm modal re-sends the apply with confirmed:true', async () => {
+    const { app, applyBodies } = launchHarness([
       {
         requiresConfirmation: true,
         currentlyLoadedModel: 'llama3',
@@ -525,10 +528,10 @@ describe('Custom Model Endpoint Profiles: llama-swap model-swap confirmation and
       { customModel: { endpointId: 'llama-box' }, restarted: true, modelSwapInProgress: true },
     ]);
     let confirmMessage: string | undefined;
-    win.confirm = ((msg: string) => {
-      confirmMessage = msg;
+    app._confirmModelSwap = async (message: string) => {
+      confirmMessage = message;
       return true;
-    }) as typeof win.confirm;
+    };
     app._watchLlamaSwapLoading = async () => {}; // not under test here
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
@@ -542,11 +545,11 @@ describe('Custom Model Endpoint Profiles: llama-swap model-swap confirmation and
     ]);
   });
 
-  it('cancelling window.confirm() keeps the native backend and never re-sends the apply', async () => {
-    const { win, app, applyBodies } = launchHarness([
+  it('cancelling the in-app swap-confirm modal keeps the native backend and never re-sends the apply', async () => {
+    const { app, applyBodies } = launchHarness([
       { requiresConfirmation: true, currentlyLoadedModel: 'llama3', affectedSessions: [{ id: 's2', name: 'w2' }] },
     ]);
-    win.confirm = (() => false) as typeof win.confirm;
+    app._confirmModelSwap = async () => false;
     let toastMessage: string | undefined;
     app.showToast = (msg: string) => {
       toastMessage = msg;
@@ -656,5 +659,31 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
 
     expect(toastCalls.at(-1)).toMatch(/ready/i);
+  });
+});
+
+describe('Custom Model Endpoint Profiles: _confirmModelSwap (in-app modal, replaces a native confirm() popup)', () => {
+  it('shows the message, activates the modal, and resolves true when "Switch anyway" is clicked', async () => {
+    const { win, app } = bootApp({});
+    const promise = app._confirmModelSwap('w2 is using llama3. Switch anyway?');
+
+    const modal = win.document.getElementById('customModelSwapConfirmModal')!;
+    expect(modal.classList.contains('active')).toBe(true);
+    expect(win.document.getElementById('customModelSwapConfirmMessage')!.textContent).toBe(
+      'w2 is using llama3. Switch anyway?'
+    );
+
+    app._resolveModelSwapConfirm(true);
+
+    expect(await promise).toBe(true);
+    expect(modal.classList.contains('active')).toBe(false);
+  });
+
+  it('resolves false when Cancel (or the backdrop) is clicked, without ever showing a browser confirm() popup', async () => {
+    const { win, app } = bootApp({});
+    const promise = app._confirmModelSwap('w2 is using llama3. Switch anyway?');
+    app._resolveModelSwapConfirm(false);
+    expect(await promise).toBe(false);
+    expect(win.document.getElementById('customModelSwapConfirmModal')!.classList.contains('active')).toBe(false);
   });
 });

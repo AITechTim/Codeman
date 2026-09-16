@@ -667,6 +667,32 @@ Object.assign(CodemanApp.prototype, {
     this._pendingCustomModelPick = null;
   },
 
+  /**
+   * In-app replacement for a native `confirm()` popup, used specifically for the
+   * llama-swap "this will unload it for session X" warning (both launch paths below) —
+   * a browser-chrome dialog there looked out of place next to the rest of the app's own
+   * modals. Resolves true/false the same way `confirm()` would; `_resolveModelSwapConfirm`
+   * (the modal's own Cancel/Switch-anyway buttons, and its backdrop click) is what settles
+   * the returned promise.
+   */
+  _confirmModelSwap(message) {
+    const modal = document.getElementById('customModelSwapConfirmModal');
+    const messageEl = document.getElementById('customModelSwapConfirmMessage');
+    if (messageEl) messageEl.textContent = message;
+    modal?.classList.add('active');
+    return new Promise((resolve) => {
+      this._resolveModelSwapConfirmPromise = resolve;
+    });
+  },
+
+  /** Called by the modal's Cancel/Switch-anyway buttons and its backdrop click. */
+  _resolveModelSwapConfirm(proceed) {
+    document.getElementById('customModelSwapConfirmModal')?.classList.remove('active');
+    const resolve = this._resolveModelSwapConfirmPromise;
+    this._resolveModelSwapConfirmPromise = null;
+    resolve?.(proceed);
+  },
+
   /** A model row in the picker modal was clicked: close it and launch with that choice. */
   chooseCustomModelAndRun(modelId) {
     const pending = this._pendingCustomModelPick;
@@ -766,7 +792,7 @@ Object.assign(CodemanApp.prototype, {
     if (data?.data?.requiresConfirmation) {
       const { currentlyLoadedModel, affectedSessions } = data.data;
       const names = affectedSessions.map((s) => s.name || s.id).join(', ');
-      const proceed = confirm(
+      const proceed = await this._confirmModelSwap(
         `${names} ${affectedSessions.length === 1 ? 'is' : 'are'} currently using ` +
           `${currentlyLoadedModel} on this endpoint. Switching will unload it for ` +
           `${affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
@@ -850,7 +876,7 @@ Object.assign(CodemanApp.prototype, {
     // call with `confirmed: true` so the route skips the check the second time.
     if (ok && payload?.requiresConfirmation) {
       const names = payload.affectedSessions.map((s) => s.name || s.id).join(', ');
-      const proceed = confirm(
+      const proceed = await this._confirmModelSwap(
         `${names} ${payload.affectedSessions.length === 1 ? 'is' : 'are'} currently using ` +
           `${payload.currentlyLoadedModel} on this endpoint. Switching to ${modelId} will unload it ` +
           `for ${payload.affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
