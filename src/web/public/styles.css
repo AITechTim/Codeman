@@ -8463,6 +8463,9 @@ kbd {
 }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -8474,10 +8477,37 @@ kbd {
   opacity: 0;
   transition: all 0.2s ease;
   pointer-events: auto;
+  max-width: 420px;
 }
 
 .toast.show {
   transform: translateX(0);
+  opacity: 1;
+}
+
+.toast-message {
+  flex: 1;
+  /* Errors are sticky by default (showToast) precisely so a longer, specific
+     message survives to be read — let it wrap instead of clipping. */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Every toast gets one, sticky or not: a sticky toast with no way to close it
+   would just accumulate on screen across repeated failures. */
+.toast-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+  cursor: pointer;
+}
+
+.toast-close:hover {
   opacity: 1;
 }
 

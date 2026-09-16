@@ -721,12 +721,20 @@ Object.assign(CodemanApp.prototype, {
     const sessionId = this.activeSessionId;
     if (!sessionId || sessionId === before) return;
 
-    const data = await this._apiJson(`/api/sessions/${sessionId}/custom-model`, {
+    // _apiJson() (used everywhere else in this file) unwraps a success body to
+    // its `data`, but on failure it swallows the response entirely and returns
+    // null — exactly the `error` text a caller needs to tell "the endpoint is
+    // unreachable" apart from "the CLI can't be redirected", "not one of the
+    // discovered models", or "this is a Docker/remote session". Go through the
+    // raw response here instead so a failure is diagnosable, not just present.
+    const res = await this._api(`/api/sessions/${sessionId}/custom-model`, {
       method: 'POST',
       body: { endpointId, modelId },
     });
-    if (!data) {
-      this.showToast(`Session started on the native backend — could not apply the custom endpoint`, 'warning');
+    const data = res ? await res.json().catch(() => null) : null;
+    if (!data || data.success === false) {
+      const detail = data?.error ? `: ${data.error}` : res ? ` (HTTP ${res.status})` : ' (request failed)';
+      this.showToast(`Session started on the native backend — could not apply the custom endpoint${detail}`, 'error');
       return;
     }
     this.showToast(`Pointed at ${endpointId} — restarting the session...`, 'info');

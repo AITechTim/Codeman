@@ -5484,12 +5484,25 @@ Object.assign(CodemanApp.prototype, {
     return this.showToast(message, type);
   },
 
+  /**
+   * `duration` defaults to 0 (sticky, no auto-dismiss) for `error` toasts and
+   * 3000ms for everything else — an error worth a distinct visual style is
+   * also worth reading before it vanishes, which a fixed 3s auto-dismiss
+   * does not guarantee: "Session started on the native backend — could not
+   * apply the custom endpoint: <the actual reason>" is exactly the kind of
+   * message that needs a moment to read, not a glance. Every toast gets an
+   * explicit close button regardless of duration, since a sticky one with no
+   * way to dismiss it would just pile up. A caller can still override either
+   * default via `opts.duration` (e.g. a deliberately brief success toast, or
+   * a non-error one that should also stay put).
+   */
   showToast(message, type = 'info', opts = {}) {
-    const { duration = 3000, action } = opts;
+    const { duration = type === 'error' ? 0 : 3000, action } = opts;
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
 
     const msgSpan = document.createElement('span');
+    msgSpan.className = 'toast-message';
     msgSpan.textContent = message;
     toast.appendChild(msgSpan);
 
@@ -5500,6 +5513,20 @@ Object.assign(CodemanApp.prototype, {
       btn.onclick = (e) => { e.stopPropagation(); action.onClick(); toast.remove(); };
       toast.appendChild(btn);
     }
+
+    let dismissTimer = null;
+    const dismiss = () => {
+      if (dismissTimer) clearTimeout(dismissTimer);
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 200);
+    };
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.onclick = (e) => { e.stopPropagation(); dismiss(); };
+    toast.appendChild(closeBtn);
 
     // Cache toast container reference
     if (!this._toastContainer) {
@@ -5514,10 +5541,9 @@ Object.assign(CodemanApp.prototype, {
 
     requestAnimationFrame(() => toast.classList.add('show'));
 
-    setTimeout(() => {
-      toast.classList.remove('show');
-      setTimeout(() => toast.remove(), 200);
-    }, duration);
+    if (duration > 0) {
+      dismissTimer = setTimeout(dismiss, duration);
+    }
   },
 
 

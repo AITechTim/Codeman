@@ -307,10 +307,9 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
     app.run = async () => {};
     app._runInFlight = false;
     let applyCalled = false;
-    const realApiJson = app._apiJson.bind(app);
-    app._apiJson = async (path: string, opts?: unknown) => {
+    app._api = async (path: string) => {
       if (path.includes('/custom-model')) applyCalled = true;
-      return realApiJson(path, opts as never);
+      return { ok: true, json: async () => ({ success: true, data: {} }) };
     };
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
@@ -326,9 +325,12 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
       app.activeSessionId = 'new-session';
     };
     const calls: Array<{ path: string; body: unknown }> = [];
-    app._apiJson = async (path: string, opts?: { body?: unknown }) => {
+    app._api = async (path: string, opts?: { body?: unknown }) => {
       calls.push({ path, body: opts?.body });
-      return { customModel: { endpointId: 'llama-box' }, restarted: true };
+      return {
+        ok: true,
+        json: async () => ({ success: true, data: { customModel: { endpointId: 'llama-box' }, restarted: true } }),
+      };
     };
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
@@ -336,6 +338,33 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].path).toBe('/api/sessions/new-session/custom-model');
     expect(calls[0].body).toEqual({ endpointId: 'llama-box', modelId: 'qwen3' });
+  });
+
+  it('surfaces the real server error in the toast on a failed apply, rather than a generic message', async () => {
+    const { app } = bootApp({});
+    app.activeSessionId = 'old-session';
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    app._api = async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        success: false,
+        error: 'Custom model endpoints are not supported for remote (SSH) or Docker sessions yet',
+      }),
+    });
+    let toastMessage: string | null = null;
+    let toastType: string | null = null;
+    app.showToast = (msg: string, type: string) => {
+      toastMessage = msg;
+      toastType = type;
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(toastMessage).toContain('Custom model endpoints are not supported for remote (SSH) or Docker sessions yet');
+    expect(toastType).toBe('error');
   });
 
   it('routes through run() itself, so the Run in-flight lock actually engages', async () => {
