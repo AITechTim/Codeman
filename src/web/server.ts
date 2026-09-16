@@ -672,6 +672,7 @@ export class WebServer extends EventEmitter {
       persistSessionState: this.persistSessionState.bind(this),
       persistSessionStateNow: this._persistSessionStateNow.bind(this),
       reapplyPersistedSessionState: this.reapplyPersistedSessionState.bind(this),
+      discardPartiallyBuiltSession: this.discardPartiallyBuiltSession.bind(this),
       getSessionStateWithRespawn: this.getSessionStateWithRespawn.bind(this),
       // EventPort
       broadcast: this.broadcast.bind(this),
@@ -2919,19 +2920,42 @@ export class WebServer extends EventEmitter {
    * because `cleanupSessionsByIds()` keeps a record only while it is pinned, so
    * dropping the pin hands the record to the next stale sweep.
    *
-   * Respawn and Ralph are deliberately NOT re-armed here: a machine that just
-   * came up is the worst moment to turn an autonomous run loose, and the user
-   * re-arms what they want.
+   * Split in two phases because the two halves have opposite timing needs:
+   *
+   * - `before-spawn` shapes the pane itself, so it has to land before the CLI
+   *   process starts. The custom-model selection is an environment injection and
+   *   the nice priority is applied to the spawn.
+   * - `after-spawn` is the session's own accumulated history. It must NOT land
+   *   on a session whose pane failed to start: the totals would then belong to a
+   *   session that never ran, and any later cleanup would add them to the
+   *   lifetime figures a second time.
+   *
+   * Respawn and Ralph are deliberately NOT re-armed: a machine that just came up
+   * is the worst moment to turn an autonomous run loose, and the user re-arms
+   * what they want. Ralph's loop CONFIGURATION does not survive either, because
+   * `toState()` reads `ralphEnabled` and the completion phrase off a live
+   * tracker, and there is no way to hold them without arming the loop.
    */
-  async reapplyPersistedSessionState(session: Session, saved: SessionState): Promise<void> {
-    // The custom-model env has to be rebuilt from the endpoint store: the persist
-    // deliberately keeps the injected VALUES out of state.json, so only the
-    // bookkeeping survives a restart and the values are re-derived here.
-    const savedCustomModel = (saved as { __customModel?: CustomModelBookkeeping }).__customModel;
-    if (savedCustomModel) {
-      session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+  async reapplyPersistedSessionState(
+    session: Session,
+    saved: SessionState,
+    phase: 'before-spawn' | 'after-spawn'
+  ): Promise<void> {
+    if (phase === 'before-spawn') {
+      // The custom-model env has to be rebuilt from the endpoint store: the persist
+      // deliberately keeps the injected VALUES out of state.json, so only the
+      // bookkeeping survives a restart and the values are re-derived here.
+      const savedCustomModel = (saved as { __customModel?: CustomModelBookkeeping }).__customModel;
+      if (savedCustomModel) {
+        session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+      }
+      if (saved.niceEnabled !== undefined || saved.niceValue !== undefined) {
+        session.setNice({ enabled: saved.niceEnabled, niceValue: saved.niceValue });
+      }
+      return;
     }
-    if (saved.pinned) session.setPinned(true);
+
+    if (saved.pinned) session.restorePin(true, saved.pinnedAt);
     if (saved.autoCompactEnabled !== undefined || saved.autoCompactThreshold !== undefined) {
       session.setAutoCompact(saved.autoCompactEnabled ?? false, saved.autoCompactThreshold, saved.autoCompactPrompt);
     }
@@ -2949,10 +2973,49 @@ export class WebServer extends EventEmitter {
         output: saved.outputTokens ?? 0,
       });
     }
-    if (saved.niceEnabled !== undefined || saved.niceValue !== undefined) {
-      session.setNice({ enabled: saved.niceEnabled, niceValue: saved.niceValue });
-    }
+    if (saved.color) session.setColor(saved.color);
+    if (saved.imageWatcherEnabled !== undefined) session.imageWatcherEnabled = saved.imageWatcherEnabled;
     if (saved.flickerFilterEnabled !== undefined) session.flickerFilterEnabled = saved.flickerFilterEnabled;
+  }
+
+  /**
+   * Undo a session that was registered but never got a working pane.
+   *
+   * Deliberately NOT `cleanupSession()`, which is the user-initiated delete: that
+   * path adds the session's token totals to the lifetime figures, demotes a
+   * pinned record to `stopped` (the durable marker of an intentional kill, which
+   * would make the session permanently ineligible for a reboot restore), drops
+   * the persisted Ralph state, and recursively removes `.claude-images` from the
+   * WORKING DIRECTORY, which belongs to the workspace rather than to this session
+   * and may hold another live session's pasted images.
+   *
+   * This undoes only what the failed construction did: the map entry, the tab
+   * layout slot `registerSessionWithLayout()` took, and any pane the CLI launch
+   * managed to create before it threw. The persisted record is left exactly as it
+   * was, so the session stays restorable on the next attempt.
+   */
+  async discardPartiallyBuiltSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    this.sse.cleanupSessionBatches(sessionId);
+    this.persistDeb.cancelKey(sessionId);
+    try {
+      session.removeAllListeners();
+      await session.stop?.();
+    } catch (err) {
+      console.warn(`[Server] stopping a partially built session failed: ${getErrorMessage(err)}`);
+    }
+    try {
+      await this.mux.killSession(sessionId);
+    } catch {
+      // The pane may never have been created; nothing to kill is the normal case.
+    }
+    try {
+      await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);
+    } catch (err) {
+      console.warn(`[Server] releasing the tab layout slot failed: ${getErrorMessage(err)}`);
+    }
   }
 
   private async restoreMuxSessions(): Promise<boolean> {

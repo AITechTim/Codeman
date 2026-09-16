@@ -23,7 +23,7 @@
  *
  * @mixin Extends CodemanApp.prototype via Object.assign
  * @dependency app.js (CodemanApp class, showToast)
- * @dependency api-client.js at runtime (this._apiJson / this._apiPost)
+ * @dependency api-client.js at runtime (this._api / this._apiJson)
  * @loadorder 11.7 of 17, after approvals-ui.js
  */
 
@@ -89,9 +89,15 @@ Object.assign(CodemanApp.prototype, {
   async restoreRebootSessions() {
     const button = this.$('rebootRestoreBannerAccept');
     if (button) button.disabled = true;
-    // _apiJson unwraps the { success, data } envelope every /api response carries;
-    // reading the outer object would report every count as zero.
-    const body = await this._apiJson('/api/reboot-restore/restore', { method: 'POST', body: {} });
+    const res = await this._api('/api/reboot-restore/restore', { method: 'POST', body: {} });
+    if (res && res.status === 409) {
+      if (button) button.disabled = false;
+      this.showToast?.('A restore is already running', 'info');
+      return;
+    }
+    // The uniform envelope wraps every /api payload; reading the outer object
+    // would report every count as zero.
+    const body = res && res.ok ? (await res.json().catch(() => null))?.data : null;
     if (!body) {
       if (button) button.disabled = false;
       this.showToast?.('Could not restore the sessions', 'error');
@@ -99,8 +105,12 @@ Object.assign(CodemanApp.prototype, {
     }
     const restored = body.restored?.length ?? 0;
     const skipped = body.skipped?.length ?? 0;
-    this._rebootRestoreSessions = [];
-    this.renderRebootRestoreBanner();
+    // Re-read rather than clearing: the server puts back anything it could not
+    // build for a reason that may pass, such as a session limit or an agent that
+    // would not start, and blanking the banner here would put those entries out
+    // of reach until a reload.
+    await this.refreshRebootRestoreBanner();
+    if (button) button.disabled = false;
     if (restored > 0) {
       const noun = restored === 1 ? 'conversation' : 'conversations';
       this.showToast?.(`Restored ${restored} ${noun}. Terminal history did not survive the reboot.`, 'success');

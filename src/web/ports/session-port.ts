@@ -14,15 +14,27 @@ export interface SessionPort {
   persistSessionState(session: Session): void;
   persistSessionStateNow(session: Session): void;
   /**
-   * Re-apply the persisted state a freshly CONSTRUCTED session does not carry:
-   * the pin, token and cost totals, auto-compact, auto-clear, auto-resume, nice
-   * priority, the flicker filter and the custom-model selection.
+   * Re-apply the persisted state a freshly CONSTRUCTED session does not carry.
    *
    * A `Session` built from a record holds only what its constructor takes, so
    * persisting it would otherwise REPLACE the fuller record with the reduced one.
-   * Call this before the first persist, and before `startInteractive()`, because
-   * the custom-model selection has to reach the pane's environment.
+   * Two phases: `before-spawn` shapes the pane (the custom-model environment and
+   * the nice priority) and must precede `startInteractive()`; `after-spawn` is
+   * the session's own history (the pin, token and cost totals, auto-compact,
+   * auto-clear, auto-resume, colour, image watcher, flicker filter) and must NOT
+   * land on a session whose pane failed to start.
    */
-  reapplyPersistedSessionState(session: Session, saved: SessionState): Promise<void>;
+  reapplyPersistedSessionState(
+    session: Session,
+    saved: SessionState,
+    phase: 'before-spawn' | 'after-spawn'
+  ): Promise<void>;
+  /**
+   * Undo a session that was registered but never got a working pane: the map
+   * entry, its tab-layout slot, and any pane the launch created before throwing.
+   * Unlike {@link cleanupSession} it leaves the persisted record, the lifetime
+   * token totals, the Ralph state and the workspace's own files untouched.
+   */
+  discardPartiallyBuiltSession(sessionId: string): Promise<void>;
   getSessionStateWithRespawn(session: Session): unknown;
 }

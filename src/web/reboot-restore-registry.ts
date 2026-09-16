@@ -48,6 +48,13 @@ export class RebootRestoreRegistry {
   /** When the boot pass built the plan, in ms since the epoch. */
   private builtAt = 0;
   /**
+   * Bumped by anything that invalidates entries a restore is already holding.
+   * A Dismiss arriving mid-restore must win: without this the route's `finally`
+   * would put its unspent entries back and resurrect the offer the user just
+   * cleared, with a fresh 24-hour life.
+   */
+  private generation = 0;
+  /**
    * Owners with a restore in flight, between its take and its last pane.
    * Keyed by owner so one user's restore does not turn another user's click into
    * a conflict; `take()` already guarantees no two callers get the same entry.
@@ -59,6 +66,12 @@ export class RebootRestoreRegistry {
   set(entries: readonly RebootRestoreEntry[]): void {
     this.entries = new Map(entries.map((entry) => [entry.sessionId, entry]));
     this.builtAt = entries.length > 0 ? Date.now() : 0;
+    this.generation += 1;
+  }
+
+  /** The current generation, for a caller that will later return entries. */
+  currentGeneration(): number {
+    return this.generation;
   }
 
   /**
@@ -104,7 +117,10 @@ export class RebootRestoreRegistry {
    * hand is NOT put back, because that one cannot stop being true, and an entry
    * the banner keeps re-offering forever is noise only Dismiss can clear.
    */
-  restore(entries: readonly RebootRestoreEntry[]): void {
+  restore(entries: readonly RebootRestoreEntry[], generation?: number): void {
+    // A dismiss (or a fresh boot plan) since the caller took these entries means
+    // they are no longer wanted back.
+    if (generation !== undefined && generation !== this.generation) return;
     for (const entry of entries) this.entries.set(entry.sessionId, entry);
     if (entries.length > 0 && this.builtAt === 0) this.builtAt = Date.now();
   }
@@ -114,6 +130,8 @@ export class RebootRestoreRegistry {
     const removable = [...this.entries.values()].filter((entry) => canAccess(entry.owner));
     for (const entry of removable) this.entries.delete(entry.sessionId);
     if (this.entries.size === 0) this.builtAt = 0;
+    // Any restore currently in flight must not put its entries back afterwards.
+    this.generation += 1;
     return removable.length;
   }
 
@@ -137,6 +155,7 @@ export class RebootRestoreRegistry {
     this.entries.clear();
     this.builtAt = 0;
     this.spending.clear();
+    this.generation += 1;
   }
 
   private dropIfExpired(): void {

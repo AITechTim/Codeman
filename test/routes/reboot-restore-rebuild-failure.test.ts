@@ -18,6 +18,8 @@ import fastifyCookie from '@fastify/cookie';
 
 /** Set per test: whether the mocked `startInteractive()` rejects. */
 let startShouldThrow = false;
+/** Ordering log, so a test can assert what ran before the pane spawned. */
+const callOrder: string[] = [];
 
 vi.mock('../../src/session.js', () => ({
   Session: class {
@@ -35,6 +37,7 @@ vi.mock('../../src/session.js', () => ({
       this.owner = config.owner;
     }
     async startInteractive() {
+      callOrder.push('startInteractive');
       if (startShouldThrow) throw new Error('spawn claude ENOENT');
     }
     /** The mock route context projects a session through this on broadcast. */
@@ -101,6 +104,7 @@ async function createHarness(ctx: ReturnType<typeof createMockRouteContext>): Pr
 
 beforeEach(() => {
   startShouldThrow = false;
+  callOrder.length = 0;
 });
 
 afterEach(() => {
@@ -131,7 +135,12 @@ describe('a rebuild that fails after the session is registered', () => {
     await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
     // The session reached ctx.sessions via addSession; the route has to take it
     // back out, or the board shows a tab whose pane never existed.
-    expect(ctx.cleanupSession).toHaveBeenCalledWith('a', true, expect.any(String));
+    expect(ctx.discardPartiallyBuiltSession).toHaveBeenCalledWith('a');
+    expect(ctx.sessions.has('a')).toBe(false);
+    // NOT the user-initiated delete: that would bank this session's historical
+    // tokens into the lifetime totals, demote a pinned record to `stopped`, and
+    // delete the workspace's .claude-images.
+    expect(ctx.cleanupSession).not.toHaveBeenCalled();
     await app.close();
   });
 
@@ -166,6 +175,23 @@ describe('a rebuild that succeeds', () => {
     await app.close();
   });
 
+  it('shapes the pane before it spawns, and restores the history after', async () => {
+    rebootRestoreRegistry.set([offerEntry('a')]);
+    const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
+    (ctx.reapplyPersistedSessionState as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_s: unknown, _saved: unknown, phase: string) => {
+        callOrder.push(`reapply:${phase}`);
+      }
+    );
+    const app = await createHarness(ctx);
+
+    await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
+    // The custom-model environment has to reach the process; the token totals
+    // must not land on a session whose pane never started.
+    expect(callOrder).toEqual(['reapply:before-spawn', 'startInteractive', 'reapply:after-spawn']);
+    await app.close();
+  });
+
   it('tells every other board about the rebuilt session', async () => {
     rebootRestoreRegistry.set([offerEntry('a')]);
     const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
@@ -189,10 +215,30 @@ describe('a rebuild that succeeds', () => {
 });
 
 describe('the session caps', () => {
-  it('stops restoring at the global cap and leaves the rest on offer', async () => {
+  it('counts the sessions it is itself creating, not just the ones it started with', async () => {
     rebootRestoreRegistry.set([offerEntry('a'), offerEntry('b')]);
     const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
-    // Fill the board to the documented maximum of 50 concurrent sessions.
+    // One seat short of the documented maximum of 50, counting the session the
+    // mock context seeds. A check that ran once before the loop would restore
+    // BOTH entries; only a per-iteration check refuses the second.
+    for (let i = 0; i < 48; i += 1) {
+      ctx.sessions.set(`filler-${i}`, { id: `filler-${i}`, owner: undefined } as never);
+    }
+    const app = await createHarness(ctx);
+
+    const res = (await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} })).json().data;
+    expect(res.restored.map((s: { id: string }) => s.id)).toEqual(['a']);
+    expect(res.skipped).toEqual([{ sessionId: 'b', reason: 'capacity-reached' }]);
+
+    // Refused rather than lost: closing a session and clicking again works.
+    const left = (await app.inject({ method: 'GET', url: '/api/reboot-restore' })).json().data;
+    expect(left.sessions.map((s: { id: string }) => s.id)).toEqual(['b']);
+    await app.close();
+  });
+
+  it('refuses every entry when the board is already at the cap', async () => {
+    rebootRestoreRegistry.set([offerEntry('a'), offerEntry('b')]);
+    const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
     for (let i = 0; i < 50; i += 1) {
       ctx.sessions.set(`filler-${i}`, { id: `filler-${i}`, owner: undefined } as never);
     }
@@ -201,10 +247,53 @@ describe('the session caps', () => {
     const res = (await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} })).json().data;
     expect(res.restored).toEqual([]);
     expect(res.skipped.map((s: { reason: string }) => s.reason)).toEqual(['capacity-reached', 'capacity-reached']);
+    await app.close();
+  });
+});
 
-    // Refused rather than lost: closing a session and clicking again works.
+describe('a failure before any entry is considered', () => {
+  it('returns the whole plan rather than spending it', async () => {
+    rebootRestoreRegistry.set([offerEntry('a'), offerEntry('b')]);
+    const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
+    (ctx.getWorkspaceHooksEnabled as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('settings unreadable'));
+    const app = await createHarness(ctx);
+
+    const res = await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
+    expect(res.statusCode).toBeGreaterThanOrEqual(500);
+
+    // The plan cannot be rebuilt once boot has pruned the records, so a throw
+    // anywhere in the route has to hand the entries back.
     const left = (await app.inject({ method: 'GET', url: '/api/reboot-restore' })).json().data;
     expect(left.sessions.map((s: { id: string }) => s.id).sort()).toEqual(['a', 'b']);
     await app.close();
+  });
+
+  it('releases the single flight, so the next click is not refused', async () => {
+    rebootRestoreRegistry.set([offerEntry('a')]);
+    const ctx = createMockRouteContext({ workspaceHooksEnabled: false });
+    (ctx.getWorkspaceHooksEnabled as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('settings unreadable'));
+    const app = await createHarness(ctx);
+
+    await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
+    expect(rebootRestoreRegistry.beginSpending(undefined)).toBe(true);
+    rebootRestoreRegistry.endSpending(undefined);
+    await app.close();
+  });
+});
+
+describe('a dismiss that lands while a restore is running', () => {
+  it('wins, rather than being undone when the restore hands its entries back', async () => {
+    const entries = [offerEntry('a')];
+    rebootRestoreRegistry.set(entries);
+    const generation = rebootRestoreRegistry.currentGeneration();
+    const taken = rebootRestoreRegistry.take(() => true);
+    expect(taken).toHaveLength(1);
+
+    // The user clears the banner while the restore is still working.
+    rebootRestoreRegistry.clear(() => true);
+    // The restore finishes and tries to put its unspent entry back.
+    rebootRestoreRegistry.restore(taken, generation);
+
+    expect(rebootRestoreRegistry.list(() => true)).toEqual([]);
   });
 });

@@ -3260,7 +3260,11 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
     display: none;
   }
 
+  /* A flex item will not shrink below its content width at the default
+     `min-width: auto`, so without this the nowrap text pushes the buttons off a
+     360px viewport and the ellipsis never engages. */
   .reboot-restore-banner-text {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -3273,9 +3277,7 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
   .reboot-restore-banner-accept {
     margin-left: auto;
   }
-}
 
-@media (max-width: 599px) {
   .offline-banner {
     padding: 0.4rem 0.5rem;
     padding-left: calc(0.5rem + var(--safe-area-left));

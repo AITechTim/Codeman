@@ -32,7 +32,7 @@ import {
   getAuthUser,
   canAccessOwned,
   ownerFor,
-  isWorkingDirAllowed,
+  isWorkingDirAllowedForUsername,
   sessionCapacityMessage,
 } from '../route-helpers.js';
 import { rebootRestoreRegistry } from '../reboot-restore-registry.js';
@@ -83,7 +83,6 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
 
   app.post('/api/reboot-restore/restore', async (req, reply) => {
     const body = parseBody(RebootRestoreRequestSchema, req.body, 'Invalid reboot restore request');
-    const user = getAuthUser(req);
     const canAccess = accessorFor(req);
     const owner = ownerFor(req);
 
@@ -93,6 +92,7 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
     if (!rebootRestoreRegistry.beginSpending(owner)) {
       return reply.code(409).send(createErrorResponse(ApiErrorCode.CONFLICT, 'A reboot restore is already running'));
     }
+    const generation = rebootRestoreRegistry.currentGeneration();
     const taken = rebootRestoreRegistry.take(canAccess, body.sessionIds);
     // Entries nothing built a pane for, returned to the plan on every exit path
     // including a throw. Without this a failure between here and the loop would
@@ -136,10 +136,15 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
         // Multi-user workspace separation: the create route confines a non-admin's
         // workingDir to their own case space, and a grant can be withdrawn between
         // the session's creation and this restore, so the confinement is re-run
-        // rather than inherited from the record.
-        if (!isWorkingDirAllowed(user, entry.workingDir)) {
+        // rather than inherited from the record. Keyed on the OWNER, not on the
+        // caller: an admin spending another user's entry must be held to that
+        // user's confinement, and `isWorkingDirAllowed` would wave an admin
+        // through. The same reason the two grant re-checks below read
+        // `saved.owner`.
+        if (!(await isWorkingDirAllowedForUsername(entry.owner, entry.workingDir))) {
+          // Left on offer: a withdrawn grant can be restored, unlike an already-open
+          // conversation, so this is not the permanent kind of refusal.
           failures.push({ sessionId: entry.sessionId, reason: 'workspace-forbidden' });
-          unspent.delete(entry);
           continue;
         }
         try {
@@ -180,12 +185,16 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
 
           await ctx.addSession(session);
           await ctx.setupSessionListeners(session);
-          // Before the pane spawns: the custom-model selection reaches it through
-          // the environment. Before the first persist: a constructed session holds
-          // none of this, so persisting it first would replace the fuller record
-          // with the reduced one and drop the pin that keeps it from being pruned.
-          await ctx.reapplyPersistedSessionState(session, saved);
+          // Shapes the pane, so it has to land before the CLI process starts.
+          await ctx.reapplyPersistedSessionState(session, saved, 'before-spawn');
           await session.startInteractive();
+          // The session's own history, applied only once the pane exists: on a
+          // failed start these totals would belong to a session that never ran.
+          // Both halves precede the first persist, because a constructed session
+          // carries none of this and `toState()` is written wholesale, so
+          // persisting first would replace the fuller record with the reduced one
+          // and drop the pin that keeps it from being pruned.
+          await ctx.reapplyPersistedSessionState(session, saved, 'after-spawn');
           ctx.persistSessionState(session);
 
           // A session without its workspace hooks goes silently blind: no stop or
@@ -211,10 +220,15 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           // listeners, and the commonest cause is a CLI binary that is not on the
           // PATH of a freshly booted machine.
           console.error(`[reboot-restore] failed to rebuild ${entry.sessionId}:`, err);
+          // Not cleanupSession(): that is the user-initiated delete, and it would
+          // count this session's historical tokens into the lifetime totals, demote
+          // a pinned record to `stopped` (which this pass reads as an intentional
+          // kill, making the session permanently unrestorable) and delete the
+          // workspace's `.claude-images`. This undoes only the construction.
           await ctx
-            .cleanupSession(entry.sessionId, true, 'reboot restore failed to start the session')
-            .catch((cleanupErr: unknown) =>
-              console.error(`[reboot-restore] cleanup after a failed rebuild failed: ${getErrorMessage(cleanupErr)}`)
+            .discardPartiallyBuiltSession(entry.sessionId)
+            .catch((discardErr: unknown) =>
+              console.error(`[reboot-restore] discarding a failed rebuild failed: ${getErrorMessage(discardErr)}`)
             );
           failures.push({ sessionId: entry.sessionId, reason: 'rebuild-failed' });
           // Left on offer: the user can put the binary back and click again.
@@ -234,7 +248,8 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
     } finally {
       // Anything that never became a pane goes back on offer, including after a
       // throw, so a transient failure costs a retry rather than the whole plan.
-      rebootRestoreRegistry.restore([...unspent]);
+      // Passing the generation makes a Dismiss that landed mid-restore win.
+      rebootRestoreRegistry.restore([...unspent], generation);
       rebootRestoreRegistry.endSpending(owner);
     }
   });

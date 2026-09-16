@@ -62,6 +62,9 @@ export function createMockRouteContext(options?: {
     persistSessionState: vi.fn(),
     persistSessionStateNow: vi.fn(),
     reapplyPersistedSessionState: vi.fn(async () => {}),
+    discardPartiallyBuiltSession: vi.fn(async (id: string) => {
+      sessions.delete(id);
+    }),
     getSessionStateWithRespawn: vi.fn((s: MockSession) => s.toState()),
 
     // -- EventPort --
