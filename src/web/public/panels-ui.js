@@ -5551,6 +5551,49 @@ Object.assign(CodemanApp.prototype, {
     return { dismiss, setMessage: (text) => { msgSpan.textContent = text; } };
   },
 
+  /**
+   * A prominent, screen-centred status banner — for the small set of messages that are
+   * genuinely worth interrupting the eye for rather than living in the corner with every
+   * other toast (currently: a custom-model session's "switching backends" and "loading
+   * model" states, both of which can sit on screen for well over a minute and are easy to
+   * mistake for nothing happening). Non-blocking (`pointer-events: none`, no backdrop) —
+   * this is informational, never a gate the user has to dismiss to keep working. Only one
+   * is ever shown at a time (the DOM node is created once and reused), which matches every
+   * current caller: each hands off to the next rather than stacking.
+   */
+  _showCenterStatus(message) {
+    let el = document.getElementById('customModelCenterStatus');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'customModelCenterStatus';
+      el.className = 'center-status-banner';
+      const spinner = document.createElement('span');
+      spinner.className = 'center-status-spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+      const text = document.createElement('span');
+      text.className = 'center-status-text';
+      el.appendChild(spinner);
+      el.appendChild(text);
+      document.body.appendChild(el);
+    }
+    const textEl = el.querySelector('.center-status-text');
+    if (textEl) textEl.textContent = message;
+    el.hidden = false;
+    requestAnimationFrame(() => el.classList.add('show'));
+    return {
+      dismiss: () => {
+        el.classList.remove('show');
+        setTimeout(() => {
+          el.hidden = true;
+        }, 200);
+      },
+      setMessage: (next) => {
+        const t = el.querySelector('.center-status-text');
+        if (t) t.textContent = next;
+      },
+    };
+  },
+
 
   // ═══════════════════════════════════════════════════════════════
   // System Stats

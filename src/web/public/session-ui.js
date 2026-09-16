@@ -839,9 +839,10 @@ Object.assign(CodemanApp.prototype, {
     // Claude just launched on the NATIVE backend and is about to be restarted onto
     // the endpoint — without something saying so, that native boot (which can talk
     // to Opus for a moment) reads as "the endpoint didn't apply" rather than "the
-    // switch hasn't happened yet". Sticky until the apply below settles one way or
-    // the other, or hands off to _watchLlamaSwapLoading's own sticky toast.
-    const switchingToast = this.showToast(`Claude started — switching to ${endpointId}…`, 'info', { duration: 0 });
+    // switch hasn't happened yet". Prominent and screen-centred (not a corner toast)
+    // since this can sit on screen for a while; sticky until the apply below settles
+    // one way or the other, or hands off to _watchLlamaSwapLoading's own banner.
+    const switchingToast = this._showCenterStatus(`Claude started — switching to ${endpointId}…`);
 
     // A freshly launched CLI reports its OWN startup as 'busy' (spinner, the
     // workspace-trust check, whatever else it does before its first prompt) —
@@ -937,9 +938,9 @@ Object.assign(CodemanApp.prototype, {
    * rather than only in a test fixture.
    */
   async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 3000, maxWaitMs = 120000) {
-    const toast = this.showToast(`Loading ${modelId} on ${endpointId}… this can take a while`, 'info', {
-      duration: 0,
-    });
+    // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
+    // sit on screen for well over a minute, easy to mistake for nothing happening there.
+    const toast = this._showCenterStatus(`Loading ${modelId} on ${endpointId}… this can take a while`);
     const deadline = Date.now() + maxWaitMs;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));

@@ -76,6 +76,11 @@ function bootApp(
   app.loadAppSettingsFromStorage = () => ({ customModelEndpointsEnabled: options.settingsEnabled ?? true });
   app.isCliAvailable = options.cliAvailable ?? (() => true);
   app.showToast = () => {};
+  // Real implementation lives in panels-ui.js, not evaluated into this harness (only
+  // constants.js + session-ui.js are — see below) — a no-op default handle matching its
+  // real shape, same reasoning as showToast above; tests of the center status itself
+  // override it.
+  app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
   // Default no-op so a button's onclick (selectCustomModelEntry -> possibly
   // straight to runCustomModelEntry for a single-model host) never rejects
   // with "this.run is not a function"; tests of the launch itself override it.
@@ -415,11 +420,11 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
       ok: true,
       json: async () => ({ success: true, data: { customModel: { endpointId: 'llama-box' }, restarted: true } }),
     });
-    const toasts: Array<{ message: string; dismissed: boolean }> = [];
+    const banners: Array<{ message: string; dismissed: boolean }> = [];
     const messageHistory: string[] = [];
-    app.showToast = (message: string) => {
+    app._showCenterStatus = (message: string) => {
       const entry = { message, dismissed: false };
-      toasts.push(entry);
+      banners.push(entry);
       messageHistory.push(message);
       return {
         dismiss: () => {
@@ -434,12 +439,12 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
 
-    expect(toasts).toHaveLength(1); // updated in place, not stacked with a second toast
+    expect(banners).toHaveLength(1); // updated in place, not stacked with a second banner
     expect(messageHistory[0]).toContain('Claude started — switching to llama-box');
     expect(messageHistory.at(-1)).toContain('Pointed at llama-box — restarting');
   });
 
-  it('dismisses the status toast on a failed apply rather than leaving it stuck on "switching"', async () => {
+  it('dismisses the status banner on a failed apply rather than leaving it stuck on "switching"', async () => {
     const { app } = bootApp({});
     app.activeSessionId = 'old-session';
     app.run = async () => {
@@ -450,22 +455,22 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
       status: 500,
       json: async () => ({ success: false, error: 'boom' }),
     });
-    const toasts: Array<{ message: string; dismissed: boolean }> = [];
+    let bannerDismissed = false;
+    app._showCenterStatus = () => ({
+      dismiss: () => {
+        bannerDismissed = true;
+      },
+      setMessage: () => {},
+    });
+    let toastMessage: string | undefined;
     app.showToast = (message: string) => {
-      const entry = { message, dismissed: false };
-      toasts.push(entry);
-      return {
-        dismiss: () => {
-          entry.dismissed = true;
-        },
-        setMessage: () => {},
-      };
+      toastMessage = message;
     };
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
 
-    expect(toasts[0].dismissed).toBe(true); // the "switching..." toast, cleaned up
-    expect(toasts.at(-1)?.message).toContain('boom'); // the error toast, separate from it
+    expect(bannerDismissed).toBe(true); // the "switching..." banner, cleaned up
+    expect(toastMessage).toContain('boom'); // the error toast, separate from it
   });
 
   it('routes through run() itself, so the Run in-flight lock actually engages', async () => {
@@ -597,29 +602,33 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
   // whose setTimeout is NOT the one vi.useFakeTimers() patches, so advancing fake
   // timers here would advance nothing and either hang or silently no-op.
 
-  it('dismisses the loading toast as soon as the target model reports ready', async () => {
+  it('dismisses the loading banner as soon as the target model reports ready', async () => {
     const { app } = bootApp({});
-    const toastCalls: Array<{ message: string; type: string }> = [];
+    const bannerMessages: string[] = [];
     const dismissed: string[] = [];
-    app.showToast = (message: string, type: string) => {
-      toastCalls.push({ message, type });
+    app._showCenterStatus = (message: string) => {
+      bannerMessages.push(message);
       return { dismiss: () => dismissed.push(message), setMessage: () => {} };
+    };
+    const toastCalls: string[] = [];
+    app.showToast = (message: string) => {
+      toastCalls.push(message);
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
 
     await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
 
-    expect(toastCalls[0].message).toMatch(/loading qwen3/i);
-    expect(dismissed).toContain(toastCalls[0].message);
-    expect(toastCalls.at(-1)?.message).toMatch(/ready/i);
+    expect(bannerMessages[0]).toMatch(/loading qwen3/i);
+    expect(dismissed).toContain(bannerMessages[0]);
+    expect(toastCalls.at(-1)).toMatch(/ready/i);
   });
 
   it('gives up after the bounded wait and warns instead of polling forever', async () => {
     const { app } = bootApp({});
+    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
     const toastCalls: string[] = [];
     app.showToast = (message: string) => {
       toastCalls.push(message);
-      return { dismiss: () => {}, setMessage: () => {} };
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] });
 
@@ -630,24 +639,31 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
 
   it('stops polling (without a warning) once the endpoint no longer reads as llama-swap', async () => {
     const { app } = bootApp({});
+    let bannerDismissed = false;
+    app._showCenterStatus = () => ({
+      dismiss: () => {
+        bannerDismissed = true;
+      },
+      setMessage: () => {},
+    });
     const toastCalls: string[] = [];
     app.showToast = (message: string) => {
       toastCalls.push(message);
-      return { dismiss: () => {}, setMessage: () => {} };
     };
     app._apiJson = async () => ({ isLlamaSwap: false, running: [] });
 
     await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
 
-    expect(toastCalls).toHaveLength(1); // only the initial "Loading..." toast, no follow-up warning
+    expect(bannerDismissed).toBe(true);
+    expect(toastCalls).toHaveLength(0); // no follow-up warning toast
   });
 
   it('keeps waiting through a transient status-fetch failure instead of giving up early', async () => {
     const { app } = bootApp({});
+    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
     const toastCalls: string[] = [];
     app.showToast = (message: string) => {
       toastCalls.push(message);
-      return { dismiss: () => {}, setMessage: () => {} };
     };
     let call = 0;
     app._apiJson = async () => {
