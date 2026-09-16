@@ -866,8 +866,9 @@ export function registerSessionRoutes(
         log: (message) => console.log(message),
         // The session's `remote` block is a launch-time snapshot, so a wake target
         // configured later (banner's config dialog, or a hand-edited remote-hosts.json)
-        // is resolved here — throttled by the registry, and only for sessions that
-        // have no usable target of their own.
+        // is resolved here — throttled by the registry, and the host config is
+        // authoritative in BOTH directions (removing the field turns the feature off
+        // for a live session too).
         resolveRemote: async (session) => {
           const remote = session.remote;
           if (!remote) return undefined;

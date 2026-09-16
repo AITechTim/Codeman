@@ -110,8 +110,10 @@ Object.assign(CodemanApp.prototype, {
       state.label = session.remote.label || 'Remote host';
       // Text from the session payload first (instant, no round trip), corrected by the
       // poll — a session whose wake config was added after launch only knows it after
-      // the server resolves host config.
-      state.wakeConfigured = session.remote.wakeMac || session.remote.wakeCommand ? 'mac' : 'none';
+      // the server resolves host config. The kind matters: the payload can say WHICH
+      // path is configured, so a command-only host is not mislabelled 'mac' until the
+      // first poll lands.
+      state.wakeConfigured = session.remote.wakeMac ? 'mac' : session.remote.wakeCommand ? 'command' : 'none';
       this._renderHostWakeBanner();
     }
     this._pollHostReachability();

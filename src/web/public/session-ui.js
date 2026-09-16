@@ -2474,6 +2474,10 @@ Object.assign(CodemanApp.prototype, {
       'remoteHostSocksProxy',
       'remoteHostJumpHost',
       'remoteHostExtraSshOptions',
+      // Wake-on-LAN: they belong to the HOST being configured, so leaving them filled in
+      // would carry one host's MAC/command onto the next host this form saves.
+      'remoteHostWakeMac',
+      'remoteHostWakeCommand',
     ];
     remoteFields.forEach(id => {
       const el = document.getElementById(id);

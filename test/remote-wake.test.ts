@@ -372,6 +372,38 @@ describe('RemoteWakeRegistry', () => {
     expect(h.registry.pendingBytes('sess-1')).toBe(3);
   });
 
+  it('flushes the chunk it is writing out of the buffer first, so a concurrent enqueue cannot drop a different one', async () => {
+    // Input arriving DURING the flush is enqueued (`waking` is still set), and the cap
+    // then drops the OLDEST chunk — the one already on its way to the pane. Shifting the
+    // buffer after the write removed the NEXT chunk instead, so the drop-oldest
+    // bookkeeping lost a chunk that was never written.
+    const h = harness();
+    h.probe.mockResolvedValue(false);
+    let release: (() => void) | undefined;
+    h.waitUntilReady.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          release = () => resolve(true);
+        })
+    );
+
+    const big = 'a'.repeat(REMOTE_WAKE_PENDING_MAX_BYTES - 10);
+    await h.registry.handleInput(h.session, big);
+    await h.registry.handleInput(h.session, 'bbbbbbbbbb'); // fills the cap exactly
+    // The third chunk arrives while the FIRST write is in flight, which is what pushes
+    // the buffer over the cap mid-flush.
+    h.writeViaMux.mockImplementationOnce(async () => {
+      await h.registry.handleInput(h.session, 'c');
+      return true;
+    });
+
+    release?.();
+    await h.registry.wake(h.session);
+
+    expect(h.writeViaMux.mock.calls.map((c) => c[0])).toEqual([big, 'bbbbbbbbbb', 'c']);
+    expect(h.registry.pendingBytes('sess-1')).toBe(0);
+  });
+
   it('ensureAwake blocks only for the wait path and returns true without a wake command', async () => {
     const h = harness({ remote: { hostId: 'x', label: 'X', host: '10.0.0.9' } });
     await expect(h.registry.ensureAwake(h.session)).resolves.toBe(true);

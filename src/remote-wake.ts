@@ -690,14 +690,22 @@ export class RemoteWakeRegistry {
   private async _flush(state: WakeState, session: WakeableSession): Promise<void> {
     while (state.pending.length > 0) {
       const chunk = state.pending[0];
+      // Take the chunk OUT before awaiting the write. Input arriving during the await is
+      // enqueued by `handleInput` (a wake is still in flight, so it takes the buffer
+      // path), and `appendBoundedPending` may then drop the OLDEST chunk to stay under
+      // the cap — which would be this one, already on its way to the pane. Shifting
+      // afterwards removed the NEXT chunk instead, so the drop-oldest bookkeeping lost a
+      // chunk that was never written while the log line blamed the one that was.
+      state.pending = state.pending.slice(1);
       const ok = await session.writeViaMux(chunk).catch(() => false);
       if (!ok) {
+        // Retain it, IN ORDER: a failed write must not reorder the queue behind it.
+        state.pending = [chunk, ...state.pending];
         this.deps.log?.(
           `[RemoteWake] flush failed for session ${session.id} — ${state.pending.length} chunk(s) retained`
         );
         return;
       }
-      state.pending.shift();
     }
   }
 }
