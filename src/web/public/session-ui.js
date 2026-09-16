@@ -810,6 +810,13 @@ Object.assign(CodemanApp.prototype, {
     const sessionId = this.activeSessionId;
     if (!sessionId || sessionId === before) return;
 
+    // Claude just launched on the NATIVE backend and is about to be restarted onto
+    // the endpoint — without something saying so, that native boot (which can talk
+    // to Opus for a moment) reads as "the endpoint didn't apply" rather than "the
+    // switch hasn't happened yet". Sticky until the apply below settles one way or
+    // the other, or hands off to _watchLlamaSwapLoading's own sticky toast.
+    const switchingToast = this.showToast(`Claude started — switching to ${endpointId}…`, 'info', { duration: 0 });
+
     // A freshly launched CLI reports its OWN startup as 'busy' (spinner, the
     // workspace-trust check, whatever else it does before its first prompt) —
     // measured landing well before this line reliably reaches it — and the
@@ -849,6 +856,7 @@ Object.assign(CodemanApp.prototype, {
           `for ${payload.affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
       );
       if (!proceed) {
+        switchingToast?.dismiss();
         this.showToast('Kept the native backend — model switch cancelled', 'info');
         return;
       }
@@ -857,20 +865,26 @@ Object.assign(CodemanApp.prototype, {
     }
 
     if (!ok || !data || data.success === false) {
+      switchingToast?.dismiss();
       const detail = data?.error ? `: ${data.error}` : res ? ` (HTTP ${res.status})` : ' (request failed)';
       this.showToast(`Session started on the native backend — could not apply the custom endpoint${detail}`, 'error');
       return;
     }
-    this.showToast(`Pointed at ${endpointId} — restarting the session...`, 'info');
 
     // The apply above already succeeded — the session IS pointed at the endpoint — but
     // llama-swap itself may still be unloading the old model and loading this one, which
     // can take well over a minute. Without this, a prompt sent during that window either
     // hangs silently or (the bug this whole feature exists to fix) gets answered by
     // whatever was loaded a moment ago, reading as "it's still using the wrong model."
+    // Hand off to its own sticky toast rather than stacking a second one on top.
     if (payload?.modelSwapInProgress) {
+      switchingToast?.dismiss();
       void this._watchLlamaSwapLoading(endpointId, modelId);
+      return;
     }
+
+    switchingToast?.setMessage(`Pointed at ${endpointId} — restarting the session...`);
+    setTimeout(() => switchingToast?.dismiss(), 3000);
   },
 
   /** POST /api/sessions/:id/custom-model, returning {ok, data, res} rather than throwing —

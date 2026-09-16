@@ -398,6 +398,73 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
     expect(toastType).toBe('error');
   });
 
+  it('shows a status toast for the native-boot-then-restart window, so it never reads as the endpoint failing to apply', async () => {
+    // Claude still goes through this two-step launch (see runCustomModelEntry's own
+    // comment for why) — without something saying so, the native boot it starts with
+    // (which can genuinely talk to the cloud model for a moment) reads as "the
+    // endpoint didn't apply" rather than "the switch hasn't happened yet".
+    const { app } = bootApp({});
+    app.activeSessionId = 'old-session';
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    app._api = async () => ({
+      ok: true,
+      json: async () => ({ success: true, data: { customModel: { endpointId: 'llama-box' }, restarted: true } }),
+    });
+    const toasts: Array<{ message: string; dismissed: boolean }> = [];
+    const messageHistory: string[] = [];
+    app.showToast = (message: string) => {
+      const entry = { message, dismissed: false };
+      toasts.push(entry);
+      messageHistory.push(message);
+      return {
+        dismiss: () => {
+          entry.dismissed = true;
+        },
+        setMessage: (next: string) => {
+          entry.message = next;
+          messageHistory.push(next);
+        },
+      };
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(toasts).toHaveLength(1); // updated in place, not stacked with a second toast
+    expect(messageHistory[0]).toContain('Claude started — switching to llama-box');
+    expect(messageHistory.at(-1)).toContain('Pointed at llama-box — restarting');
+  });
+
+  it('dismisses the status toast on a failed apply rather than leaving it stuck on "switching"', async () => {
+    const { app } = bootApp({});
+    app.activeSessionId = 'old-session';
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    app._api = async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ success: false, error: 'boom' }),
+    });
+    const toasts: Array<{ message: string; dismissed: boolean }> = [];
+    app.showToast = (message: string) => {
+      const entry = { message, dismissed: false };
+      toasts.push(entry);
+      return {
+        dismiss: () => {
+          entry.dismissed = true;
+        },
+        setMessage: () => {},
+      };
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(toasts[0].dismissed).toBe(true); // the "switching..." toast, cleaned up
+    expect(toasts.at(-1)?.message).toContain('boom'); // the error toast, separate from it
+  });
+
   it('routes through run() itself, so the Run in-flight lock actually engages', async () => {
     // CLAUDE.md, Run launch synchronization: the lock exists so a double click
     // cannot create duplicate sessions. A hardcoded dispatch table bypassing
