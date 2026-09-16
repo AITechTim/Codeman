@@ -511,8 +511,9 @@ scrollbackRestored: false }`, ownership-scoped in multi-user mode.
 - `POST /api/v1/reboot-restore/restore` with `{ sessionIds?: string[] }` (omit
   to restore everything the caller can see) → `{ restored: RestorableSession[],
 skipped: { sessionId, reason }[] }`. `reason` is one of `workspace-missing`
-  (the directory is gone), `workspace-forbidden` (it is outside the caller's
-  workspace in multi-user mode), `already-live` (the conversation is already
+  (the directory is gone), `workspace-forbidden` (in multi-user mode it is
+  outside the workspace of the user the session belongs to, re-checked against
+  that owner's current grant rather than the caller's), `already-live` (the conversation is already
   open, typically resumed by hand from the Resume list), `capacity-reached`
   (the global or per-user session cap), or `rebuild-failed` (the agent would not
   start, most often a CLI binary missing from the server's PATH).

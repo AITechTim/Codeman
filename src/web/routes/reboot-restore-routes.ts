@@ -92,8 +92,8 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
     if (!rebootRestoreRegistry.beginSpending(owner)) {
       return reply.code(409).send(createErrorResponse(ApiErrorCode.CONFLICT, 'A reboot restore is already running'));
     }
-    const generation = rebootRestoreRegistry.currentGeneration();
     const taken = rebootRestoreRegistry.take(canAccess, body.sessionIds);
+    const generations = rebootRestoreRegistry.snapshotGenerations(taken);
     // Entries nothing built a pane for, returned to the plan on every exit path
     // including a throw. Without this a failure between here and the loop would
     // spend the offer and rebuild nothing, and the plan cannot be rebuilt.
@@ -184,16 +184,20 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           });
 
           await ctx.addSession(session);
-          await ctx.setupSessionListeners(session);
-          // Shapes the pane, so it has to land before the CLI process starts.
+          // Before the listeners, because setupSessionListeners() reads the
+          // image-watcher flag this phase restores; before the spawn, because the
+          // custom-model environment and the nice priority shape the process.
           await ctx.reapplyPersistedSessionState(session, saved, 'before-spawn');
+          await ctx.setupSessionListeners(session);
           await session.startInteractive();
           // The session's own history, applied only once the pane exists: on a
           // failed start these totals would belong to a session that never ran.
-          // Both halves precede the first persist, because a constructed session
-          // carries none of this and `toState()` is written wholesale, so
-          // persisting first would replace the fuller record with the reduced one
-          // and drop the pin that keeps it from being pruned.
+          // Both halves precede the route's OWN persist, which matters because a
+          // constructed session carries none of this and `toState()` is written
+          // wholesale, so persisting first would replace the fuller record with
+          // the reduced one and drop the pin that keeps it from being pruned. A
+          // listener-driven persist can still land inside the debounce window
+          // while the pane starts; the write below repairs the record.
           await ctx.reapplyPersistedSessionState(session, saved, 'after-spawn');
           ctx.persistSessionState(session);
 
@@ -248,8 +252,9 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
     } finally {
       // Anything that never became a pane goes back on offer, including after a
       // throw, so a transient failure costs a retry rather than the whole plan.
-      // Passing the generation makes a Dismiss that landed mid-restore win.
-      rebootRestoreRegistry.restore([...unspent], generation);
+      // Passing the generations makes a Dismiss that landed mid-restore win, for
+      // the owners it actually covered.
+      rebootRestoreRegistry.restore([...unspent], generations);
       rebootRestoreRegistry.endSpending(owner);
     }
   });

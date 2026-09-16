@@ -11,10 +11,12 @@
  * Seeded from `GET /api/reboot-restore` on init and again on every SSE reconnect,
  * because the tab most likely to want this is one that was open across the reboot
  * and reconnects to a server that came back up with an empty board. Restore posts to
- * `POST /api/reboot-restore/restore`, Dismiss posts to
- * `POST /api/reboot-restore/dismiss`, and either way the banner goes away. The
- * restored sessions arrive as ordinary `session:created` events, so no extra
- * rendering is needed here.
+ * `POST /api/reboot-restore/restore` and Dismiss posts to
+ * `POST /api/reboot-restore/dismiss`. Dismiss always clears the banner; Restore
+ * re-reads the plan afterwards, because the server puts back anything it could
+ * not build for a reason that may pass, such as a session limit or an agent that
+ * would not start. The restored sessions arrive as ordinary `session:created`
+ * events, so no extra rendering is needed here.
  *
  * The banner says that terminal history did not survive, because a restored
  * session is a new pane: the conversation continues and the scrollback does not.

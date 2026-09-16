@@ -15277,6 +15277,10 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 .reboot-restore-banner-detail {
   color: rgba(255, 255, 255, 0.8);
   font-weight: 500;
+  /* A flex item will not shrink below its content width at the default
+     `min-width: auto`, so without this the session names push the buttons out of
+     the line between the phone breakpoint and full width. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

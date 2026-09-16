@@ -2923,8 +2923,9 @@ export class WebServer extends EventEmitter {
    * Split in two phases because the two halves have opposite timing needs:
    *
    * - `before-spawn` shapes the pane itself, so it has to land before the CLI
-   *   process starts. The custom-model selection is an environment injection and
-   *   the nice priority is applied to the spawn.
+   *   process starts, and before `setupSessionListeners()`, which reads the
+   *   image-watcher flag. The custom-model selection is an environment injection
+   *   and the nice priority is applied to the spawn.
    * - `after-spawn` is the session's own accumulated history. It must NOT land
    *   on a session whose pane failed to start: the totals would then belong to a
    *   session that never ran, and any later cleanup would add them to the
@@ -2952,6 +2953,10 @@ export class WebServer extends EventEmitter {
       if (saved.niceEnabled !== undefined || saved.niceValue !== undefined) {
         session.setNice({ enabled: saved.niceEnabled, niceValue: saved.niceValue });
       }
+      // `setupSessionListeners()` READS this flag to decide whether to start the
+      // watcher, so setting it later would leave the session reporting the feature
+      // as on with nothing watching.
+      if (saved.imageWatcherEnabled !== undefined) session.imageWatcherEnabled = saved.imageWatcherEnabled;
       return;
     }
 
@@ -2974,7 +2979,6 @@ export class WebServer extends EventEmitter {
       });
     }
     if (saved.color) session.setColor(saved.color);
-    if (saved.imageWatcherEnabled !== undefined) session.imageWatcherEnabled = saved.imageWatcherEnabled;
     if (saved.flickerFilterEnabled !== undefined) session.flickerFilterEnabled = saved.flickerFilterEnabled;
   }
 
@@ -2989,33 +2993,61 @@ export class WebServer extends EventEmitter {
    * WORKING DIRECTORY, which belongs to the workspace rather than to this session
    * and may hold another live session's pasted images.
    *
-   * This undoes only what the failed construction did: the map entry, the tab
-   * layout slot `registerSessionWithLayout()` took, and any pane the CLI launch
-   * managed to create before it threw. The persisted record is left exactly as it
-   * was, so the session stays restorable on the next attempt.
+   * Everything else `_doCleanupSession()` does, this has to do as well. It is the
+   * inverse of `registerSessionWithLayout()` plus `setupSessionListeners()`, and
+   * every registration those two make has to come back out — above all
+   * `sessionListenerRefs`, whose presence makes `setupSessionListeners()` return
+   * early. Leaving that entry behind is worse than the leak this function exists
+   * to prevent: the retry reuses the same session id, wires no listeners at all,
+   * and the user gets a tab that never shows output.
+   *
+   * The persisted record, the lifetime totals, the stored Ralph state and the
+   * workspace's own files are left exactly as they were, so the session stays
+   * restorable on the next attempt.
    */
   async discardPartiallyBuiltSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.sessions.delete(sessionId);
+
+    // --- the inverse of setupSessionListeners(), in its order ---
+    const summaryTracker = this.runSummaryTrackers.get(sessionId);
+    if (summaryTracker) {
+      summaryTracker.stop();
+      this.runSummaryTrackers.delete(sessionId);
+    }
+    // An fs.watch on the workspace (or on @fix_plan.md) that nothing else closes.
+    session.ralphTracker.stopWatchingFixPlan();
+    // An FSWatcher on the workspace, likewise.
+    imageWatcher.unwatchSession(sessionId);
+    const listeners = this.sessionListenerRefs.get(sessionId);
+    if (listeners) {
+      detachSessionListeners(session, listeners);
+      this.sessionListenerRefs.delete(sessionId);
+    }
+
+    // --- the inverse of the construction itself ---
     this.sse.cleanupSessionBatches(sessionId);
     this.persistDeb.cancelKey(sessionId);
+    fileStreamManager.closeSessionStreams(sessionId);
+    // The per-session custom-model config dir carries the endpoint's API key, and
+    // `before-spawn` may already have written it. Nothing else would ever remove
+    // it: the stale sweep only touches state.json. A retry rewrites it.
+    removeConfigDir(customModelConfigDir(sessionId));
     try {
       session.removeAllListeners();
-      await session.stop?.();
+      await session.stop(true);
     } catch (err) {
       console.warn(`[Server] stopping a partially built session failed: ${getErrorMessage(err)}`);
-    }
-    try {
-      await this.mux.killSession(sessionId);
-    } catch {
-      // The pane may never have been created; nothing to kill is the normal case.
     }
     try {
       await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);
     } catch (err) {
       console.warn(`[Server] releasing the tab layout slot failed: ${getErrorMessage(err)}`);
     }
+    // Any `session:updated` the half-built session emitted before it failed left a
+    // tab on every other open board, and the client's handler is an upsert.
+    this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
   }
 
   private async restoreMuxSessions(): Promise<boolean> {
