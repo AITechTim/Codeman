@@ -113,42 +113,30 @@ export function decideRemoteInputAction(args: {
 }
 
 /**
- * Append `data` to the pending buffer, dropping the OLDEST bytes when the cap is
- * exceeded. Returns the resulting buffer. Pure.
+ * Append `data` to the pending buffer, dropping the OLDEST whole chunks when the cap
+ * is exceeded. Returns the resulting buffer — the SAME array reference when the chunk
+ * was rejected, so the caller can tell the two apart. Pure.
  *
- * A single chunk can itself exceed the cap (one large paste is one `input` value),
- * so after whole chunks are dropped the surviving chunk's HEAD is trimmed too —
- * otherwise "bounded at 4 KB" would hold only per chunk, not per session. The trim
- * is code-point aware, so it never emits a broken multi-byte character.
+ * A chunk LARGER than the cap is dropped outright rather than trimmed: one paste is
+ * one `input` value, and it was never typed character by character, so delivering its
+ * tail would execute a fragment of it (with the trailing carriage return, if the paste
+ * had one) — a partial command the user never sent. Keeping the tail is right for
+ * typing, where the newest bytes are the ones the user just produced, and wrong for a
+ * chunk that arrived whole.
  */
 export function appendBoundedPending(
   pending: string[],
   data: string,
   maxBytes = REMOTE_WAKE_PENDING_MAX_BYTES
 ): string[] {
+  if (Buffer.byteLength(data) > maxBytes) return pending;
   const next = [...pending, data];
   let total = next.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
   while (next.length > 1 && total > maxBytes) {
     total -= Buffer.byteLength(next[0]);
     next.shift();
   }
-  if (next.length === 1) next[0] = tailWithinBytes(next[0], maxBytes);
   return next;
-}
-
-/** Keep only the trailing part of `value` that fits in `maxBytes` UTF-8 bytes. Pure. */
-function tailWithinBytes(value: string, maxBytes: number): string {
-  if (Buffer.byteLength(value) <= maxBytes) return value;
-  const chars = [...value];
-  let total = 0;
-  let start = chars.length;
-  while (start > 0) {
-    const size = Buffer.byteLength(chars[start - 1]);
-    if (total + size > maxBytes) break;
-    total += size;
-    start--;
-  }
-  return chars.slice(start).join('');
 }
 
 /** The remote fields the wake flow needs. Structurally satisfied by `SessionRemote`. */
@@ -240,7 +228,7 @@ export interface RemoteWakeDeps {
   /** Run the resolved wake target (magic packet or host command). Resolves false on failure. */
   wake(target: NonNullable<WakeTarget>): Promise<boolean>;
   /** Poll until the woken host accepts connections again. */
-  waitUntilReady(remote: WakeableRemote, opts?: { timeoutMs?: number }): Promise<boolean>;
+  waitUntilReady(remote: WakeableRemote, opts?: { timeoutMs?: number; signal?: AbortSignal }): Promise<boolean>;
   /** Sleep helper (injected for tests). */
   delay(ms: number): Promise<void>;
   /** Notify the COD-108 watcher so an exhausted backoff is reset. */
@@ -319,12 +307,33 @@ interface WakeState {
  */
 export class RemoteWakeRegistry {
   private readonly states = new Map<string, WakeState>();
+  /**
+   * Aborted by {@link stop} on shutdown. Every in-flight readiness poll is holding an
+   * HTTP request open (the wake route blocks on it), and Fastify's `close()` waits for
+   * in-flight requests — so without this a restart during a wake sits out the full 90 s
+   * budget. The same problem `sessionWaits.cancelEverything()` exists for.
+   */
+  private readonly shutdown = new AbortController();
+  private stopped = false;
 
   constructor(private readonly deps: RemoteWakeDeps) {}
 
   /** Drop a session's state (session closed/killed). The pending buffer goes with it. */
   drop(sessionId: string): void {
     this.states.delete(sessionId);
+  }
+
+  /**
+   * Resolve every in-flight wake as failed and refuse new ones (server shutdown).
+   *
+   * Called from `WebServer.stop()`: an in-flight wake is awaited by a request, and the
+   * server's own `app.close()` does not abort in-flight requests, so shutdown would wait
+   * out the poll. Nothing is lost by failing them — the state flush happens earlier in
+   * `stop()`, and the process is going away.
+   */
+  stop(): void {
+    this.stopped = true;
+    this.shutdown.abort();
   }
 
   /** Whether a wake is currently in flight (diagnostics/tests). */
@@ -337,6 +346,15 @@ export class RemoteWakeRegistry {
     const state = this.states.get(sessionId);
     if (!state) return 0;
     return state.pending.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
+  }
+
+  /**
+   * Number of keys with wake state (diagnostics/tests). Pins that a LOCAL session never
+   * gets an entry: the input gate runs on every keystroke, so an entry per local session
+   * would be a map the size of the session list, swept only on cleanup.
+   */
+  stateCount(): number {
+    return this.states.size;
   }
 
   /** Whether this session's host has any wake path configured at all. */
@@ -412,7 +430,8 @@ export class RemoteWakeRegistry {
    * send-and-wait path, where the HTTP response stays open anyway and buffering
    * would break the wait contract.
    */
-  async ensureAwake(session: WakeableSession, opts: { force?: boolean } = {}): Promise<boolean> {
+  async ensureAwake(session: WakeableSession, opts: { force?: boolean; timeoutMs?: number } = {}): Promise<boolean> {
+    if (this.stopped) return false;
     const remote = await this._effectiveRemote(session);
     if (!remote || !resolveWakeTarget(remote)) return true;
     const state = this._state(session.id);
@@ -423,7 +442,10 @@ export class RemoteWakeRegistry {
       state.reachable = await this.deps.probe(remote);
     }
     if (state.reachable) return true;
-    return this.wake(session);
+    // The manual button is pressed from the SAME dashboard the create/attach paths are,
+    // so it holds its request open under the same reverse proxy — it needs the request
+    // budget, not the 90 s session default (see REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS).
+    return this.wake(session, { timeoutMs: opts.timeoutMs });
   }
 
   /**
@@ -452,6 +474,7 @@ export class RemoteWakeRegistry {
    */
   async ensureHostAwake(remote: WakeableRemote, opts: { timeoutMs?: number } = {}): Promise<HostWakeOutcome> {
     if (!resolveWakeTarget(remote)) return 'no-target';
+    if (this.stopped) return 'failed';
     const state = this._state(hostWakeKey(remote.hostId));
     if (state.waking) return (await state.waking) ? 'ready' : 'failed';
 
@@ -463,9 +486,12 @@ export class RemoteWakeRegistry {
   }
 
   /**
-   * Single-flight wake for a host with no session (see {@link ensureHostAwake}).
-   * A write into the same `waking` slot the session flow uses, so the two can never
-   * run two readiness polls against one host from the same key space.
+   * Single-flight wake for a host with no session (see {@link ensureHostAwake}). Uses the
+   * same single-flight `waking` slot the session flow uses — but a DIFFERENT key
+   * (`host:<id>` vs the session id), so a session wake and a create-path wake for the same
+   * host are two independent flows rather than one shared poll. Harmless (both are
+   * user-initiated and the host only wakes once), and keying them together would mean a
+   * create request joining an unrelated session's wake and inheriting its budget.
    */
   private async wakeHost(remote: WakeableRemote, opts: { timeoutMs?: number }): Promise<boolean> {
     const state = this._state(hostWakeKey(remote.hostId));
@@ -491,7 +517,8 @@ export class RemoteWakeRegistry {
    * Single-flight wake: probe-free (the caller already knows the host is down),
    * run the wake command, poll for readiness, reattach the pane, flush the buffer.
    */
-  async wake(session: WakeableSession): Promise<boolean> {
+  async wake(session: WakeableSession, opts: { timeoutMs?: number } = {}): Promise<boolean> {
+    if (this.stopped) return false;
     const remote = await this._effectiveRemote(session);
     const target = resolveWakeTarget(remote);
     if (!remote || !target) return true;
@@ -501,7 +528,7 @@ export class RemoteWakeRegistry {
     state.waking = (async (): Promise<boolean> => {
       const id = session.id;
       try {
-        const ready = await this._wakeAndWait(remote, state, { sessionId: id });
+        const ready = await this._wakeAndWait(remote, state, { sessionId: id, timeoutMs: opts.timeoutMs });
         if (!ready) return false;
 
         const reattached = await session.reattachRemote();
@@ -546,10 +573,17 @@ export class RemoteWakeRegistry {
     // No `sessionId` for a create-path wake: the toast handler is then the only one
     // that acts (a banner for a session that does not exist yet would have no target),
     // which is exactly the `forNewSession` distinction the UI renders.
+    //
+    // `queuedInput` is true only on the typing path, where bytes are actually held for
+    // this session. The wake BUTTON and the send-and-wait path hold nothing, so a UI
+    // that keyed "input is queued until it is back" off "a wake is running" would promise
+    // something the user can disprove by typing (browser keystrokes go over the
+    // WebSocket, which never passes through this registry).
     this.deps.broadcast?.('remote:hostWaking', {
       ...(opts.sessionId ? { sessionId: opts.sessionId } : { forNewSession: true }),
       hostId: remote.hostId,
       label: remote.label,
+      queuedInput: state.pending.length > 0,
     });
     this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) via ${target.kind} ${forWhat}`);
 
@@ -560,7 +594,10 @@ export class RemoteWakeRegistry {
       );
     }
 
-    const ready = await this.deps.waitUntilReady(remote, { timeoutMs: opts.timeoutMs });
+    const ready = await this.deps.waitUntilReady(remote, {
+      timeoutMs: opts.timeoutMs,
+      signal: this.shutdown.signal,
+    });
     if (!ready) {
       this.deps.log?.(
         `[RemoteWake] ${remote.label} did not come back — ${opts.forNewSession ? 'the session was not started' : 'input stays buffered'}`
@@ -569,6 +606,7 @@ export class RemoteWakeRegistry {
         ...(opts.sessionId ? { sessionId: opts.sessionId } : { forNewSession: true }),
         hostId: remote.hostId,
         label: remote.label,
+        queuedInput: state.pending.length > 0,
       });
       state.probedAt = 0;
       state.reachable = undefined;
@@ -607,8 +645,12 @@ export class RemoteWakeRegistry {
    * promise failing in the one direction a user can observe.
    */
   private async _effectiveRemote(session: WakeableSession): Promise<WakeableRemote | undefined> {
+    // The local-session return comes FIRST, before `_state`: this runs on every input
+    // chunk (`hasWakeTarget` gates the route), so allocating state here would put an
+    // entry in the map for every local session the user types in — sessions the feature
+    // can never apply to, and whose pending buffers would then have to be swept.
+    if (!session.remote) return undefined;
     const state = this._state(session.id);
-    if (!session.remote) return state.resolvedRemote;
     if (!this.deps.resolveRemote) return state.resolvedRemote ?? session.remote;
     if (state.resolvedAt !== 0 && Date.now() - state.resolvedAt < REMOTE_WAKE_RESOLVE_TTL_MS) {
       return state.resolvedRemote ?? session.remote;
@@ -627,12 +669,22 @@ export class RemoteWakeRegistry {
 
   private _enqueue(sessionId: string, data: string): void {
     const state = this._state(sessionId);
+    const next = appendBoundedPending(state.pending, data);
+    if (next === state.pending) {
+      // Oversized chunk: dropped whole (see `appendBoundedPending`), so the buffer is
+      // untouched and nothing is delivered as a fragment. Logged because the user's
+      // paste is gone — the 200 the route returns cannot say so.
+      this.deps.log?.(
+        `[RemoteWake] dropped a ${Buffer.byteLength(data)}-byte input chunk for session ${sessionId} — over the ${REMOTE_WAKE_PENDING_MAX_BYTES}-byte wake buffer, and a truncated paste must not be delivered as a fragment`
+      );
+      return;
+    }
     const before = state.pending.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
-    state.pending = appendBoundedPending(state.pending, data);
-    const after = state.pending.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
+    const after = next.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
     if (before + Buffer.byteLength(data) > after) {
       this.deps.log?.(`[RemoteWake] pending buffer cap reached for session ${sessionId} — oldest input dropped`);
     }
+    state.pending = next;
   }
 
   private async _flush(state: WakeState, session: WakeableSession): Promise<void> {
@@ -785,7 +837,12 @@ export type WakeSocketFactory = () => WakeSocket;
 /** Poll the host until it accepts connections again, or the bound is hit. */
 export async function waitUntilRemoteReady(
   remote: WakeableRemote,
-  opts: { intervalMs?: number; timeoutMs?: number; probe?: (remote: WakeableRemote) => Promise<boolean> } = {}
+  opts: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    probe?: (remote: WakeableRemote) => Promise<boolean>;
+  } = {}
 ): Promise<boolean> {
   const intervalMs = opts.intervalMs ?? REMOTE_WAKE_READY_INTERVAL_MS;
   const timeoutMs = opts.timeoutMs ?? REMOTE_WAKE_READY_TIMEOUT_MS;
@@ -794,10 +851,27 @@ export async function waitUntilRemoteReady(
   // Probe immediately: WoL from a warm S3 is fast (~7.5 s measured on this setup),
   // and the first poll is what turns "just woke" into a sub-interval response.
   for (;;) {
+    if (opts.signal?.aborted) return false;
     if (await probe(remote)) return true;
     if (Date.now() + intervalMs > deadline) return false;
-    await delay(intervalMs);
+    // Abortable sleep, so a shutdown does not wait out the current interval either.
+    await delayOrAbort(intervalMs, opts.signal);
   }
+}
+
+/** `delay`, but it also ends the moment `signal` aborts (so cancellation is immediate). */
+function delayOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return delay(ms);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

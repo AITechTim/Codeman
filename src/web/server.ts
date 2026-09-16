@@ -42,6 +42,7 @@ import { execSync } from 'node:child_process';
 import { hostname as getHostname } from 'node:os';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
 import { readRemoteHosts, rehydrateRemoteHostFields } from '../remote-hosts.js';
+import type { RemoteWakeRegistry } from '../remote-wake.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
 import { GLYPH, palette } from '../cli-style.js';
 import { getHookSecret } from '../config/hook-secret.js';
@@ -268,6 +269,14 @@ export class WebServer extends EventEmitter {
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
   /** Cron service (assigned in setupRoutes). */
   private cronService!: CronService;
+  /**
+   * Wake-on-LAN registry, returned by `registerSessionRoutes`. Held for its LIFETIME
+   * only — `drop()` on session cleanup, `stop()` on shutdown. Waking from here would
+   * re-wake a host on every timer tick (the invariant `remote-wake.ts` documents), so
+   * the wiring guard in `test/remote-wake.test.ts` pins that this file calls nothing
+   * but `drop`/`stop` on it.
+   */
+  private remoteWake: RemoteWakeRegistry | null = null;
   private sse: SseStreamManager;
   private store = getStore();
   private tabLayouts!: TabLayoutService;
@@ -1065,7 +1074,9 @@ export class WebServer extends EventEmitter {
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
-    registerSessionRoutes(this.app, ctx);
+    // The registry's lifetime is the server's: it drops per-session wake state on every
+    // cleanup path and resolves in-flight wakes on shutdown.
+    this.remoteWake = registerSessionRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);
     registerPlanRoutes(this.app, ctx);
@@ -1456,6 +1467,11 @@ export class WebServer extends EventEmitter {
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
+    // Wake state goes with the session on EVERY cleanup path (delete routes, the cron
+    // and admin paths, scheduled-run teardown, error paths) — that is why it lives here
+    // rather than in the two delete routes, where it left an entry behind, including up
+    // to 4 KB of the user's buffered keystrokes.
+    this.remoteWake?.drop(sessionId);
 
     this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
   }
@@ -3343,6 +3359,10 @@ export class WebServer extends EventEmitter {
     // response), so without this a 10-minute wait holds shutdown open.
     sessionWaits.cancelEverything();
     approvalInbox.stop();
+    // Same reason as `cancelEverything` above: an in-flight wake is awaited by a request,
+    // and `app.close()` (the last line of this method) does not abort in-flight requests —
+    // so without this a restart during a wake waits out the readiness poll.
+    this.remoteWake?.stop();
 
     this.lastRecordedTokens.clear();
 

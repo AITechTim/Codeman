@@ -23,6 +23,9 @@
  *    keeps the banner in sync while a wake is running.
  *
  * @mixin Extends CodemanApp.prototype via Object.assign
+ * @dependency app.js (CodemanApp class, this.sessions, this.activeSessionId, showToast)
+ * @dependency constants.js (SSE_EVENTS — the remote:hostWaking / remote:hostWakeFailed names)
+ * @loadorder 12.2 — loaded after session-ui.js, before webview-tabs.js
  */
 
 const HOST_WAKE_POLL_MS = 30_000;
@@ -45,6 +48,12 @@ Object.assign(CodemanApp.prototype, {
       label: '',
       /** True between clicking Wake and the answer coming back. */
       waking: false,
+      /**
+       * True only when the server is actually holding bytes for this session (the typing
+       * path buffers them). Browser keystrokes go over the WebSocket, which never passes
+       * through the wake registry — so the Wake BUTTON must not claim input is queued.
+       */
+      queuedInput: false,
       /** Set when the last wake attempt or poll failed. */
       error: '',
     };
@@ -157,7 +166,9 @@ Object.assign(CodemanApp.prototype, {
     }
     if (detail) {
       detail.textContent = state.waking
-        ? 'input is queued until it is back'
+        ? state.queuedInput
+          ? 'input is queued until it is back'
+          : 'waiting for the host to come back'
         : hasTarget
           ? `ssh ${state.host}`
           : 'no wake-on-LAN configured';
@@ -187,6 +198,10 @@ Object.assign(CodemanApp.prototype, {
     if (!state || !state.sessionId) return;
     const sessionId = state.sessionId;
     state.waking = true;
+    // The button path holds nothing: whatever the user typed went into the stalled pane
+    // over the WebSocket and is gone. Saying otherwise is a promise the next keystroke
+    // disproves.
+    state.queuedInput = false;
     state.error = '';
     this._renderHostWakeBanner();
     try {
@@ -195,10 +210,13 @@ Object.assign(CodemanApp.prototype, {
       if (this._hostWake !== state || state.sessionId !== sessionId) return;
       state.waking = false;
       if (!data.success) {
-        // Most likely: no wake target configured after all (the route is the authority).
+        // The ROUTE is the authority on whether a target is configured, so ask it again
+        // (`/reachability` reports `wakeConfigured`) rather than pattern-matching the
+        // error message: the message is prose, and the code is generic (`INVALID_INPUT`
+        // covers "Not a remote session" too).
         state.error = data.error || 'Wake failed';
-        if (String(data.error || '').includes('No wake-on-LAN target')) state.wakeConfigured = 'none';
         this._renderHostWakeBanner();
+        await this._pollHostReachability(true);
         return;
       }
       state.reachable = data.data.reachable !== false;
@@ -215,6 +233,16 @@ Object.assign(CodemanApp.prototype, {
       state.error = err && err.message ? err.message : 'Wake failed';
       this._renderHostWakeBanner();
     }
+  },
+
+  /**
+   * Why the host could not be read. In multi-user mode `GET /api/remote-hosts` returns
+   * `[]` to a non-admin, so "Remote host not found" would blame a config the user simply
+   * is not allowed to see — the save is admin-only, and that is what it should say.
+   */
+  _wakeConfigUnavailableMessage() {
+    const me = window.__codemanUser || {};
+    return me.multiUser && me.role !== 'admin' ? 'Wake-on-LAN configuration is admin-only' : 'Remote host not found';
   },
 
   /** Open the small WoL dialog for the banner's host, pre-filled from the host config. */
@@ -247,6 +275,9 @@ Object.assign(CodemanApp.prototype, {
       if (host && this._wakeConfigHostId === hostId) {
         mac.value = host.wakeMac || '';
         command.value = host.wakeCommand || '';
+      } else if (!host && this._wakeConfigHostId === hostId && status) {
+        // Say it up front rather than only when Save fails.
+        status.textContent = this._wakeConfigUnavailableMessage();
       }
     } catch {
       /* The form is already usable from the session payload. */
@@ -289,7 +320,7 @@ Object.assign(CodemanApp.prototype, {
       const listData = await listRes.json();
       const hosts = listData.success ? listData.data : [];
       const host = Array.isArray(hosts) ? hosts.find((item) => item.id === hostId) : null;
-      if (!host) throw new Error('Remote host not found');
+      if (!host) throw new Error(this._wakeConfigUnavailableMessage());
       // PUT takes the whole host (schema-validated), so send back everything we know and
       // only replace the wake fields. `undefined` drops the key entirely.
       const payload = {
@@ -331,16 +362,24 @@ Object.assign(CodemanApp.prototype, {
     // A create-path wake (the user pressed Run / Attach) has no session yet, so
     // nothing is queued behind it — the wording has to say what actually happens.
     const forNewSession = Boolean(data && data.forNewSession);
+    // Only the typing path buffers bytes; the wake button and the send-and-wait path
+    // hold none, and a browser keystroke never reaches the registry at all.
+    const queuedInput = Boolean(data && data.queuedInput);
     // Long enough to cover the wake + attach (~10s measured on a warm S3), and it
     // is replaced by `remote:sessionReconnected` the moment the pane is back.
     this.showToast(
-      forNewSession ? `Waking ${label} … the session starts when it is back` : `Waking ${label} … input is queued`,
+      forNewSession
+        ? `Waking ${label} … the session starts when it is back`
+        : queuedInput
+          ? `Waking ${label} … input is queued`
+          : `Waking ${label} … waiting for it to come back`,
       'info',
       { duration: 12000 }
     );
     const state = this._hostWake;
     if (!state || !data || state.sessionId !== data.sessionId) return;
     state.waking = true;
+    state.queuedInput = queuedInput;
     state.error = '';
     if (data.label) state.label = data.label;
     this._renderHostWakeBanner();
@@ -350,16 +389,20 @@ Object.assign(CodemanApp.prototype, {
   _onRemoteHostWakeFailed(data) {
     const label = data && data.label ? data.label : 'Remote host';
     const forNewSession = Boolean(data && data.forNewSession);
+    const queuedInput = Boolean(data && data.queuedInput);
     this.showToast(
       forNewSession
         ? `${label} did not wake up — no session was started`
-        : `${label} did not wake up — queued input is still held`,
+        : queuedInput
+          ? `${label} did not wake up — queued input is still held`
+          : `${label} did not wake up`,
       'error',
       { duration: 15000 }
     );
     const state = this._hostWake;
     if (!state || !data || state.sessionId !== data.sessionId) return;
     state.waking = false;
+    state.queuedInput = queuedInput;
     state.error = 'timeout';
     state.reachable = false;
     this._renderHostWakeBanner();

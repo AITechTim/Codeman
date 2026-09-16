@@ -20,10 +20,12 @@ import {
   RemoteWakeRegistry,
   appendBoundedPending,
   buildMagicPacket,
+  createDefaultRemoteWakeDeps,
   decideRemoteInputAction,
   parseMacList,
   resolveWakeTarget,
   sendWakePackets,
+  waitUntilRemoteReady,
   wakeConfigured,
   REMOTE_WAKE_PENDING_MAX_BYTES,
   REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
@@ -77,21 +79,20 @@ describe('appendBoundedPending', () => {
     expect(appendBoundedPending([big], 'newest')).toEqual(['newest']);
   });
 
-  it('trims a single oversized chunk to the cap, keeping its TAIL', () => {
-    // One large paste is one input value, so the cap has to hold WITHIN a chunk too
-    // (otherwise "bounded at 4 KB" would only be true per chunk, not per session).
+  it('drops an oversized chunk outright instead of delivering a fragment of it', () => {
+    // One large paste is one input value and was never typed character by character, so its
+    // tail is not "what the user just typed" — writing it into the pane would run a partial
+    // command (with the paste's trailing carriage return, if it had one).
     const huge = 'y'.repeat(REMOTE_WAKE_PENDING_MAX_BYTES + 100);
-    const result = appendBoundedPending([], huge);
-    expect(result).toEqual(['y'.repeat(REMOTE_WAKE_PENDING_MAX_BYTES)]);
-    expect(result[0].length).toBe(REMOTE_WAKE_PENDING_MAX_BYTES);
+    expect(appendBoundedPending([], huge)).toEqual([]);
+    // The bytes already queued are left alone, not replaced by the fragment.
+    expect(appendBoundedPending(['typed'], huge)).toEqual(['typed']);
   });
 
-  it('trims a multi-byte tail without splitting a character', () => {
+  it('measures the cap in UTF-8 bytes, so a multi-byte paste is dropped too', () => {
     const cap = 10;
-    const value = 'ä'.repeat(8); // 2 bytes each → 16 bytes
-    const result = appendBoundedPending([], value, cap);
-    expect(Buffer.byteLength(result[0])).toBeLessThanOrEqual(cap);
-    expect(result[0]).toBe('ä'.repeat(5)); // 10 bytes, no U+FFFD
+    const value = 'ä'.repeat(8); // 2 bytes each → 16 bytes > cap
+    expect(appendBoundedPending([], value, cap)).toEqual([]);
   });
 });
 
@@ -460,6 +461,37 @@ describe('RemoteWakeRegistry', () => {
     expect(h.registry.pendingBytes('sess-1')).toBe(0);
     expect(h.registry.isWaking('sess-1')).toBe(false);
   });
+
+  it('never keys the state map on a local session', async () => {
+    // `hasWakeTarget` runs on EVERY input chunk (it is the route's gate), so allocating
+    // state before the `!session.remote` return would put an entry — and later a pending
+    // buffer — in the map for every local session the user types in.
+    const h = harness();
+    const local: WakeableSession = {
+      id: 'local-1',
+      remote: undefined,
+      reattachRemote: h.reattachRemote,
+      writeViaMux: h.writeViaMux,
+    };
+    expect(await h.registry.hasWakeTarget(local)).toBe(false);
+    expect(await h.registry.wakeConfigured(local)).toBe('none');
+    expect(h.registry.stateCount()).toBe(0);
+    expect(h.probe).not.toHaveBeenCalled();
+  });
+
+  it('ensureAwake hands the caller’s budget to the readiness poll (the wake button’s case)', async () => {
+    // The button is pressed from the same dashboard as Run/Attach, so it must not inherit
+    // the 90 s session default and get cut off by the proxy's 60 s read timeout.
+    const h = harness();
+    h.probe.mockResolvedValue(false);
+    await expect(
+      h.registry.ensureAwake(h.session, { force: true, timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS })
+    ).resolves.toBe(true);
+    expect(h.waitUntilReady).toHaveBeenCalledWith(remote, {
+      timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+      signal: expect.any(AbortSignal),
+    });
+  });
 });
 
 // ========== Host-scoped wake (session create/attach) ==========
@@ -499,6 +531,8 @@ describe('RemoteWakeRegistry — host-scoped wake for a request that waits on it
     // 60 s, so a create-path wake must not inherit the 90 s session default.
     expect(h.waitUntilReady).toHaveBeenCalledWith(hostRemote, {
       timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+      // The shutdown signal rides along so `WebServer.stop()` can end the poll.
+      signal: expect.any(AbortSignal),
     });
     expect(h.events).toContain('remote:hostWaking');
   });
@@ -552,6 +586,49 @@ describe('RemoteWakeRegistry — host-scoped wake for a request that waits on it
 
     await expect(h.registry.ensureHostAwake(hostRemote)).resolves.toBe('failed');
   });
+
+  it('stop() resolves an in-flight wake as failed, so shutdown cannot wait it out', async () => {
+    // `WebServer.stop()` ends with `app.close()`, which does not abort in-flight requests:
+    // without this the shutdown sits out the whole readiness poll. Real `waitUntilReady`
+    // (abortable sleep) with fake probe/wake, which is the shape of a restart mid-wake.
+    const registry = new RemoteWakeRegistry(
+      createDefaultRemoteWakeDeps({ probe: async () => false, wake: async () => true, log: () => {} })
+    );
+    const pending = registry.ensureHostAwake(hostRemote, { timeoutMs: 60_000 });
+    await vi.waitFor(() => expect(registry.isWaking('host:hufflepuff')).toBe(true));
+
+    registry.stop();
+    await expect(pending).resolves.toBe('failed');
+
+    // ... and nothing new starts afterwards.
+    await expect(registry.ensureHostAwake(hostRemote)).resolves.toBe('failed');
+  });
+});
+
+describe('waitUntilRemoteReady', () => {
+  const remote: WakeableRemote = { hostId: 'h', label: 'H', host: '10.0.0.9' };
+
+  it('ends on abort instead of waiting out the current interval', async () => {
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = waitUntilRemoteReady(remote, {
+      intervalMs: 1_000,
+      timeoutMs: 60_000,
+      probe: async () => false,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 10);
+    await expect(pending).resolves.toBe(false);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('returns false immediately when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const probe = vi.fn(async () => true);
+    await expect(waitUntilRemoteReady(remote, { probe, signal: controller.signal })).resolves.toBe(false);
+    expect(probe).not.toHaveBeenCalled();
+  });
 });
 
 // ========== Wiring guard ==========
@@ -572,16 +649,40 @@ function walkTs(dir: string): string[] {
 }
 
 describe('wake wiring guard', () => {
-  it('only the input route may reach the wake registry', () => {
+  it('only the route module and the server may import remote-wake', () => {
     // The auto-reconnect watcher (tmux-manager.ts), the server's dropped-session
-    // handler and any boot-recovery path must NOT import remote-wake: waking there
-    // re-wakes the host seconds after each suspend. Asserted, not commented.
-    const allowed = new Set([join('web', 'routes', 'session-routes.ts')]);
+    // handler and any boot-recovery path must NOT be able to WAKE a host: waking there
+    // re-wakes the host seconds after each suspend. `web/server.ts` is allowed to hold
+    // the registry for its LIFETIME only (`drop()` on session cleanup, `stop()` on
+    // shutdown) — the test below pins that it never calls a waking method, which is the
+    // property this import list is an approximation of.
+    const allowed = new Set([join('web', 'routes', 'session-routes.ts'), join('web', 'server.ts')]);
     const importers = walkTs(SRC)
       .filter((full) => /from\s+['"][^'"]*remote-wake(\.js)?['"]/.test(readFileSync(full, 'utf-8')))
       .map((full) => relative(SRC, full));
 
     expect(importers.sort()).toEqual([...allowed].sort());
+  });
+
+  it('the server only ever calls drop/stop on the registry — never a waking method', () => {
+    // `server.ts` holds the registry because `cleanupSession` and `stop()` need it, and
+    // those run on timers and shutdown paths. Any wake-capable call from this file is the
+    // exact failure invariant #1 exists to prevent, so it is asserted here rather than
+    // left to the import check above (which the field's type alone would satisfy).
+    const server = readFileSync(join(SRC, 'web', 'server.ts'), 'utf-8');
+    for (const method of [
+      'wake',
+      'ensureAwake',
+      'ensureHostAwake',
+      'handleInput',
+      'checkReachable',
+      'checkHostReachable',
+    ]) {
+      expect(server).not.toContain(`remoteWake.${method}(`);
+      expect(server).not.toContain(`remoteWake?.${method}(`);
+    }
+    expect(server).toContain('remoteWake?.drop(');
+    expect(server).toContain('remoteWake?.stop(');
   });
 
   it('wakes a host for a create/attach request ONLY from the HTTP route', () => {

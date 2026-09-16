@@ -843,7 +843,7 @@ export function registerSessionRoutes(
   ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort,
   /** Test seam: inject a registry with fake IO instead of the real TCP/WoL probes. */
   options: { remoteWake?: RemoteWakeRegistry } = {}
-): void {
+): RemoteWakeRegistry {
   // Wake-on-LAN for sleeping remote hosts (see remote-wake.ts). One registry per
   // route registration (= one web server) — the same shape as the process-wide
   // `sessionWaits` singleton, but without the global.
@@ -1350,7 +1350,8 @@ export function registerSessionRoutes(
     }
 
     const session = findSessionOrFail(ctx, id, req);
-    remoteWake.drop(session.id);
+    // Wake state is dropped by `cleanupSession` itself (server.ts), on EVERY cleanup
+    // path — not here: the scheduled-run and admin paths clean up without this route.
     await ctx.cleanupSession(session.id, killMux, 'user_delete');
     return {};
   });
@@ -1368,7 +1369,6 @@ export function registerSessionRoutes(
 
     for (const id of sessionIds) {
       if (ctx.sessions.has(id)) {
-        remoteWake.drop(id);
         await ctx.cleanupSession(id, true, 'user_bulk_delete');
         killed++;
       }
@@ -1626,7 +1626,13 @@ export function registerSessionRoutes(
         'No wake-on-LAN target configured for this host (set a MAC address or a wake command)'
       );
     }
-    const woke = await remoteWake.ensureAwake(session, { force: true });
+    // The button is pressed from the SAME dashboard the create/attach paths are, under
+    // the same reverse proxy — so it holds the request open the same way and needs the
+    // same request budget, not the 90 s session default (see remote-wake.ts).
+    const woke = await remoteWake.ensureAwake(session, {
+      force: true,
+      timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+    });
     return {
       success: true,
       data: {
@@ -4898,4 +4904,10 @@ export function registerSessionRoutes(
 
     return { path: filepath, filename };
   });
+
+  // Returned so the server can own the registry's LIFETIME (drop state when a session is
+  // cleaned up on any of its paths, resolve in-flight wakes on shutdown). The wake-CAPABLE
+  // code stays here: `test/remote-wake.test.ts` pins that `server.ts` calls nothing but
+  // `drop`/`stop` on this handle, so no timer path can reach a wake through it.
+  return remoteWake;
 }

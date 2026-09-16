@@ -1950,6 +1950,8 @@ describe('session-routes', () => {
           // cut the request at 60 s while the session was still being built.
           expect(wakeWaitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ hostId: 'hufflepuff' }), {
             timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+            // The shutdown signal rides along so `WebServer.stop()` can end the poll.
+            signal: expect.any(AbortSignal),
           });
         } finally {
           startShell.mockRestore();
