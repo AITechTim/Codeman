@@ -740,17 +740,96 @@ Object.assign(CodemanApp.prototype, {
     // unreachable" apart from "the CLI can't be redirected", "not one of the
     // discovered models", or "this is a Docker/remote session". Go through the
     // raw response here instead so a failure is diagnosable, not just present.
-    const res = await this._api(`/api/sessions/${sessionId}/custom-model`, {
-      method: 'POST',
-      body: { endpointId, modelId },
-    });
-    const data = res ? await res.json().catch(() => null) : null;
-    if (!data || data.success === false) {
+    let { ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId);
+
+    // A success body comes back as {success:true, data:{...}} (server.ts's preSerialization
+    // envelope), but a route-level error is {success:false, error, errorCode} with no nested
+    // data — createErrorResponse() never wraps one. `payload` below is only ever meaningful
+    // once `data.success !== false`.
+    let payload = data?.success !== false ? data?.data : undefined;
+
+    // llama-swap runs one model at a time: switching would unload it out from under
+    // another session actively using it. The route only asks when that's actually true
+    // (never just because a swap is needed at all) — confirming re-sends the exact same
+    // call with `confirmed: true` so the route skips the check the second time.
+    if (ok && payload?.requiresConfirmation) {
+      const names = payload.affectedSessions.map((s) => s.name || s.id).join(', ');
+      const proceed = confirm(
+        `${names} ${payload.affectedSessions.length === 1 ? 'is' : 'are'} currently using ` +
+          `${payload.currentlyLoadedModel} on this endpoint. Switching to ${modelId} will unload it ` +
+          `for ${payload.affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
+      );
+      if (!proceed) {
+        this.showToast('Kept the native backend — model switch cancelled', 'info');
+        return;
+      }
+      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, true));
+      payload = data?.success !== false ? data?.data : undefined;
+    }
+
+    if (!ok || !data || data.success === false) {
       const detail = data?.error ? `: ${data.error}` : res ? ` (HTTP ${res.status})` : ' (request failed)';
       this.showToast(`Session started on the native backend — could not apply the custom endpoint${detail}`, 'error');
       return;
     }
     this.showToast(`Pointed at ${endpointId} — restarting the session...`, 'info');
+
+    // The apply above already succeeded — the session IS pointed at the endpoint — but
+    // llama-swap itself may still be unloading the old model and loading this one, which
+    // can take well over a minute. Without this, a prompt sent during that window either
+    // hangs silently or (the bug this whole feature exists to fix) gets answered by
+    // whatever was loaded a moment ago, reading as "it's still using the wrong model."
+    if (payload?.modelSwapInProgress) {
+      void this._watchLlamaSwapLoading(endpointId, modelId);
+    }
+  },
+
+  /** POST /api/sessions/:id/custom-model, returning {ok, data, res} rather than throwing —
+   *  see runCustomModelEntry's own comment for why this goes through `_api()` (raw fetch)
+   *  rather than `_apiJson()`: a failure's `error` detail must survive to the caller. */
+  async _applyCustomModelToSession(sessionId, endpointId, modelId, confirmed) {
+    const res = await this._api(`/api/sessions/${sessionId}/custom-model`, {
+      method: 'POST',
+      body: confirmed ? { endpointId, modelId, confirmed } : { endpointId, modelId },
+    });
+    const data = res ? await res.json().catch(() => null) : null;
+    return { ok: !!res, data, res };
+  },
+
+  /**
+   * Polls llama-swap's own `/running` (via the read-only running-status route) until
+   * `modelId` reports `state: 'ready'`, showing a sticky toast the whole time so a slow
+   * unload/reload (measured well over a minute for a large model) reads as "loading",
+   * never as silence or a wrong answer from whatever was loaded before. Bounded at 2
+   * minutes; still not ready by then gets a toast saying so rather than polling forever.
+   *
+   * `pollIntervalMs`/`maxWaitMs` exist to let a test drive this in milliseconds instead of
+   * minutes — real callers never pass them, which is what keeps the defaults live here
+   * rather than only in a test fixture.
+   */
+  async _watchLlamaSwapLoading(endpointId, modelId, pollIntervalMs = 3000, maxWaitMs = 120000) {
+    const toast = this.showToast(`Loading ${modelId} on ${endpointId}… this can take a while`, 'info', {
+      duration: 0,
+    });
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
+      if (!status) continue; // transient failure — keep waiting rather than giving up early
+      if (!status.isLlamaSwap) {
+        // Endpoint changed under us, or wasn't llama-swap after all — nothing more to
+        // watch for, and not a failure worth a toast of its own.
+        toast?.dismiss();
+        return;
+      }
+      if (status.running.some((r) => r.model === modelId && r.state === 'ready')) {
+        toast?.dismiss();
+        this.showToast(`${modelId} is ready`, 'success', { duration: 2500 });
+        return;
+      }
+    }
+    toast?.dismiss();
+    this.showToast(`Still waiting for ${modelId} to finish loading on ${endpointId} — check the llama-swap server`, 'warning');
   },
 
   /**

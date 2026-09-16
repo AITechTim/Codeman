@@ -177,6 +177,57 @@ type RedactedHost = ReturnType<typeof redactApiKey>;
  * each do their own `discoverModels()` + error handling around one shared
  * "how to apply a successful result" step.
  */
+const RUNNING_TIMEOUT_MS = 5000;
+
+export interface LlamaSwapRunningModel {
+  model: string;
+  state: string;
+}
+
+export interface LlamaSwapStatus {
+  /**
+   * Feature-detected via `GET /running`: true only when the server answered with
+   * llama-swap's own shape (`{ running: [...] }`). Plain llama.cpp (and any other
+   * OpenAI-compatible server) has no such endpoint and always runs the single model
+   * it was started with, so there is no "current model" to conflict with — every
+   * caller must treat `isLlamaSwap: false` as "nothing to check", never as an error.
+   */
+  isLlamaSwap: boolean;
+  running: LlamaSwapRunningModel[];
+}
+
+/**
+ * Distinguishes llama-swap from a plain llama.cpp/OpenAI-compatible server, and reports
+ * what llama-swap currently has loaded — llama.cpp only ever runs one GGUF at a time, and
+ * llama-swap unloads/reloads it on demand when a request asks for a different one, which
+ * can take anywhere from a few seconds to over a minute. Read-only: this never triggers a
+ * swap itself (unlike `/props?model=`, `/running` takes no `model` parameter to route by).
+ * Best-effort like `discoverModels()`'s siblings: any failure (unreachable, non-2xx,
+ * unexpected shape) reads as "not llama-swap", never thrown.
+ */
+export async function getLlamaSwapStatus(
+  host: Pick<CustomModelHost, 'baseUrl' | 'apiKey' | 'authStyle'>
+): Promise<LlamaSwapStatus> {
+  try {
+    const res = await webviewFetch(new URL(`${host.baseUrl.replace(/\/+$/, '')}/running`), {
+      headers: authHeaders(host),
+      signal: AbortSignal.timeout(RUNNING_TIMEOUT_MS),
+    });
+    if (!res.ok) return { isLlamaSwap: false, running: [] };
+    const body = (await res.json()) as { running?: unknown };
+    if (!Array.isArray(body.running)) return { isLlamaSwap: false, running: [] };
+    const running = body.running
+      .filter(
+        (r): r is { model: string; state?: unknown } =>
+          !!r && typeof r === 'object' && typeof (r as { model?: unknown }).model === 'string'
+      )
+      .map((r) => ({ model: r.model, state: typeof r.state === 'string' ? r.state : 'unknown' }));
+    return { isLlamaSwap: true, running };
+  } catch {
+    return { isLlamaSwap: false, running: [] };
+  }
+}
+
 function applyDiscoveredModels(host: CustomModelHost, result: DiscoveryResult): CustomModelHost {
   const { models, contextLengths } = result;
   const defaultModelId = host.defaultModelId && models.includes(host.defaultModelId) ? host.defaultModelId : undefined;
@@ -303,4 +354,18 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
       }
     }
   );
+
+  // Read-only, no admin gate: any session owner who can already point their own session
+  // at this endpoint (POST .../custom-model, ungated by design — see session-routes.ts)
+  // can equally ask what it currently has loaded, before or while that apply is pending.
+  app.get('/api/model-endpoints/:id/running-status', async (req): Promise<ApiResponse<LlamaSwapStatus>> => {
+    const { id } = req.params as { id: string };
+    const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
+    const host = hosts.find((item) => item.id === id);
+    if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+    if (isBlockedWebviewUrl(host.baseUrl)) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Endpoint base URL is not allowed');
+    }
+    return { success: true, data: await getLlamaSwapStatus(host) };
+  });
 }

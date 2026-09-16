@@ -55,6 +55,7 @@ import {
 } from '../schemas.js';
 import { readCustomModelHosts } from '../../custom-model-hosts.js';
 import { applyCustomModelInjection, removeConfigDir } from '../../custom-model-injection-apply.js';
+import { getLlamaSwapStatus } from './custom-model-routes.js';
 import { matchesPattern } from '../../config/cli-registry/patterns.js';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { TabLayoutValidationError } from '../../tab-layout.js';
@@ -1209,6 +1210,32 @@ export function registerSessionRoutes(
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
     }
 
+    // llama.cpp runs exactly one model at a time; llama-swap unloads and reloads it on
+    // demand, which can take anywhere from a few seconds to over a minute — long enough
+    // that a session mid-swap looks indistinguishable from one that never left the native
+    // backend. Feature-detected via llama-swap's own `GET /running` (a plain llama.cpp
+    // server has no such endpoint and reads as `isLlamaSwap: false` — nothing to check).
+    const swapStatus = await getLlamaSwapStatus(endpoint);
+    const currentlyLoaded = swapStatus.running.find((r) => r.state === 'ready')?.model ?? swapStatus.running[0]?.model;
+    const swapNeeded = swapStatus.isLlamaSwap && !!currentlyLoaded && currentlyLoaded !== body.modelId;
+
+    // Only ask when switching would actually take the model away from another session
+    // that is currently using it — never just because a swap is needed at all. `confirmed`
+    // (set by the caller after showing that warning once) skips asking again.
+    if (swapNeeded && !body.confirmed) {
+      const affectedSessions = [...ctx.sessions.values()]
+        .filter(
+          (s) =>
+            s.id !== session.id &&
+            s.customModel?.endpointId === endpoint.id &&
+            s.customModel?.modelId === currentlyLoaded
+        )
+        .map((s) => ({ id: s.id, name: s.name }));
+      if (affectedSessions.length > 0) {
+        return { requiresConfirmation: true, currentlyLoadedModel: currentlyLoaded, affectedSessions };
+      }
+    }
+
     // A CLI whose config alone cannot select the model also gets its `model` launch param
     // forced (pi/omp `custom/<id>`, grok's block name). The argv engine DROPS a token that
     // fails its pattern rather than quoting it, which would silently launch the CLI on its
@@ -1250,7 +1277,7 @@ export function registerSessionRoutes(
 
     const restarted = await session.restartCli();
     persistAndBroadcastSession(ctx, session);
-    return { customModel: session.customModel, restarted };
+    return { customModel: session.customModel, restarted, modelSwapInProgress: swapNeeded };
   });
 
   // ========== Delete Session ==========

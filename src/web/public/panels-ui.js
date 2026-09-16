@@ -5544,6 +5544,11 @@ Object.assign(CodemanApp.prototype, {
     if (duration > 0) {
       dismissTimer = setTimeout(dismiss, duration);
     }
+
+    // Most callers ignore this — a handle exists for a long-running toast a caller needs
+    // to update or dismiss itself once its own condition resolves (e.g. a "loading model"
+    // toast a poll loop dismisses once the model reports ready).
+    return { dismiss, setMessage: (text) => { msgSpan.textContent = text; } };
   },
 
 

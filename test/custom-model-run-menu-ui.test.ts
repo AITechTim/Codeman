@@ -426,3 +426,168 @@ describe('Custom Model Endpoint Profiles: applying a picked entry', () => {
     expect(app._runMode).toBe('opencode');
   });
 });
+
+describe('Custom Model Endpoint Profiles: llama-swap model-swap confirmation and loading state', () => {
+  function launchHarness(applyResponses: Array<Record<string, unknown>>) {
+    const { win, app } = bootApp({});
+    app.activeSessionId = 'old-session';
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    const applyBodies: unknown[] = [];
+    let call = 0;
+    app._api = async (path: string, opts?: { body?: unknown }) => {
+      if (path.endsWith('/custom-model')) {
+        applyBodies.push(opts?.body);
+        const data = applyResponses[Math.min(call, applyResponses.length - 1)];
+        call += 1;
+        return { ok: true, status: 200, json: async () => ({ success: true, data }) };
+      }
+      throw new Error(`unexpected _api call: ${path}`);
+    };
+    return { win, app, applyBodies };
+  }
+
+  it('confirming the native window.confirm() re-sends the apply with confirmed:true', async () => {
+    const { win, app, applyBodies } = launchHarness([
+      {
+        requiresConfirmation: true,
+        currentlyLoadedModel: 'llama3',
+        affectedSessions: [{ id: 's2', name: 'w2-otherbox' }],
+      },
+      { customModel: { endpointId: 'llama-box' }, restarted: true, modelSwapInProgress: true },
+    ]);
+    let confirmMessage: string | undefined;
+    win.confirm = ((msg: string) => {
+      confirmMessage = msg;
+      return true;
+    }) as typeof win.confirm;
+    app._watchLlamaSwapLoading = async () => {}; // not under test here
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(confirmMessage).toContain('w2-otherbox');
+    expect(confirmMessage).toContain('llama3');
+    expect(confirmMessage).toContain('qwen3');
+    expect(applyBodies).toEqual([
+      { endpointId: 'llama-box', modelId: 'qwen3' },
+      { endpointId: 'llama-box', modelId: 'qwen3', confirmed: true },
+    ]);
+  });
+
+  it('cancelling window.confirm() keeps the native backend and never re-sends the apply', async () => {
+    const { win, app, applyBodies } = launchHarness([
+      { requiresConfirmation: true, currentlyLoadedModel: 'llama3', affectedSessions: [{ id: 's2', name: 'w2' }] },
+    ]);
+    win.confirm = (() => false) as typeof win.confirm;
+    let toastMessage: string | undefined;
+    app.showToast = (msg: string) => {
+      toastMessage = msg;
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(applyBodies).toHaveLength(1); // no second (confirmed) call
+    expect(toastMessage).toMatch(/cancelled/i);
+  });
+
+  it('a successful apply with modelSwapInProgress kicks off the loading watcher', async () => {
+    const { app } = launchHarness([
+      { customModel: { endpointId: 'llama-box' }, restarted: true, modelSwapInProgress: true },
+    ]);
+    let watched: unknown[] | null = null;
+    app._watchLlamaSwapLoading = async (...args: unknown[]) => {
+      watched = args;
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(watched).toEqual(['llama-box', 'qwen3']);
+  });
+
+  it('a successful apply with no swap needed never starts the loading watcher', async () => {
+    const { app } = launchHarness([
+      { customModel: { endpointId: 'llama-box' }, restarted: true, modelSwapInProgress: false },
+    ]);
+    let watchCalled = false;
+    app._watchLlamaSwapLoading = async () => {
+      watchCalled = true;
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(watchCalled).toBe(false);
+  });
+});
+
+describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () => {
+  // Driven with millisecond intervals (the function's own pollIntervalMs/maxWaitMs
+  // params — real callers never pass them) rather than fake timers: this code runs
+  // inside the JSDOM window's own realm (bootApp's `runScripts: "dangerously"` eval),
+  // whose setTimeout is NOT the one vi.useFakeTimers() patches, so advancing fake
+  // timers here would advance nothing and either hang or silently no-op.
+
+  it('dismisses the loading toast as soon as the target model reports ready', async () => {
+    const { app } = bootApp({});
+    const toastCalls: Array<{ message: string; type: string }> = [];
+    const dismissed: string[] = [];
+    app.showToast = (message: string, type: string) => {
+      toastCalls.push({ message, type });
+      return { dismiss: () => dismissed.push(message), setMessage: () => {} };
+    };
+    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
+
+    expect(toastCalls[0].message).toMatch(/loading qwen3/i);
+    expect(dismissed).toContain(toastCalls[0].message);
+    expect(toastCalls.at(-1)?.message).toMatch(/ready/i);
+  });
+
+  it('gives up after the bounded wait and warns instead of polling forever', async () => {
+    const { app } = bootApp({});
+    const toastCalls: string[] = [];
+    app.showToast = (message: string) => {
+      toastCalls.push(message);
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
+    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] });
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 30);
+
+    expect(toastCalls.at(-1)).toMatch(/still waiting/i);
+  });
+
+  it('stops polling (without a warning) once the endpoint no longer reads as llama-swap', async () => {
+    const { app } = bootApp({});
+    const toastCalls: string[] = [];
+    app.showToast = (message: string) => {
+      toastCalls.push(message);
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
+    app._apiJson = async () => ({ isLlamaSwap: false, running: [] });
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
+
+    expect(toastCalls).toHaveLength(1); // only the initial "Loading..." toast, no follow-up warning
+  });
+
+  it('keeps waiting through a transient status-fetch failure instead of giving up early', async () => {
+    const { app } = bootApp({});
+    const toastCalls: string[] = [];
+    app.showToast = (message: string) => {
+      toastCalls.push(message);
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
+    let call = 0;
+    app._apiJson = async () => {
+      call += 1;
+      if (call === 1) return null; // transient failure
+      return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
+    };
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 5, 200);
+
+    expect(toastCalls.at(-1)).toMatch(/ready/i);
+  });
+});

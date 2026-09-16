@@ -1934,6 +1934,10 @@ export const CustomModelSelectionSchema = z.union([
   z.object({
     endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
     modelId: z.string().min(1).max(200),
+    // Set once the caller has already shown the "this will unload <model> for session(s)
+    // X" warning (see session-routes.ts's llama-swap conflict check) and the user chose to
+    // proceed anyway — skips that check on this call instead of asking again.
+    confirmed: z.boolean().optional(),
   }),
   z.object({ clear: z.literal(true) }),
 ]);

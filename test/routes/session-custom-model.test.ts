@@ -3,13 +3,28 @@
  * chunk 5 — applying/clearing a session's custom model endpoint + CLI restart).
  * Port: N/A (app.inject, no real port needed)
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
 import { createRouteTestHarness } from './_route-test-utils.js';
+import { createMockSession } from '../mocks/index.js';
 import { getDataDir } from '../../src/config/instance.js';
 import { writeCustomModelHosts, type CustomModelHost } from '../../src/custom-model-hosts.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { webviewFetch } from '../../src/web/webview-egress.js';
+
+// Every apply now also checks llama-swap's `GET /running` (session-routes.ts) before
+// applying — without this mock every test in this file would make a REAL network request
+// to the fake 192.168.1.50 endpoint below and wait out its 5s timeout. Defaults to a plain
+// 404 (reads as "not llama-swap", exercising none of the new conflict-check tests below),
+// overridden per-test where the llama-swap behavior itself is what's under test.
+vi.mock('../../src/web/webview-egress.js', async () => {
+  const actual = await vi.importActual<typeof import('../../src/web/webview-egress.js')>(
+    '../../src/web/webview-egress.js'
+  );
+  return { ...actual, webviewFetch: vi.fn() };
+});
+const fetchMock = vi.mocked(webviewFetch);
 
 const CLAUDE_ENDPOINT: CustomModelHost = {
   id: 'ep1',
@@ -26,6 +41,8 @@ async function setup() {
 describe('POST /api/sessions/:id/custom-model', () => {
   beforeEach(async () => {
     await writeCustomModelHosts(getDataDir(), []);
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(new Response('not found', { status: 404 }));
   });
 
   it('applies an endpoint/model to a claude-mode session and restarts the CLI', async () => {
@@ -209,6 +226,129 @@ describe('POST /api/sessions/:id/custom-model', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(existsSync(dir)).toBe(false);
+  });
+
+  describe('llama-swap conflict check (llama.cpp runs one model at a time)', () => {
+    function mockRunning(running: Array<{ model: string; state: string }>) {
+      fetchMock.mockImplementation(async (url: URL) => {
+        if (url.pathname === '/running') return new Response(JSON.stringify({ running }), { status: 200 });
+        throw new Error(`unexpected request in this test: ${url.href}`);
+      });
+    }
+
+    it('applies straight away when the requested model is already loaded', async () => {
+      const { app, ctx } = await setup();
+      ctx.sessions.get('test-session-1')!.mode = 'claude';
+      mockRunning([{ model: 'qwen3', state: 'ready' }]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      expect(res.json().success).not.toBe(false);
+      expect(res.json().modelSwapInProgress).toBe(false);
+      expect(ctx.sessions.get('test-session-1')!.setCustomModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('applies straight away when a swap is needed but nothing else is using the loaded model, flagging modelSwapInProgress', async () => {
+      const { app, ctx } = await setup();
+      ctx.sessions.get('test-session-1')!.mode = 'claude';
+      mockRunning([{ model: 'llama3', state: 'ready' }]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      expect(res.json().success).not.toBe(false);
+      expect(res.json().modelSwapInProgress).toBe(true);
+      expect(ctx.sessions.get('test-session-1')!.setCustomModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks for confirmation instead of applying when another session is actively using the currently loaded model', async () => {
+      const { app, ctx } = await setup();
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+      const other = createMockSession('other-session');
+      other.name = 'w2-otherbox';
+      other.customModel = { endpointId: 'ep1', modelId: 'llama3' };
+      ctx.sessions.set('other-session', other);
+      mockRunning([{ model: 'llama3', state: 'ready' }]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      const body = res.json();
+      expect(body.success).not.toBe(false);
+      expect(body.requiresConfirmation).toBe(true);
+      expect(body.currentlyLoadedModel).toBe('llama3');
+      expect(body.affectedSessions).toEqual([{ id: 'other-session', name: 'w2-otherbox' }]);
+      // Nothing actually applied yet — this call only asked, it did not switch.
+      expect(session.setCustomModel).not.toHaveBeenCalled();
+      expect(session.restartCli).not.toHaveBeenCalled();
+    });
+
+    it('applies once confirmed, skipping the conflict check the second time', async () => {
+      const { app, ctx } = await setup();
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+      const other = createMockSession('other-session');
+      other.customModel = { endpointId: 'ep1', modelId: 'llama3' };
+      ctx.sessions.set('other-session', other);
+      mockRunning([{ model: 'llama3', state: 'ready' }]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3', confirmed: true },
+      });
+
+      const body = res.json();
+      expect(body.requiresConfirmation).toBeUndefined();
+      expect(body.modelSwapInProgress).toBe(true);
+      expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+      expect(session.restartCli).toHaveBeenCalledTimes(1);
+    });
+
+    it('a session pointed at the SAME endpoint but a DIFFERENT (not-currently-loaded) model is not treated as affected', async () => {
+      const { app, ctx } = await setup();
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+      const other = createMockSession('other-session');
+      other.customModel = { endpointId: 'ep1', modelId: 'some-other-model' }; // not the loaded one
+      ctx.sessions.set('other-session', other);
+      mockRunning([{ model: 'llama3', state: 'ready' }]);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      expect(res.json().requiresConfirmation).toBeUndefined();
+      expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('not llama-swap (plain llama.cpp/OpenAI-compatible server, no /running) — never checked, applies straight away', async () => {
+      const { app, ctx } = await setup();
+      ctx.sessions.get('test-session-1')!.mode = 'claude';
+      fetchMock.mockResolvedValue(new Response('not found', { status: 404 }));
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      expect(res.json().modelSwapInProgress).toBe(false);
+      expect(res.json().requiresConfirmation).toBeUndefined();
+    });
   });
 
   it('refuses to touch a busy session', async () => {
