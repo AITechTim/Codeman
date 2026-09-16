@@ -57,6 +57,9 @@ function bootApp(
       <div class="modal" id="customModelSwapConfirmModal">
         <p id="customModelSwapConfirmMessage"></p>
       </div>
+      <div class="modal" id="customModelContextWarningModal">
+        <p id="customModelContextWarningMessage"></p>
+      </div>
     </body>`,
     { url: 'http://localhost/', runScripts: 'dangerously' }
   );
@@ -859,6 +862,64 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
   });
 });
 
+describe("Custom Model Endpoint Profiles: requiresContextWarning (this CLI's own overhead can exceed a small model's real context)", () => {
+  function launchHarness(applyResponses: Array<Record<string, unknown>>) {
+    const { win, app } = bootApp({});
+    app.activeSessionId = 'old-session';
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    const applyBodies: unknown[] = [];
+    let call = 0;
+    app._api = async (path: string, opts?: { body?: unknown }) => {
+      if (path.endsWith('/custom-model')) {
+        applyBodies.push(opts?.body);
+        const data = applyResponses[Math.min(call, applyResponses.length - 1)];
+        call += 1;
+        return { ok: true, status: 200, json: async () => ({ success: true, data }) };
+      }
+      throw new Error(`unexpected _api call: ${path}`);
+    };
+    return { win, app, applyBodies };
+  }
+
+  it('confirming the in-app context-warning modal re-sends the apply with confirmed:true', async () => {
+    const { app, applyBodies } = launchHarness([
+      { requiresContextWarning: true, modelId: 'qwen3', contextLength: 16384, minSafeContextTokens: 40000 },
+      { customModel: { endpointId: 'llama-box' }, restarted: true, modelSwapInProgress: false },
+    ]);
+    let confirmArgs: unknown[] | undefined;
+    app._confirmContextWarning = async (...args: unknown[]) => {
+      confirmArgs = args;
+      return true;
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(confirmArgs).toEqual(['qwen3', 16384, 40000]);
+    expect(applyBodies).toEqual([
+      { endpointId: 'llama-box', modelId: 'qwen3' },
+      { endpointId: 'llama-box', modelId: 'qwen3', confirmed: true },
+    ]);
+  });
+
+  it('declining the in-app context-warning modal keeps the native backend and never re-sends the apply', async () => {
+    const { app, applyBodies } = launchHarness([
+      { requiresContextWarning: true, modelId: 'qwen3', contextLength: 16384, minSafeContextTokens: 40000 },
+    ]);
+    app._confirmContextWarning = async () => false;
+    let toastMessage: string | undefined;
+    app.showToast = (msg: string) => {
+      toastMessage = msg;
+    };
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(applyBodies).toHaveLength(1); // no second (confirmed) call
+    expect(toastMessage).toMatch(/context window too small/i);
+  });
+});
+
 describe('Custom Model Endpoint Profiles: _confirmModelSwap (in-app modal, replaces a native confirm() popup)', () => {
   it('shows the message, activates the modal, and resolves true when "Switch anyway" is clicked', async () => {
     const { win, app } = bootApp({});
@@ -882,5 +943,43 @@ describe('Custom Model Endpoint Profiles: _confirmModelSwap (in-app modal, repla
     app._resolveModelSwapConfirm(false);
     expect(await promise).toBe(false);
     expect(win.document.getElementById('customModelSwapConfirmModal')!.classList.contains('active')).toBe(false);
+  });
+});
+
+describe('Custom Model Endpoint Profiles: _confirmContextWarning (in-app modal, native backend never restarted while it is up)', () => {
+  it('shows a message naming the model, the discovered context and the safe floor, activates the modal, and resolves true on "Launch anyway"', async () => {
+    const { win, app } = bootApp({});
+    const promise = app._confirmContextWarning('qwen3.8-27b-ud-q4_k_xl', 16384, 40000);
+
+    const modal = win.document.getElementById('customModelContextWarningModal')!;
+    expect(modal.classList.contains('active')).toBe(true);
+    const message = win.document.getElementById('customModelContextWarningMessage')!.textContent!;
+    expect(message).toContain('qwen3.8-27b-ud-q4_k_xl');
+    expect(message).toContain('16,384');
+    expect(message).toContain('40,000');
+    expect(message).toMatch(/llama-swap/i);
+    expect(message).toMatch(/fit-ctx/i);
+
+    app._resolveContextWarningConfirm(true);
+
+    expect(await promise).toBe(true);
+    expect(modal.classList.contains('active')).toBe(false);
+  });
+
+  it('resolves false when Cancel is clicked', async () => {
+    const { win, app } = bootApp({});
+    const promise = app._confirmContextWarning('qwen3', 16384, 40000);
+    app._resolveContextWarningConfirm(false);
+    expect(await promise).toBe(false);
+    expect(win.document.getElementById('customModelContextWarningModal')!.classList.contains('active')).toBe(false);
+  });
+
+  it('describes an unknown context length without printing a bogus number', async () => {
+    const { win, app } = bootApp({});
+    void app._confirmContextWarning('qwen3', undefined, 40000);
+    const message = win.document.getElementById('customModelContextWarningMessage')!.textContent!;
+    expect(message).not.toMatch(/undefined/);
+    expect(message).toMatch(/unknown/i);
+    app._resolveContextWarningConfirm(false);
   });
 });

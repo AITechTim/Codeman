@@ -239,8 +239,17 @@ registry entry (`contextLengthVar`/`configDirVar`), not hardcoded here:**
   model id and never compacts, which reliably overflows a much smaller real
   local context — confirmed live: a stock ~33.7K-token system prompt against
   a 16384-token llama-swap model failed with `exceeds the available context
-  size`. No entry for the model in `modelContextLengths` means the var is
-  simply omitted, never a guess.
+size`. No entry for the model in `modelContextLengths` means the var is
+  simply omitted, never a guess. ⚠️ **This var only affects when Claude
+  Code compacts conversation _history_ — it cannot fix a model whose real
+  context is smaller than Claude Code's own fixed per-turn overhead**
+  (system prompt + tool schemas, empirically ~36.4K tokens, confirmed live
+  via an `in:0 out:0` failure on the very first message, before any
+  history exists to compact). No context-length declaration changes that
+  fixed overhead, so a model below the safe floor fails outright on
+  message one regardless of what this var says. See "Context-window floor
+  warning" below for how Codeman catches this case before launching
+  instead of after.
 - `CLAUDE_CONFIG_DIR` is pointed at the same isolated per-session directory
   the `configDir`-kind CLIs use (empty, no files written into it), so the
   injected `ANTHROPIC_API_KEY` never shares a directory with a stored
@@ -261,7 +270,7 @@ registry entry (`contextLengthVar`/`configDirVar`), not hardcoded here:**
 **That isolated directory needed one more fix to actually be usable
 non-interactively.** An otherwise-empty `CLAUDE_CONFIG_DIR` has none of a
 real profile's prior "Detected a custom API key — use it?" approvals, so
-without more, Claude Code stops and asks that on *every single launch* —
+without more, Claude Code stops and asks that on _every single launch_ —
 confirmed live, and with nobody at a TTY to answer, its own default answer
 ("No") silently refuses the very key this feature just injected, which
 looks like the endpoint being ignored entirely. `customModelInjection`'s
@@ -285,7 +294,7 @@ which can take anywhere from a few seconds to well over a minute:
   one-shot `POST /api/quick-start` above) call llama-swap's own
   `GET /running` first — feature-detected, so a plain llama.cpp/OpenAI-
   compatible server (no such endpoint) is simply never checked. If a
-  *different* model is currently loaded and ready, and another **live
+  _different_ model is currently loaded and ready, and another **live
   session's own selection** is using it, the apply returns
   `{requiresConfirmation: true, currentlyLoadedModel, affectedSessions}`
   instead of silently switching — nothing is applied or created yet.
@@ -298,12 +307,50 @@ which can take anywhere from a few seconds to well over a minute:
   reached llama-swap at all (nothing in its own server logs), since nothing
   had actually asked it to load anything yet. Both apply routes now also
   send the smallest real request that will — `POST <baseUrl>/v1/chat/
-  completions` with `max_tokens: 1` and one throwaway message — whenever the
+completions` with `max_tokens: 1` and one throwaway message — whenever the
   target model isn't already the one loaded and ready, fire-and-forget (its
   response is never read; `GET /api/model-endpoints/:id/running-status`,
   polled client-side, is what actually confirms readiness). The response
   also carries `modelSwapInProgress: true` in that case, which is what
   drives the Run-menu picker's own "loading model" status banner.
+
+## Context-window floor warning
+
+Claude Code's own fixed per-turn overhead (system prompt + tool schemas,
+empirically ~36.4K tokens) can exceed a small local model's _entire_ real
+context on its own, before any conversation history exists to fill it —
+confirmed live twice, both as an `in:0 out:0` failure on the very first
+message sent. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (above) cannot fix this: it
+only governs when Claude Code compacts conversation history, and there is
+no history yet on message one. Applying such a model would look like the
+endpoint being ignored, or the wrong model being used, when in fact the
+endpoint applied correctly and the model is simply too small for this CLI.
+
+Both apply routes (the restart route and the one-shot `POST
+/api/quick-start`) now check for this **before** launching or restarting
+anything, gated on the CLI's registry entry declaring a `contextLengthVar`
+(currently only claude — the check is a no-op for every other CLI by
+construction, never a hardcoded mode check). If the model's discovered
+context (`modelContextLengths`, from discovery above) is below
+`CLAUDE_MIN_SAFE_CONTEXT_TOKENS` (40000, comfortably above the measured
+~36.4K overhead), the response is `{requiresContextWarning: true, modelId,
+contextLength, minSafeContextTokens}` instead of applying — nothing is
+restarted or created yet. A context length that was never discovered at
+all skips the check entirely (nothing to compare, so it fails open rather
+than warning on every model an endpoint hasn't reported a size for).
+Retrying with `confirmed: true` launches anyway.
+
+The Run-menu picker shows this as an in-app modal
+(`#customModelContextWarningModal`, matching the llama-swap conflict
+modal's look) naming the model, its discovered context, and the safe
+floor, and explaining the fix: reconfigure llama-swap to give that model
+(or a smaller one) an explicit larger context instead of relying on
+auto-fit (`--fit-ctx`), which optimizes for the biggest _model_ that fits
+rather than the biggest _context_ — e.g. adding `-c 65536` (or as large a
+`--ctx-size` as the hardware holds) to that model's llama-swap config
+entry. A smaller model at a much larger explicit context often fits in
+the same VRAM a bigger model's auto-fit context gets shrunk to make room
+for.
 
 Clear back to the harness's native cloud default with:
 

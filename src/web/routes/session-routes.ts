@@ -55,7 +55,12 @@ import {
 } from '../schemas.js';
 import { readCustomModelHosts } from '../../custom-model-hosts.js';
 import { applyCustomModelInjection, removeConfigDir } from '../../custom-model-injection-apply.js';
-import { getLlamaSwapStatus, triggerLlamaSwapLoad } from './custom-model-routes.js';
+import {
+  getLlamaSwapStatus,
+  triggerLlamaSwapLoad,
+  exceedsSafeContextFloor,
+  CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+} from './custom-model-routes.js';
 import { matchesPattern } from '../../config/cli-registry/patterns.js';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { TabLayoutValidationError } from '../../tab-layout.js';
@@ -1209,6 +1214,23 @@ export function registerSessionRoutes(
     if (!endpoint) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
     }
+    const contextLength = endpoint.modelContextLengths?.[body.modelId];
+
+    // Some CLIs (today: only claude) carry enough of their own fixed system-prompt/tool-
+    // schema overhead that a small enough real context guarantees a first-message failure
+    // no matter what CLAUDE_CODE_MAX_CONTEXT_TOKENS says — confirmed live at ~36.4K tokens
+    // against a model configured with a real 16384-token context. Warn before committing
+    // to a restart that's certain to fail, rather than letting the user discover it via a
+    // cryptic 400 from the CLI itself. `confirmed` (already used for the swap-conflict
+    // warning below) skips this too — the user has already said "launch anyway" once.
+    if (!body.confirmed && exceedsSafeContextFloor(entry, contextLength)) {
+      return {
+        requiresContextWarning: true,
+        modelId: body.modelId,
+        contextLength,
+        minSafeContextTokens: CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+      };
+    }
 
     // llama.cpp runs exactly one model at a time; llama-swap unloads and reloads it on
     // demand, which can take anywhere from a few seconds to over a minute — long enough
@@ -1250,7 +1272,6 @@ export function registerSessionRoutes(
     // fails its pattern rather than quoting it, which would silently launch the CLI on its
     // own default provider again, so refuse an id the pattern cannot carry up front.
     const modelSpec = entry.launch.params.model;
-    const contextLength = endpoint.modelContextLengths?.[body.modelId];
     const applied = applyCustomModelInjection(entry, endpoint, body.modelId, session.id, contextLength);
     if (!applied) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${session.mode} has no known custom-model mechanism`);
@@ -3570,6 +3591,20 @@ export function registerSessionRoutes(
       const cmHosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
       const cmEndpoint = cmHosts.find((h) => h.id === customModel.endpointId);
       if (!cmEndpoint) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+      const cmContextLength = cmEndpoint.modelContextLengths?.[customModel.modelId];
+
+      // See the dedicated route's own comment for the full reasoning: some CLIs' own fixed
+      // overhead can exceed a small enough real context on the very first message,
+      // regardless of contextLengthVar. Warn before creating a session that's certain to
+      // fail immediately.
+      if (!customModel.confirmed && exceedsSafeContextFloor(cmEntry, cmContextLength)) {
+        return {
+          requiresContextWarning: true,
+          modelId: customModel.modelId,
+          contextLength: cmContextLength,
+          minSafeContextTokens: CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+        };
+      }
 
       // See the dedicated route's own comment for the full reasoning: llama.cpp runs one
       // model at a time, llama-swap swaps on demand, and switching away from what another
@@ -3603,7 +3638,6 @@ export function registerSessionRoutes(
       // with, not a placeholder: `new Session({ id: ... })` accepts an explicit id for
       // exactly this reason.
       qsCustomModelSessionId = randomUUID();
-      const cmContextLength = cmEndpoint.modelContextLengths?.[customModel.modelId];
       const cmApplied = applyCustomModelInjection(
         cmEntry,
         cmEndpoint,

@@ -693,6 +693,45 @@ Object.assign(CodemanApp.prototype, {
     resolve?.(proceed);
   },
 
+  /**
+   * In-app warning shown when the apply route reports `requiresContextWarning`: this
+   * model's real discovered context is smaller than the CLI's own fixed system-prompt/
+   * tool-schema overhead, which guarantees the very first message fails outright — no
+   * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value fixes that, since there is no conversation
+   * history yet for compaction to trim. Same promise-based pattern as
+   * `_confirmModelSwap`; `_resolveContextWarningConfirm` settles it.
+   */
+  _confirmContextWarning(modelId, contextLength, minSafeContextTokens) {
+    const modal = document.getElementById('customModelContextWarningModal');
+    const messageEl = document.getElementById('customModelContextWarningMessage');
+    if (messageEl) {
+      const known = typeof contextLength === 'number';
+      messageEl.textContent =
+        `${modelId} is configured with ` +
+        (known ? `only ${contextLength.toLocaleString()} tokens of` : 'an unknown (too small)') +
+        ` context, but this CLI needs roughly ${minSafeContextTokens.toLocaleString()}+ tokens just for its own ` +
+        `system prompt and tools — before any conversation history. Its very first message will fail outright, ` +
+        `no matter what context size Codeman tells it to expect.\n\n` +
+        `To fix this, reconfigure llama-swap to give this model (or a smaller one) an explicit larger context ` +
+        `instead of relying on auto-fit (--fit-ctx), which optimizes for the biggest MODEL that fits, not the ` +
+        `biggest CONTEXT — e.g. add "-c 65536" (or as large a --ctx-size as your hardware holds) to its llama-swap ` +
+        `config entry. A smaller model at a much larger explicit context often fits in the same VRAM a bigger ` +
+        `model's auto-fit context gets shrunk to make room for.`;
+    }
+    modal?.classList.add('active');
+    return new Promise((resolve) => {
+      this._resolveContextWarningConfirmPromise = resolve;
+    });
+  },
+
+  /** Called by the modal's Cancel/Launch-anyway buttons and its backdrop click. */
+  _resolveContextWarningConfirm(proceed) {
+    document.getElementById('customModelContextWarningModal')?.classList.remove('active');
+    const resolve = this._resolveContextWarningConfirmPromise;
+    this._resolveContextWarningConfirmPromise = null;
+    resolve?.(proceed);
+  },
+
   /** A model row in the picker modal was clicked: close it and launch with that choice. */
   chooseCustomModelAndRun(modelId) {
     const pending = this._pendingCustomModelPick;
@@ -789,6 +828,15 @@ Object.assign(CodemanApp.prototype, {
       return res.json();
     };
     let data = await post(bodyObj);
+    if (data?.data?.requiresContextWarning) {
+      const { modelId, contextLength, minSafeContextTokens } = data.data;
+      const proceed = await this._confirmContextWarning(modelId, contextLength, minSafeContextTokens);
+      if (!proceed) {
+        this._lastCustomModelLaunchResult = undefined;
+        return { success: false, error: 'Launch cancelled — context window too small' };
+      }
+      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, confirmed: true } });
+    }
     if (data?.data?.requiresConfirmation) {
       const { currentlyLoadedModel, affectedSessions } = data.data;
       const names = affectedSessions.map((s) => s.name || s.id).join(', ');
@@ -870,6 +918,26 @@ Object.assign(CodemanApp.prototype, {
     // data — createErrorResponse() never wraps one. `payload` below is only ever meaningful
     // once `data.success !== false`.
     let payload = data?.success !== false ? data?.data : undefined;
+
+    // This CLI's own fixed overhead (system prompt + tool schemas) may exceed the
+    // model's real discovered context outright — no context-length declaration can
+    // fix that, since compaction only trims conversation history and there is none
+    // on message 1. Warn and let the user decide whether to launch anyway, same
+    // confirmed:true re-send pattern as the swap check below.
+    if (ok && payload?.requiresContextWarning) {
+      const proceed = await this._confirmContextWarning(
+        payload.modelId,
+        payload.contextLength,
+        payload.minSafeContextTokens
+      );
+      if (!proceed) {
+        switchingToast?.dismiss();
+        this.showToast('Kept the native backend — context window too small', 'info');
+        return;
+      }
+      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, true));
+      payload = data?.success !== false ? data?.data : undefined;
+    }
 
     // llama-swap runs one model at a time: switching would unload it out from under
     // another session actively using it. The route only asks when that's actually true

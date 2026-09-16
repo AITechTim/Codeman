@@ -23,10 +23,45 @@ import { isBlockedWebviewUrl } from '../webview-egress-policy.js';
 import { egressBlockedReason, webviewFetch } from '../webview-egress.js';
 import { CustomModelHostSchema } from '../schemas.js';
 import { readCustomModelHosts, writeCustomModelHosts, type CustomModelHost } from '../../custom-model-hosts.js';
+import type { CliEntry } from '../../config/cli-registry/types.js';
 
 const CODEMAN_CONFIG_DIR = getDataDir();
 const DISCOVER_TIMEOUT_MS = 8000;
 const PROPS_TIMEOUT_MS = 5000;
+
+/**
+ * Claude Code's own system prompt + tool schemas cost roughly this many tokens on EVERY
+ * request, before a single character of conversation history — confirmed live, twice, on
+ * requests reporting `in:0 out:0` (the very first exchange) failing at ~36.4K tokens. No
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value fixes this: that setting only changes when Claude
+ * Code decides to COMPACT conversation history, and there is no history yet on the first
+ * message for it to trim. A model whose real context is below this floor will refuse
+ * Claude Code's very first message outright, unconditionally.
+ *
+ * Set well above the ~36.4K actually measured — CLAUDE.md size, active MCP servers, and
+ * enabled skills all add to a project's real baseline, so the observed figure is a floor
+ * for THAT one workspace, not a ceiling for every one. Erring conservative here means a
+ * borderline-safe model still gets warned about (the user can launch anyway), rather than
+ * this floor missing a genuinely-too-small one because a smaller test project happened to
+ * fit.
+ */
+export const CLAUDE_MIN_SAFE_CONTEXT_TOKENS = 40000;
+
+/**
+ * True when applying this model to this CLI is heading for a guaranteed first-message
+ * failure per `CLAUDE_MIN_SAFE_CONTEXT_TOKENS` above. Gated on `contextLengthVar` (today,
+ * only claude's registry entry declares one) rather than a hardcoded mode check: a CLI
+ * with a small enough baseline of its own to never trip this would have no reason to
+ * declare the field in the first place, so the check simply never applies to it.
+ */
+export function exceedsSafeContextFloor(
+  entry: Pick<CliEntry, 'capabilities'>,
+  contextLength: number | undefined
+): boolean {
+  const cap = entry.capabilities.customModelInjection;
+  if (cap.kind !== 'env' || !cap.contextLengthVar) return false;
+  return typeof contextLength === 'number' && contextLength < CLAUDE_MIN_SAFE_CONTEXT_TOKENS;
+}
 
 function adminOnly(req: FastifyRequest, reply: { code: (n: number) => unknown }): ApiResponse<never> | null {
   if (!isMultiUserMode() || isAdmin(req)) return null;

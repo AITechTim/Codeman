@@ -275,6 +275,59 @@ describe('POST /api/quick-start: customModel (one-shot custom-model launch)', ()
     });
   });
 
+  describe("context-window floor warning (this CLI's own overhead can exceed a small model's real context)", () => {
+    const SMALL_CTX_ENDPOINT: CustomModelHost = {
+      id: 'ep-small',
+      label: 'tiny box',
+      baseUrl: 'http://192.168.1.51:8080',
+      apiKey: 'k',
+      modelContextLengths: { 'qwen3.8-27b-ud-q4_k_xl': 16384 },
+    };
+
+    it('warns instead of launching when the discovered context is below the safe floor', async () => {
+      await writeCustomModelHosts(getDataDir(), [ENDPOINT, SMALL_CTX_ENDPOINT]);
+
+      const res = await quickStart({
+        caseName: 'cm-small-ctx',
+        mode: 'claude',
+        customModel: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl' },
+      });
+
+      const body = res.json();
+      expect(body.requiresContextWarning).toBe(true);
+      expect(body.modelId).toBe('qwen3.8-27b-ud-q4_k_xl');
+      expect(body.contextLength).toBe(16384);
+      expect(body.minSafeContextTokens).toBe(40000);
+      // Nothing was actually created.
+      expect(ctx.sessions.size).toBe(1);
+    });
+
+    it('launches once confirmed, skipping the context check', async () => {
+      await writeCustomModelHosts(getDataDir(), [ENDPOINT, SMALL_CTX_ENDPOINT]);
+
+      const res = await quickStart({
+        caseName: 'cm-small-ctx-confirmed',
+        mode: 'claude',
+        customModel: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl', confirmed: true },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().requiresContextWarning).toBeUndefined();
+      expect(ctx.sessions.size).toBe(2);
+    });
+
+    it('does not warn when nothing about context was discovered', async () => {
+      const res = await quickStart({
+        caseName: 'cm-no-ctx-data',
+        mode: 'claude',
+        customModel: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().requiresContextWarning).toBeUndefined();
+    });
+  });
+
   describe('triggering the actual llama-swap load (not just watching for it)', () => {
     it('sends a real inference request naming the target model, concurrently with launching the session', async () => {
       const chatCalls: unknown[] = [];

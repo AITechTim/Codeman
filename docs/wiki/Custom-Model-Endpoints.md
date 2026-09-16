@@ -28,7 +28,7 @@ shows up without another manual click of **Discover**. One endpoint being unreac
 given cycle (powered off, wrong network) never blocks the others from refreshing.
 
 **Context length is picked up automatically where it can be, safely.** Against a
-llama.cpp/llama-swap server, discovery also learns each *currently loaded* model's real
+llama.cpp/llama-swap server, discovery also learns each _currently loaded_ model's real
 context window and applies it to the launched session (Claude Code today — see below), so
 the harness stops assuming a large default window for a model name it doesn't recognise and
 overflowing a much smaller real one. It's deliberately never probed for a model that isn't
@@ -104,15 +104,28 @@ finished loading would just be confusing to leave sitting there.
   "Detected a custom API key" prompt once would — without it, that prompt would otherwise
   reappear on every single launch with nobody there to answer it.
 
+**If a model's real context is too small for Claude Code to even get started, you get a
+warning instead of a confusing failure.** Claude Code's own system prompt and tools take up
+roughly 40K tokens on their own, before you've typed anything — a small local model with a
+smaller real context than that fails outright on the very first message, no matter what
+context size Codeman tells it to expect (raising the declared context only changes when
+Claude Code trims _conversation history_, and there is none yet on message one). Picking
+such a model now shows an in-app dialog naming the model, its discovered context and what's
+needed, before anything launches or restarts, with the fix spelled out: reconfigure
+llama-swap to give that model (or a smaller one) an explicit larger context instead of
+relying on auto-fit (`--fit-ctx`), which sizes the context around fitting the biggest model
+rather than the biggest context — for example adding `-c 65536` to that model's llama-swap
+entry. "Launch anyway" is still there if you want to try regardless.
+
 ## Which harnesses actually work
 
-| Harness | Status |
-| ------- | ------ |
-| **Claude Code, opencode, Pi, Grok, OMP** | Verified end-to-end against a real local server. |
-| **Codex** | Config is correct, but Codex only speaks the Responses API, which llama.cpp-style servers don't implement. A protocol gap, not a Codeman bug. |
-| **Gemini** | Fails with an auth error gemini-cli raises once redirected. Unresolved; don't rely on it yet. |
-| **DeepSeek** | Reaches the server but gets a consistent 404. Root cause not identified. |
-| **Antigravity** | No known custom-endpoint mechanism at all. Not offered. |
+| Harness                                  | Status                                                                                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claude Code, opencode, Pi, Grok, OMP** | Verified end-to-end against a real local server.                                                                                              |
+| **Codex**                                | Config is correct, but Codex only speaks the Responses API, which llama.cpp-style servers don't implement. A protocol gap, not a Codeman bug. |
+| **Gemini**                               | Fails with an auth error gemini-cli raises once redirected. Unresolved; don't rely on it yet.                                                 |
+| **DeepSeek**                             | Reaches the server but gets a consistent 404. Root cause not identified.                                                                      |
+| **Antigravity**                          | No known custom-endpoint mechanism at all. Not offered.                                                                                       |
 
 Which harnesses show up in the Run-menu picker is read live off Codeman's own CLI registry,
 not a fixed list here, so this table can go stale before this page does — a greyed-out or

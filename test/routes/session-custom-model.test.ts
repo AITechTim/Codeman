@@ -351,6 +351,113 @@ describe('POST /api/sessions/:id/custom-model', () => {
     });
   });
 
+  describe("context-window floor warning (this CLI's own overhead can exceed a small model's real context)", () => {
+    const SMALL_CTX_ENDPOINT: CustomModelHost = {
+      id: 'ep-small',
+      label: 'tiny box',
+      baseUrl: 'http://192.168.1.51:8080',
+      apiKey: 'k',
+      modelContextLengths: { 'qwen3.8-27b-ud-q4_k_xl': 16384 },
+    };
+
+    it('warns instead of applying when the discovered context is below the safe floor', async () => {
+      const { app, ctx } = await setup();
+      await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT, SMALL_CTX_ENDPOINT]);
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl' },
+      });
+
+      const body = res.json();
+      expect(body.success).not.toBe(false);
+      expect(body.requiresContextWarning).toBe(true);
+      expect(body.modelId).toBe('qwen3.8-27b-ud-q4_k_xl');
+      expect(body.contextLength).toBe(16384);
+      expect(body.minSafeContextTokens).toBe(40000);
+      // Nothing actually applied yet — this call only warned, it did not switch.
+      expect(session.setCustomModel).not.toHaveBeenCalled();
+      expect(session.restartCli).not.toHaveBeenCalled();
+    });
+
+    it('applies once confirmed, skipping the context check the second time', async () => {
+      const { app, ctx } = await setup();
+      await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT, SMALL_CTX_ENDPOINT]);
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl', confirmed: true },
+      });
+
+      const body = res.json();
+      expect(body.requiresContextWarning).toBeUndefined();
+      expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+      expect(session.restartCli).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn when the discovered context is comfortably above the floor', async () => {
+      const { app, ctx } = await setup();
+      const roomyEndpoint: CustomModelHost = {
+        id: 'ep-roomy',
+        label: 'roomy box',
+        baseUrl: 'http://192.168.1.52:8080',
+        apiKey: 'k',
+        modelContextLengths: { qwen3: 65536 },
+      };
+      await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT, roomyEndpoint]);
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep-roomy', modelId: 'qwen3' },
+      });
+
+      expect(res.json().requiresContextWarning).toBeUndefined();
+      expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn when the context length was never discovered (nothing to compare)', async () => {
+      const { app, ctx } = await setup();
+      await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT]);
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'claude';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep1', modelId: 'qwen3' },
+      });
+
+      expect(res.json().requiresContextWarning).toBeUndefined();
+      expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not warn for a CLI whose registry entry declares no contextLengthVar (opencode)', async () => {
+      // opencode's customModelInjection kind is configContentEnv, not env+contextLengthVar,
+      // so exceedsSafeContextFloor is false by construction regardless of context size.
+      const { app, ctx } = await setup();
+      await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT, SMALL_CTX_ENDPOINT]);
+      const session = ctx.sessions.get('test-session-1')!;
+      session.mode = 'opencode';
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/test-session-1/custom-model',
+        payload: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl' },
+      });
+
+      expect(res.json().requiresContextWarning).toBeUndefined();
+    });
+  });
+
   describe('triggering the actual llama-swap load (not just watching for it)', () => {
     it('sends a real inference request naming the target model when it is not already loaded and ready', async () => {
       const { app, ctx } = await setup();
