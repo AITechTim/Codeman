@@ -404,10 +404,31 @@ automatically). Results:
 
 - **Claude, opencode, Pi, Grok, OMP** — verified: a real "hello world" reply
   came back through the endpoint.
-- **Codex** — the config is structurally correct, but Codex only speaks the
-  Responses API since Feb 2026, which llama.cpp/llama-swap don't implement.
-  This is a real protocol incompatibility, not a bug here; Codex support
-  needs a Responses-API-compatible endpoint.
+- **Codex** — the config is structurally correct, and against a llama-swap
+  server that DOES answer `/v1/responses` (confirmed live: a plain,
+  no-tool-call chat turn returned a real reply), the picture is more
+  nuanced than a flat failure. A real tool-call attempt (`run the shell
+command: echo hello`) came back as `agent_message` TEXT — literally the
+  tool-call JSON printed as the model's answer — instead of a
+  `function_call` item Codex would actually execute (confirmed via `codex
+exec --json`'s raw event stream). So plain chat can work while the thing
+  that makes Codex a coding agent — actually running commands and editing
+  files — does not; treat Codex as still unreliable for real work against a
+  llama.cpp/llama-swap endpoint, tool-calling gap included, not just the
+  earlier-documented `wire_api` mismatch (which not every deployment hits
+  the same way — some legitimately have no `/v1/responses` route at all).
+  Separately, EVERY custom-endpoint Codex session prints `Model metadata
+for '<id>' not found. Defaulting to fallback metadata...` on launch —
+  confirmed harmless (the reply above still came back correctly): Codex's
+  model metadata (reasoning-tier options, per-model system-prompt
+  templates, context-window figures) comes from `models_cache.json`, a
+  local cache of OpenAI's own hosted model catalog that a custom local
+  model can never appear in by construction, since it isn't one of
+  OpenAI's models. There's no config.toml override for a model's metadata,
+  and fabricating a fake catalog entry would mean copying the _shape_ of
+  OpenAI's own proprietary schema (their per-model system-prompt content
+  included) for a warning that doesn't otherwise affect behavior — not
+  something to build into discovery.
 - **Gemini** — fails with `Invalid auth method selected`, traced to an
   undocumented `GATEWAY` auth path gemini-cli selects once
   `GOOGLE_GEMINI_BASE_URL` is set. Unresolved after real investigation
