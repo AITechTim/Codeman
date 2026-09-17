@@ -3081,7 +3081,18 @@ export class WebServer extends EventEmitter {
       // Build the reboot-restore offer HERE: `dead` is only known after
       // reconciliation, and the records it reads are pruned by
       // `cleanupStaleSessions()` as soon as `finalizeRestoredState()` runs.
-      this.planRebootRestoreOffer(dead, alive.length);
+      //
+      // Guarded on its own, because this runs inside the try that decides whether
+      // RECOVERY succeeded. A throw here would otherwise be caught below, report
+      // restoration as failed, and block the stale cleanup and layout
+      // reconciliation that follow — turning an optional convenience into a
+      // failure of the thing it is supposed to help. An offer nobody gets is the
+      // correct way for this to fail.
+      try {
+        this.planRebootRestoreOffer(dead, alive.length);
+      } catch (err) {
+        console.error('[Server] Building the reboot-restore offer failed; continuing recovery:', err);
+      }
 
       if (alive.length > 0 || discovered.length > 0) {
         console.log(`[Server] Found ${alive.length + discovered.length} alive mux session(s) from previous run`);
