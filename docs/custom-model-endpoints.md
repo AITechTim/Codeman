@@ -12,11 +12,12 @@ recipe confidence table, and security reasoning:
 [`custom-model-endpoints-plan.md`](custom-model-endpoints-plan.md).
 
 > **Status**: fully wired end to end — registry capability, the injection
-> engine, the endpoint store + discovery route, the session restart route,
-> a settings-panel CRUD surface, and the Run-menu picker described below.
-> Antigravity has no known custom-endpoint mechanism and is not supported.
-> The HTTP API (examples below) still works directly and is what the picker
-> itself calls under the hood.
+> engine, the endpoint store + discovery route, both the restart-in-place
+> apply route (Claude) and the one-shot quick-start launch path (every
+> other supported harness), a settings-panel CRUD surface, and the Run-menu
+> picker described below. Antigravity has no known custom-endpoint
+> mechanism and is not supported. The HTTP API (examples below) still works
+> directly and is what the picker itself calls under the hood.
 
 ## Turning it on
 
@@ -351,8 +352,9 @@ which can take anywhere from a few seconds to well over a minute:
   naming the model, and confirmed live: applying a selection alone never
   reached llama-swap at all (nothing in its own server logs), since nothing
   had actually asked it to load anything yet. Both apply routes now also
-  send the smallest real request that will — `POST <baseUrl>/v1/chat/
-completions` with `max_tokens: 1` and one throwaway message — whenever the
+  send the smallest real request that will —
+  `POST <baseUrl>/v1/chat/completions` with `max_tokens: 1` and one
+  throwaway message — whenever the
   target model isn't already the one loaded and ready, fire-and-forget (its
   response is never read; `GET /api/model-endpoints/:id/running-status`,
   polled client-side, is what actually confirms readiness). The response

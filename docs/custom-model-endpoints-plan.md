@@ -352,8 +352,12 @@ pure unit tests and the live manual checks in Verification:
    up automatically with zero edits to the script). Already run to
    completion against the author's llama-swap server (a LAN address,
    inside a `codeman/agent:llm-test` Docker image with all 9 CLI binaries):
-   claude/opencode/pi/grok/omp **PASS**, codex **FAILs as expected**
-   (Responses-API protocol gap, not a bug), gemini/deepseek **UNCONFIRMED**
+   claude/opencode/pi/grok/omp **PASS**, codex **partially works and still
+   isn't usable** (plain chat succeeds against a llama-swap deployment that
+   answers `/v1/responses`, but a real tool-call attempt comes back as
+   inert text rather than an executable `function_call` — see the
+   confidence table row for the full, re-verified picture), gemini/deepseek
+   **UNCONFIRMED**
    (reach the server, fail for undiagnosed reasons — see their table rows),
    antigravity **SKIP** (no mechanism). Re-run this against a real cloud
    endpoint (e.g. an Azure AI Foundry deployment) once one is available, to
