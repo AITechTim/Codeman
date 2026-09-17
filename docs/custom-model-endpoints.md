@@ -482,8 +482,23 @@ for '<id>' not found. Defaulting to fallback metadata...` on launch —
   `GOOGLE_GEMINI_BASE_URL` is set. Unresolved after real investigation
   (several auth workarounds were tried and ruled out); do not rely on
   Gemini support yet.
-- **DeepSeek** — the request reaches the server (env vars are read) but
-  gets a consistent `HTTP_404`. Root cause not identified; best-effort only.
+- **DeepSeek** — root cause of the `HTTP_404` found and fixed. DeepSeek
+  Harness's own bundled provider module (`@deepseek-ai/dsh-llm-deepseek`)
+  builds its request URL as `${DEEPSEEK_BASE_URL}/chat/completions` with no
+  `/v1` insertion of its own (its real public API, `https://api.deepseek.com`,
+  expects the caller's base URL to already carry any needed prefix) —
+  confirmed by reading its own source and, live, that
+  `POST <baseUrl>/chat/completions` 404s against llama-swap while
+  `POST <baseUrl>/v1/chat/completions` succeeds; the harness's own error
+  template (`DeepSeek API error (HTTP ${status})`) matches the originally
+  reported symptom exactly. `customModelInjection`'s new `appendV1Suffix`
+  (deepseek's entry only — claude/gemini must NOT get it, since claude was
+  already confirmed working against the raw `baseUrl`) fixes it by writing
+  `DEEPSEEK_BASE_URL` with `/v1` appended. Not yet re-run end-to-end with a
+  real `dsh` binary (no install available in this environment) — the fix
+  is source-confirmed and live-verified at the HTTP level, but a real
+  "hello world" reply through `dsh` itself is still outstanding before
+  calling this fully verified like the harnesses above.
 - **Antigravity** — no known custom-endpoint mechanism at all; unsupported.
 
 See the confidence table in `custom-model-endpoints-plan.md` for the full detail behind

@@ -121,7 +121,7 @@ export function buildCustomModelInjection(
   switch (cap.kind) {
     case 'env': {
       const envOverrides: Record<string, string> = {
-        [cap.baseUrlVar]: endpoint.baseUrl,
+        [cap.baseUrlVar]: cap.appendV1Suffix ? withV1Suffix(endpoint.baseUrl) : endpoint.baseUrl,
         [cap.apiKeyVar]: apiKey,
       };
       for (const modelVar of cap.modelVars) envOverrides[modelVar] = modelId;

@@ -146,13 +146,13 @@ entry. "Launch anyway" is still there if you want to try regardless.
 
 ## Which harnesses actually work
 
-| Harness                                  | Status                                                                                                                                        |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Claude Code, opencode, Pi, Grok, OMP** | Verified end-to-end against a real local server.                                                                                              |
-| **Codex**                                | Config is correct, but Codex only speaks the Responses API, which llama.cpp-style servers don't implement. A protocol gap, not a Codeman bug. |
-| **Gemini**                               | Fails with an auth error gemini-cli raises once redirected. Unresolved; don't rely on it yet.                                                 |
-| **DeepSeek**                             | Reaches the server but gets a consistent 404. Root cause not identified.                                                                      |
-| **Antigravity**                          | No known custom-endpoint mechanism at all. Not offered.                                                                                       |
+| Harness                                  | Status                                                                                                                                                                                                               |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claude Code, opencode, Pi, Grok, OMP** | Verified end-to-end against a real local server.                                                                                                                                                                     |
+| **Codex**                                | Config is correct, and plain chat can work against a server that speaks the Responses API — but a real tool-call attempt comes back as inert text instead of running, so it's still not usable for real coding work. |
+| **Gemini**                               | Fails with an auth error gemini-cli raises once redirected. Unresolved; don't rely on it yet.                                                                                                                        |
+| **DeepSeek**                             | The original 404 is root-caused and fixed (DeepSeek Harness's own code was missing a `/v1` most local servers require) — not yet re-run against a real `dsh` install to confirm end-to-end.                          |
+| **Antigravity**                          | No known custom-endpoint mechanism at all. Not offered.                                                                                                                                                              |
 
 Which harnesses show up in the Run-menu picker is read live off Codeman's own CLI registry,
 not a fixed list here, so this table can go stale before this page does — a greyed-out or

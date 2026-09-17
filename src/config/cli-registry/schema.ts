@@ -364,6 +364,11 @@ const capabilitiesSchema = z
           // same file to pre-seed the state a real, already-onboarded profile carries. See
           // the customModelInjection doc comment in cli-registry/types.ts.
           skipFirstRunPrompts: z.boolean().optional(),
+          // DeepSeek-only, confirmed by reading its own bundled SDK source: it concatenates
+          // "/chat/completions" onto baseUrlVar's value with no "/v1" of its own, while
+          // llama-swap/llama.cpp only serves the "/v1/..." path — claude/gemini must NOT
+          // get this. See the customModelInjection doc comment in cli-registry/types.ts.
+          appendV1Suffix: z.boolean().optional(),
         })
         .strict(),
       z
