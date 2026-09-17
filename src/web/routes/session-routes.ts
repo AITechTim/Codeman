@@ -1272,7 +1272,14 @@ export function registerSessionRoutes(
     // fails its pattern rather than quoting it, which would silently launch the CLI on its
     // own default provider again, so refuse an id the pattern cannot carry up front.
     const modelSpec = entry.launch.params.model;
-    const applied = applyCustomModelInjection(entry, endpoint, body.modelId, session.id, contextLength);
+    const applied = applyCustomModelInjection(
+      entry,
+      endpoint,
+      body.modelId,
+      session.id,
+      contextLength,
+      session.workingDir
+    );
     if (!applied) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${session.mode} has no known custom-model mechanism`);
     }
@@ -3643,7 +3650,8 @@ export function registerSessionRoutes(
         cmEndpoint,
         customModel.modelId,
         qsCustomModelSessionId,
-        cmContextLength
+        cmContextLength,
+        resolvedCasePath
       );
       if (!cmApplied) {
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);

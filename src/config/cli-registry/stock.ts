@@ -271,6 +271,14 @@ const CLAUDE: CliEntry = {
       // Pre-seeding this file's customApiKeyResponses.approved list (verified against a real
       // ~/.claude.json after answering the prompt once by hand) answers it in advance instead.
       apiKeyTrustFile: { relPath: '.claude.json', shape: 'claude-api-key-responses' },
+      // ⚠️ Same isolated-directory root cause, one step further: verified live that on top
+      // of the API-key prompt above, a fresh CLAUDE_CONFIG_DIR also replays claude's ENTIRE
+      // first-run sequence on every launch — the theme picker, the security-notes screen,
+      // the per-project "trust this folder?" dialog, and (running with
+      // --dangerously-skip-permissions) a one-time bypass-permissions warning — none of
+      // which a real, already-onboarded profile shows again. Pre-seeds that same
+      // already-onboarded state instead of leaving a human to click through it.
+      skipFirstRunPrompts: true,
     },
   },
   overlays: {

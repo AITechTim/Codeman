@@ -285,6 +285,27 @@ earlier launch in the same isolated directory (`userID`, `numStartups`,
 earlier approved keys), and a missing or corrupt file is treated as empty
 rather than failing the apply.
 
+**A fresh `CLAUDE_CONFIG_DIR` isn't just missing that one approval — Claude
+Code treats it as a brand-new profile and replays its ENTIRE first-run
+sequence on every launch: the theme picker, the security-notes screen, the
+per-project "trust this folder?" dialog, and (running with
+`--dangerously-skip-permissions`) a one-time warning about bypassing
+permissions.** Confirmed live: none of these show up again for a real,
+already-onboarded profile, but every custom-model session gets a fresh,
+otherwise-empty isolated directory, so it saw all four every single time.
+`customModelInjection`'s `skipFirstRunPrompts` (`true` on claude's entry,
+requires `apiKeyTrustFile` since it reuses the same file) pre-seeds the
+state a real profile accumulates from answering all of that once:
+`hasCompletedOnboarding: true` and the launching session's own
+`projects[workingDir].hasTrustDialogAccepted: true` go into the same
+`<configDir>/.claude.json` the API-key approval above already merges into
+(other projects, and other fields on this session's own project entry, are
+left untouched), and `skipDangerousModePermissionPrompt: true` goes into
+`<configDir>/settings.json` — a different file, merged the same
+corrupt-tolerant way. `workingDir` is used exactly as the session was
+launched with as its cwd, never realpath'd or slash-normalized, since
+that's the literal string Claude Code itself uses as the project key.
+
 **llama-swap gets two more fixes on top of the context-length/config-dir
 ones above, both from watching a real switch live.** llama.cpp only ever
 runs one model at a time; llama-swap swaps the backing process on demand,

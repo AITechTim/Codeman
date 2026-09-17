@@ -83,6 +83,18 @@ describe('buildCustomModelInjection', () => {
     expect(result.apiKey).toBe('my-key');
   });
 
+  it('claude: also declares skipFirstRunPrompts on the env-kind result', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.skipFirstRunPrompts).toBe(true);
+  });
+
+  it('opencode: has no skipFirstRunPrompts (no apiKeyTrustFile/configDirVar concept for it either)', () => {
+    const result = buildCustomModelInjection(entryOrThrow('opencode'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.skipFirstRunPrompts).toBeUndefined();
+  });
+
   it('claude: falls back to a dummy key when the endpoint has none', () => {
     const result = buildCustomModelInjection(entryOrThrow('claude'), { ...endpoint, apiKey: undefined }, 'qwen3');
     if (result.kind !== 'env') throw new Error('unreachable');

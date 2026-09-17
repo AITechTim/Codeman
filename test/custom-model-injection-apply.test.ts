@@ -68,9 +68,10 @@ describe('applyCustomModelInjection: CLAUDE_CONFIG_DIR isolation', () => {
     expect(applied?.envOverrides.CLAUDE_CONFIG_DIR).toBe(expectedDir);
     expect(applied?.configDir).toBe(expectedDir);
     expect(existsSync(expectedDir)).toBe(true);
-    // Only the trust-seed file and the projects link — no real OAuth credential/config.
+    // The trust-seed file, the skipFirstRunPrompts settings.json, and the projects link —
+    // no real OAuth credential/config.
     const entries = readdirSync(expectedDir).filter((name) => name !== 'projects');
-    expect(entries).toEqual(['.claude.json']);
+    expect(entries.sort()).toEqual(['.claude.json', 'settings.json']);
   });
 
   it('claude: symlinks (or junctions) projects back to the real config dir so the response viewer keeps working', () => {
@@ -186,6 +187,104 @@ describe('applyCustomModelInjection: apiKeyTrustFile (pre-approves the injected 
     const applied = applyCustomModelInjection(entryOrThrow('opencode'), endpoint, 'qwen3', sessionId);
     expect(applied?.configDir).toBeUndefined();
     expect(existsSync(customModelConfigDir(sessionId))).toBe(false);
+  });
+});
+
+describe("applyCustomModelInjection: skipFirstRunPrompts (an isolated dir replays claude's whole first-run sequence)", () => {
+  it("claude: seeds hasCompletedOnboarding and this session's own project trust into .claude.json", () => {
+    const sessionId = 'sess-firstrun-1';
+    sessionsToClean.push(sessionId);
+    const applied = applyCustomModelInjection(
+      entryOrThrow('claude'),
+      endpoint,
+      'qwen3',
+      sessionId,
+      undefined,
+      '/home/user/myproject'
+    );
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      hasCompletedOnboarding: boolean;
+      projects: Record<string, { hasTrustDialogAccepted: boolean }>;
+    };
+    expect(written.hasCompletedOnboarding).toBe(true);
+    expect(written.projects['/home/user/myproject'].hasTrustDialogAccepted).toBe(true);
+  });
+
+  it('claude: seeds skipDangerousModePermissionPrompt into settings.json', () => {
+    const sessionId = 'sess-firstrun-2';
+    sessionsToClean.push(sessionId);
+    const applied = applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId);
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, 'settings.json'), 'utf8')) as {
+      skipDangerousModePermissionPrompt: boolean;
+    };
+    expect(written.skipDangerousModePermissionPrompt).toBe(true);
+  });
+
+  it('claude: with no workingDir given (boot recovery), hasCompletedOnboarding/settings still seed, but no project entry is added', () => {
+    const sessionId = 'sess-firstrun-3';
+    sessionsToClean.push(sessionId);
+    const applied = applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId);
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      hasCompletedOnboarding: boolean;
+      projects?: Record<string, unknown>;
+    };
+    expect(written.hasCompletedOnboarding).toBeUndefined();
+    expect(written.projects).toBeUndefined();
+  });
+
+  it("claude: merges onto an existing project entry's other fields rather than overwriting them", () => {
+    const sessionId = 'sess-firstrun-4';
+    sessionsToClean.push(sessionId);
+    const configDir = customModelConfigDir(sessionId);
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, '.claude.json'),
+      JSON.stringify({ projects: { '/home/user/myproject': { allowedTools: ['Bash'] } } })
+    );
+
+    const applied = applyCustomModelInjection(
+      entryOrThrow('claude'),
+      endpoint,
+      'qwen3',
+      sessionId,
+      undefined,
+      '/home/user/myproject'
+    );
+
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      projects: Record<string, { allowedTools: string[]; hasTrustDialogAccepted: boolean }>;
+    };
+    expect(written.projects['/home/user/myproject'].allowedTools).toEqual(['Bash']);
+    expect(written.projects['/home/user/myproject'].hasTrustDialogAccepted).toBe(true);
+  });
+
+  it('claude: a corrupt existing settings.json is treated as absent rather than failing the apply', () => {
+    const sessionId = 'sess-firstrun-5';
+    sessionsToClean.push(sessionId);
+    const configDir = customModelConfigDir(sessionId);
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'settings.json'), '{ not valid json');
+
+    expect(() => applyCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', sessionId)).not.toThrow();
+    const written = JSON.parse(readFileSync(join(configDir, 'settings.json'), 'utf8')) as {
+      skipDangerousModePermissionPrompt: boolean;
+    };
+    expect(written.skipDangerousModePermissionPrompt).toBe(true);
+  });
+
+  it('pi: has no skipFirstRunPrompts concept (no apiKeyTrustFile either) — nothing beyond its own config file', () => {
+    const sessionId = 'sess-firstrun-pi';
+    sessionsToClean.push(sessionId);
+    const applied = applyCustomModelInjection(
+      entryOrThrow('pi'),
+      endpoint,
+      'qwen3',
+      sessionId,
+      undefined,
+      '/home/user/myproject'
+    );
+    const entries = readdirSync(applied!.configDir!);
+    expect(entries).not.toContain('settings.json');
   });
 });
 

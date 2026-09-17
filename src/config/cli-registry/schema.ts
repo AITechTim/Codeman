@@ -358,6 +358,12 @@ const capabilitiesSchema = z
             .object({ relPath: z.string().min(1).max(80), shape: z.literal('claude-api-key-responses') })
             .strict()
             .optional(),
+          // An isolated config directory replays the CLI's whole first-run sequence (theme
+          // picker, security notes, per-project trust dialog, bypass-permissions warning)
+          // on every launch, same root cause as apiKeyTrustFile above — this reuses that
+          // same file to pre-seed the state a real, already-onboarded profile carries. See
+          // the customModelInjection doc comment in cli-registry/types.ts.
+          skipFirstRunPrompts: z.boolean().optional(),
         })
         .strict(),
       z

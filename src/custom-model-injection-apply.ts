@@ -118,6 +118,79 @@ function seedApiKeyTrustFile(
   }
 }
 
+/**
+ * Pre-seeds the two remaining pieces of "already been onboarded" state a fresh
+ * `CLAUDE_CONFIG_DIR` has none of (`customModelInjection.skipFirstRunPrompts`, alongside
+ * apiKeyTrustFile): claude replays its whole first-run sequence — the theme picker, the
+ * security-notes screen, and (per-project) the "trust this folder?" dialog — against ANY
+ * config directory that has never completed it, confirmed live against a genuinely fresh
+ * isolated directory. `hasCompletedOnboarding` skips the theme/security-notes screens
+ * outright; `projects[workingDir].hasTrustDialogAccepted` answers the trust dialog for
+ * THIS session's own working directory the same way a real profile's own prior approval
+ * would — other projects in the file are left alone, and `workingDir` is used verbatim
+ * (never realpath'd or slash-normalized) since that's the literal string claude itself
+ * uses as the project key, being whatever string the session was actually launched with
+ * as its cwd.
+ *
+ * Same merge-not-overwrite and corrupt-file-tolerant behavior as `seedApiKeyTrustFile`
+ * (same file, so a second sequential read-modify-write here is deliberate rather than
+ * folding both into one pass — keeps each seed independently testable and optional).
+ */
+function seedFirstRunOnboardingState(
+  configDir: string,
+  trustFile: { relPath: string; shape: 'claude-api-key-responses' },
+  workingDir: string
+): void {
+  const filePath = join(configDir, trustFile.relPath);
+  let existing: Record<string, unknown> = {};
+  try {
+    existing = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+  } catch {
+    existing = {};
+  }
+  existing.hasCompletedOnboarding = true;
+  const projects =
+    existing.projects && typeof existing.projects === 'object' && !Array.isArray(existing.projects)
+      ? (existing.projects as Record<string, Record<string, unknown>>)
+      : {};
+  const existingProject = projects[workingDir] && typeof projects[workingDir] === 'object' ? projects[workingDir] : {};
+  projects[workingDir] = { ...existingProject, hasTrustDialogAccepted: true };
+  existing.projects = projects;
+  try {
+    writeFileSync(filePath, JSON.stringify(existing, null, 2), { encoding: 'utf8', mode: 0o600 });
+    chmodSync(filePath, 0o600);
+  } catch {
+    // best-effort only — the interactive dialogs return instead of a hard failure here
+  }
+}
+
+/**
+ * Pre-seeds the "skip the bypass-permissions warning" setting (`customModelInjection.
+ * skipFirstRunPrompts`, alongside apiKeyTrustFile) into an isolated config directory's
+ * `settings.json` — a real, already-onboarded profile answers claude's one-time warning
+ * about running with a bypass-permissions flag once and never sees it again, but every
+ * custom-model session launches with a fresh, otherwise-empty CLAUDE_CONFIG_DIR that
+ * carries none of that (confirmed live). A different file from apiKeyTrustFile's
+ * `.claude.json` — this is claude's own global `settings.json`, not project-keyed —
+ * so it gets its own merge-not-overwrite read-modify-write.
+ */
+function seedSkipBypassPermissionsPrompt(configDir: string): void {
+  const filePath = join(configDir, 'settings.json');
+  let existing: Record<string, unknown> = {};
+  try {
+    existing = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+  } catch {
+    existing = {};
+  }
+  existing.skipDangerousModePermissionPrompt = true;
+  try {
+    writeFileSync(filePath, JSON.stringify(existing, null, 2), { encoding: 'utf8', mode: 0o600 });
+    chmodSync(filePath, 0o600);
+  } catch {
+    // best-effort only — the interactive warning returns instead of a hard failure here
+  }
+}
+
 /** Best-effort recursive removal of a previously-written configDir. Never throws. */
 export function removeConfigDir(dir: string | undefined): void {
   if (!dir) return;
@@ -151,7 +224,13 @@ export function applyCustomModelInjection(
   modelId: string,
   sessionId: string,
   /** Discovered context-window size for `modelId`, if known — see `contextLengthVar`. */
-  contextLength?: number
+  contextLength?: number,
+  /**
+   * The session's own working directory — only used for `skipFirstRunPrompts`'s per-project
+   * trust-dialog seed, and only when provided (boot recovery, which has no reason to
+   * re-answer a dialog that already fired once, omits it rather than re-deriving it).
+   */
+  workingDir?: string
 ): AppliedCustomModel | undefined {
   const injection = buildCustomModelInjection(entry, endpoint, modelId, contextLength);
   if (injection.kind === 'unsupported') return undefined;
@@ -169,6 +248,10 @@ export function applyCustomModelInjection(
       linkSharedProjectsDir(configDir);
       if (injection.apiKeyTrustFile && injection.apiKey) {
         seedApiKeyTrustFile(configDir, injection.apiKeyTrustFile, injection.apiKey);
+      }
+      if (injection.skipFirstRunPrompts && injection.apiKeyTrustFile) {
+        if (workingDir) seedFirstRunOnboardingState(configDir, injection.apiKeyTrustFile, workingDir);
+        seedSkipBypassPermissionsPrompt(configDir);
       }
       envOverrides = { ...envOverrides, [injection.configDirVar]: configDir };
     }

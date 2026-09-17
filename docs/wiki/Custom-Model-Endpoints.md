@@ -89,7 +89,7 @@ error telling you to check the llama-swap server's own logs, and **the session t
 for is closed automatically** — a console left open and pointed at a model that never
 finished loading would just be confusing to leave sitting there.
 
-**Claude Code specifically gets two extra fixes applied automatically:**
+**Claude Code specifically gets three extra fixes applied automatically:**
 
 - Its discovered context length (see above) is passed through as
   `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so it doesn't send a full-size prompt against a much
@@ -103,6 +103,14 @@ finished loading would just be confusing to leave sitting there.
   own, so Codeman also pre-approves the injected key the same way answering Claude Code's own
   "Detected a custom API key" prompt once would — without it, that prompt would otherwise
   reappear on every single launch with nobody there to answer it.
+- **That same fresh isolated directory also looks like a brand-new Claude Code profile**, so
+  without this fix it replayed the WHOLE first-run sequence every single launch: the theme
+  picker, the security-notes screen, the "trust this folder?" dialog, and a one-time warning
+  about running with permissions bypassed — none of which a real, already-used profile shows
+  again. Codeman now pre-seeds that same "already been through this once" state (onboarding
+  completed, this session's own project marked trusted, the bypass-permissions warning
+  acknowledged) so a custom-model launch reaches the actual conversation exactly as fast as a
+  native cloud one does, instead of stopping at a wizard with nobody there to click through it.
 
 **If a model's real context is too small for Claude Code to even get started, you get a
 warning instead of a confusing failure.** Claude Code's own system prompt and tools take up

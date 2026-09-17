@@ -56,6 +56,8 @@ export interface EnvInjection {
   apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
   /** The literal API key value this injection used, for `apiKeyTrustFile` to pre-approve. */
   apiKey?: string;
+  /** See `customModelInjection.skipFirstRunPrompts` — carried through so the IO wrapper can seed it. */
+  skipFirstRunPrompts?: boolean;
 }
 
 export interface ConfigDirInjection {
@@ -122,6 +124,7 @@ export function buildCustomModelInjection(
       let result: EnvInjection = withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
       if (cap.configDirVar) result = { ...result, configDirVar: cap.configDirVar };
       if (cap.apiKeyTrustFile) result = { ...result, apiKeyTrustFile: cap.apiKeyTrustFile, apiKey };
+      if (cap.skipFirstRunPrompts) result = { ...result, skipFirstRunPrompts: true };
       return result;
     }
 

@@ -522,6 +522,19 @@ export interface CliCapabilities {
    * `customApiKeyResponses.approved` field this pre-seeds — the exact field a real answered
    * prompt itself writes to, so this isn't bypassing the check, just answering it the same
    * way a one-off prior approval on a shared profile already would.
+   *
+   * `skipFirstRunPrompts` (env kind only, alongside apiKeyTrustFile): an isolated config
+   * directory is not just missing API-key approvals — it is a brand-new profile as far as
+   * the CLI is concerned, so it also replays its ENTIRE first-run sequence on every launch:
+   * the theme picker, the security-notes screen, the per-project "trust this folder?"
+   * dialog, and (running with a bypass-permissions flag) a one-time warning about it —
+   * confirmed live, none of which a real, long-used profile ever shows again. `true`
+   * pre-seeds the same state a real profile accumulates from having answered all of that
+   * once: `hasCompletedOnboarding` and the launching session's own project entry in the
+   * `apiKeyTrustFile` (claude's `.claude.json`), plus `skipDangerousModePermissionPrompt`
+   * in claude's `settings.json` — see `seedFirstRunState`/`seedSkipBypassPermissionsPrompt`
+   * in custom-model-injection-apply.ts. Requires `apiKeyTrustFile` to be set too, since it
+   * reuses that file.
    */
   customModelInjection:
     | {
@@ -533,6 +546,7 @@ export interface CliCapabilities {
         contextLengthVar?: string;
         apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
         configDirVar?: string;
+        skipFirstRunPrompts?: boolean;
       }
     | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json'; launchModel?: string }
     | {
