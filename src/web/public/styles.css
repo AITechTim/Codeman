@@ -6827,13 +6827,35 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 
 /* Custom Model Endpoint Profiles: llama-swap model-swap confirmation — replaces a native
    confirm() popup (docs/custom-model-endpoints-plan.md) so it looks and feels like the
-   rest of the app instead of a browser chrome dialog. */
+   rest of the app instead of a browser chrome dialog. Shares the context-window-too-small
+   modal's two fixes below since both can appear mid-launch, in the same spot, for the
+   same reason. */
 #customModelSwapConfirmModal .modal-footer {
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
   border-top: 1px solid var(--border-color);
+}
+
+/* Both dialogs can appear while the centred llama-swap status banner (10001, see
+   .center-status-banner) is still on screen — right after "Claude started — switching
+   to llama-swap…" — and .modal's own z-index (1000) sat well under it, so the dialog
+   rendered fully hidden behind the banner (confirmed live, reported against the
+   context-window one but structurally identical for the swap-confirm modal too). */
+#customModelSwapConfirmModal,
+#customModelContextWarningModal {
+  z-index: 10010;
+}
+
+/* Both messages ARE the modal's whole explanatory content, not a one-line caption under
+   a form field, so .form-hint's 0.65rem caption size (right for what it was designed for)
+   read as illegibly small here, worst on the multi-sentence context-window explanation. */
+#customModelSwapConfirmMessage,
+#customModelContextWarningMessage {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 
