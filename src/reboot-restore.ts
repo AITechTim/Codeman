@@ -19,12 +19,19 @@
  * touching its status, so a pinned session a reboot killed still reads `idle` or
  * `busy` and stays eligible.
  *
- * Ending the AGENT rather than the session leaves a third shape, and it is the one
- * a real reboot caught this module getting wrong. `/exit` ends the CLI process
- * while the session record survives, and the process-exit handler persists
- * `pid: null` with `status: 'idle'` — indistinguishable by status from a session
- * that was merely idle when the power went. The absent pid is what tells them
- * apart, so a record without one is refused.
+ * ⚠️ Ending the AGENT rather than the session is a shape this module CANNOT
+ * recognise today, and a reboot restores it. `/exit` ends the CLI inside the
+ * pane, `remain-on-exit` keeps the pane, and the PTY Codeman owns is the
+ * `tmux attach-session` process, which stays alive throughout — so no exit
+ * handler runs, no lifecycle `exit` is logged, and the record keeps both its pid
+ * and `status: 'idle'`. Nothing durable distinguishes it from a session that was
+ * simply idle when the power went. Ark0N/Codeman#446 covers making Codeman
+ * notice the dead pane; until a record can say the agent is gone, this pass will
+ * offer those sessions back, and the user dismisses or closes them.
+ *
+ * The `pid` check below is therefore NOT that rule. It refuses a record whose
+ * attach process was already gone, which is a session that never started or
+ * whose pane died outright.
  *
  * @dependencies types (SessionState), config/cli-registry
  * @consumedby web/server (plan build at boot), web/routes/reboot-restore-routes
@@ -172,17 +179,18 @@ export function planRebootRestore(
       continue;
     }
     if (state.pid === null || state.pid === undefined) {
-      // The agent had already exited when the machine went down: `/exit` ends the
-      // process, and its exit handler persists `pid: null` with `status: 'idle'`
-      // before anything else can. Status alone cannot tell that apart from a
-      // session that was simply sitting idle when the power went, so without this
-      // a reboot restore spawns the agents the user deliberately closed — the
-      // exact case the eligibility rule exists to exclude.
+      // No attach process when the record was last written: the session never
+      // started, or its pane died outright rather than its agent exiting inside a
+      // surviving pane. Either way there was nothing running to bring back.
       //
-      // A heuristic, and deliberately the conservative one. A session that somehow
-      // persisted no pid while genuinely running is not offered, and its
-      // conversation stays reachable from the Resume list, which is where every
-      // session would be without this feature.
+      // ⚠️ This does NOT catch a session the user ended with `/exit`. See the
+      // module header: that leaves the pid in place, because the pid is the tmux
+      // attach process and `remain-on-exit` keeps it alive.
+      //
+      // Conservative on purpose. A session that somehow persisted no pid while
+      // genuinely running is not offered, and its conversation stays reachable
+      // from the Resume list, which is where every session would be without this
+      // feature.
       skipped.push({ sessionId, reason: 'not-running' });
       continue;
     }

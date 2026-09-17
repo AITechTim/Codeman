@@ -138,17 +138,18 @@ describe('which dead sessions may be rebuilt', () => {
   });
 });
 
-describe('a session whose agent had already exited', () => {
-  it('is refused, because `/exit` leaves the record reading idle with no pid', () => {
-    // What the process-exit handler persists: the CLI is gone, the record is not,
-    // and its status is indistinguishable from a session that was merely idle.
+describe('a session with no attach process in its record', () => {
+  it('is refused, because there was nothing running to bring back', () => {
+    // A session that never started, or whose pane died outright. NOT a session
+    // the user ended with `/exit`: that keeps its pid, because the pid is the
+    // tmux attach process and `remain-on-exit` keeps the pane alive.
     const persisted = { exited: persistedSession({ id: 'exited', status: 'idle', pid: null }) };
     const plan = planRebootRestore(['exited'], persisted, () => true);
     expect(plan.restore).toEqual([]);
     expect(plan.skipped).toEqual([{ sessionId: 'exited', reason: 'not-running' }]);
   });
 
-  it('still restores the session beside it that was running when the power went', () => {
+  it('still restores the session beside it that was attached when the power went', () => {
     const persisted = {
       exited: persistedSession({ id: 'exited', pid: null }),
       running: persistedSession({ id: 'running', pid: 4242 }),
