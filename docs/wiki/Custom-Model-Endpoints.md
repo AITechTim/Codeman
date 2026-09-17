@@ -80,14 +80,15 @@ just applying a selection never reached llama-swap's own logs at all until somet
 it to load. Picking an entry now also sends the smallest real request that will trigger
 that load, in the background, the moment the target model isn't already loaded and ready.
 
-**The centred loading banner shows a live countdown, and a real timeout is an error, not a
-shrug.** When it knows the model's discovered file size (its GB figure, when llama-swap
-states one), it shows both a rough expected-time estimate and a live countdown against it —
-e.g. "Loading qwen3.8-27b (16.4 GB, typically ~1–3 min) on llama-swap — 47s remaining". If
-the countdown reaches zero and the model still isn't ready, the banner turns into a sticky
-error telling you to check the llama-swap server's own logs, and **the session that load was
-for is closed automatically** — a console left open and pointed at a model that never
-finished loading would just be confusing to leave sitting there.
+**The centred loading banner has no countdown and no automatic timeout — it waits as long as
+it takes, and tells you so.** When it knows the model's discovered file size (its GB figure,
+when llama-swap states one) it's shown too, e.g. "Loading qwen3.8-27b (16.4 GB) on
+llama-swap — this can take a while depending on your hardware and the model size." An
+earlier version tried to estimate and enforce a time limit, but real load time depends on
+hardware this feature has no way to know, so a fixed number was always a guess — worse, one
+that could kill a genuinely slow load partway through. If it really is taking too long, a
+**Cancel** button right on the banner ends the wait and **closes the session that load was
+for**, on your own call rather than a guessed deadline.
 
 **The banner also shows a real, live second line of what llama.cpp itself is doing** — not
 a made-up progress phase, the actual next line the `llama-server` process printed, e.g.

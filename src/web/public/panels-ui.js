@@ -5567,9 +5567,16 @@ Object.assign(CodemanApp.prototype, {
    * close button, since a sticky error the user cannot dismiss would just sit there). The
    * DOM is rebuilt fresh each call rather than patched, since which children exist differs
    * by type; `setMessage` still only ever touches the text node afterwards.
+   *
+   * `opts.onCancel` — when given (any type, but in practice only 'info': an 'error' banner
+   * already has its own close button), renders a "Cancel" button that calls it on click.
+   * The callback owns everything that follows (dismissing the banner, stopping whatever
+   * loop this was showing progress for, closing a session it was for) — this helper only
+   * renders the button and wires the click, the same "caller decides what cancel means"
+   * split as `_confirmModelSwap`'s promise-resolving buttons.
    */
   _showCenterStatus(message, opts = {}) {
-    const { type = 'info' } = opts;
+    const { type = 'info', onCancel } = opts;
     let el = document.getElementById('customModelCenterStatus');
     if (!el) {
       el = document.createElement('div');
@@ -5604,6 +5611,15 @@ Object.assign(CodemanApp.prototype, {
         dismiss();
       };
       el.appendChild(closeBtn);
+    } else if (onCancel) {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'center-status-cancel';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.onclick = (e) => {
+        e.stopPropagation();
+        onCancel();
+      };
+      el.appendChild(cancelBtn);
     }
     el.hidden = false;
     requestAnimationFrame(() => el.classList.add('show'));

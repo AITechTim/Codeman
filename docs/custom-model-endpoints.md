@@ -103,22 +103,23 @@ into `modelSizesGB` — unlike context length, this needs no `/props` probe
 (the figure is right there in the `/v1/models` response) and so is populated
 for every model regardless of loaded state. A hand-configured profile's own
 description has no such figure and correctly gets no entry, never a guess.
-Used only to label the Run-menu picker's "loading model" banner with a
-rough, UNMEASURED expected-time estimate (`_estimateModelLoad()` in
-session-ui.js, based on typical local NVMe/SSD throughput — not benchmarked
-against any real endpoint's actual hardware/storage) and to scale that same
-banner's own give-up timeout for a very large model; never anything a
-server-side check relies on.
+Used only to label the Run-menu picker's "loading model" banner (e.g.
+"Loading qwen3.8-27b-ud-q4_k_xl (16.4 GB) on llama-swap..."); never anything
+a server-side check relies on.
 
-**The loading banner shows a live countdown against that same timeout, and
-treats a real timeout as a failure, not a shrug.** It checks llama-swap's
-own `/running` every second (`GET /api/model-endpoints/:id/running-status`)
-and counts down against the size-scaled (or flat 5-minute) timeout live; if
-the countdown reaches zero with the target model still not ready, the
-banner turns into a sticky error naming the llama-swap server's own logs as
-where to look, and the session the load was for is closed automatically —
-a console left open and pointed at a model that never finished loading is
-worse than no console at all.
+**The loading banner is unbounded by design, and says so — no countdown, no
+automatic give-up.** An earlier version scaled an expected-time estimate and
+a timeout off the model's file size and auto-closed the session once that
+elapsed, but a real load's actual duration depends on hardware this feature
+has no way to know (VRAM, storage speed, whatever else is contending for the
+GPU) — any fixed number was a guess dressed up as a fact, and a model that
+genuinely takes 10+ minutes on slower hardware would just get killed
+mid-load by its own display. The banner now says outright that it can take a
+while depending on hardware and model size, polls
+`GET /api/model-endpoints/:id/running-status` every second for as long as it
+takes, and carries a **Cancel** button (rendered on the banner itself) that
+ends the wait and closes the session the load was for — the user's own call
+on when it's taking too long, not a fixed number baked into the client.
 
 **The banner's second line is the real backend log line, not a guess.**
 llama-swap's `GET /api/events` SSE stream carries the actual `llama-server`
@@ -126,22 +127,22 @@ process's own stdout — `load_model: loading model '<path>'`,
 `llama_server: model loaded`, tokenizer warnings, all of it — tagged
 `source: "upstream"`, distinct from llama-swap's own `source: "proxy"`
 request-access lines. `running-status`'s response now includes `logLine`
-(via `getLatestLlamaSwapLogLine`), and the banner shows it under the
-countdown, e.g. "llama.cpp: load_model: loading model '...'" — confirmed
-live end-to-end through a real forced swap, sequentially showing the model
-path, a tokenizer warning, then staying on whatever llama.cpp last printed
-once the load goes quiet (never cleared back to blank). ⚠️ **`GET /logs`
-— the endpoint this feature's own first cut was built against — turns out
-to carry ONLY llama-swap's own proxy request-access log.** Confirmed live
-it never showed a single backend line, even seconds after a real, verified
-model swap; `/api/events`'s `logData` frames are the only source that
-actually has it, and its own `source` field (`upstream` vs `proxy`) is
-what `getLatestLlamaSwapLogLine` filters on. One `/api/events` connection
-is held open per endpoint and reused across every session watching a load
-on it (confirmed live to stay open indefinitely, unlike `/logs`, which
-closes after a fixed ~100KB), idle-closed after 30s of nobody polling it
-(`pruneIdleLlamaSwapLogTails`, same 20s sweep as the swap-displacement
-check below).
+(via `getLatestLlamaSwapLogLine`), and the banner shows it on its own line
+under the disclaimer, e.g. "llama.cpp: load_model: loading model '...'" —
+confirmed live end-to-end through a real forced swap, sequentially showing
+the model path, a tokenizer warning, then staying on whatever llama.cpp last
+printed once the load goes quiet (never cleared back to blank). ⚠️
+**`GET /logs` — the endpoint this feature's own first cut was built
+against — turns out to carry ONLY llama-swap's own proxy request-access
+log.** Confirmed live it never showed a single backend line, even seconds
+after a real, verified model swap; `/api/events`'s `logData` frames are the
+only source that actually has it, and its own `source` field (`upstream` vs
+`proxy`) is what `getLatestLlamaSwapLogLine` filters on. One `/api/events`
+connection is held open per endpoint and reused across every session
+watching a load on it (confirmed live to stay open indefinitely, unlike
+`/logs`, which closes after a fixed ~100KB), idle-closed after 30s of nobody
+polling it (`pruneIdleLlamaSwapLogTails`, same 20s sweep as the
+swap-displacement check below).
 
 `defaultModelId` names which discovered model the picker pre-marks for that
 endpoint — the settings panel's Edit form exposes it as a select populated

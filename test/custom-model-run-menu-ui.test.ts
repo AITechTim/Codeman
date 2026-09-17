@@ -20,6 +20,9 @@ import { describe, expect, it } from 'vitest';
 
 const CONSTANTS_JS = readFileSync(new URL('../src/web/public/constants.js', import.meta.url), 'utf-8');
 const SESSION_UI_JS = readFileSync(new URL('../src/web/public/session-ui.js', import.meta.url), 'utf-8');
+// Only for the real _showCenterStatus DOM tests below (`bootAppWithRealCenterStatus`) —
+// every other test in this file stubs _showCenterStatus itself and has no need of it.
+const PANELS_UI_JS = readFileSync(new URL('../src/web/public/panels-ui.js', import.meta.url), 'utf-8');
 
 function resp(body: unknown, ok = true) {
   return { ok, json: async () => body };
@@ -96,6 +99,28 @@ function bootApp(
     return null;
   };
   return { dom, win, app };
+}
+
+/**
+ * Like `bootApp`, but also evaluates panels-ui.js so `_showCenterStatus` is the REAL
+ * implementation rather than the plain stub `bootApp` installs — for the Cancel-button
+ * rendering tests, which need to see actual DOM the app would produce.
+ */
+function bootAppWithRealCenterStatus() {
+  const dom = new JSDOM('<!doctype html><body></body>', { url: 'http://localhost/', runScripts: 'dangerously' });
+  const win = dom.window as unknown as Window & typeof globalThis & { CodemanApp: new () => any };
+  // jsdom doesn't polyfill requestAnimationFrame, and _showCenterStatus calls it to add
+  // the 'show' class — run it synchronously, which is all a non-visual test needs.
+  (win as unknown as { requestAnimationFrame: (cb: () => void) => number }).requestAnimationFrame = (cb) => {
+    cb();
+    return 0;
+  };
+  (win as unknown as { eval: (s: string) => void }).eval('window.CodemanApp = function CodemanApp() {};');
+  (win as unknown as { eval: (s: string) => void }).eval(CONSTANTS_JS);
+  (win as unknown as { eval: (s: string) => void }).eval(SESSION_UI_JS);
+  (win as unknown as { eval: (s: string) => void }).eval(PANELS_UI_JS);
+  const app = new win.CodemanApp();
+  return { win, app };
 }
 
 describe('Custom Model Endpoint Profiles: Run-menu picker generation', () => {
@@ -619,7 +644,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5);
 
     expect(bannerMessages[0]).toMatch(/loading qwen3/i);
     expect(dismissed).toContain(bannerMessages[0]);
@@ -648,7 +673,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
       return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
     };
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5);
 
     // First render (before any poll has landed) has no log line at all.
     expect(bannerMessages[0]).not.toMatch(/llama\.cpp:/);
@@ -669,36 +694,70 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     app.showToast = () => {};
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5);
 
     expect(bannerMessages.some((m) => m.includes('llama.cpp:'))).toBe(false);
   });
 
-  it('gives up after the bounded wait, turns the banner into a sticky error, and closes the session', async () => {
+  it('is unbounded — never gives up on its own, even after many polls with no ready model', async () => {
+    // No countdown, no timeout: confirms the loop just keeps polling rather than
+    // eventually erroring out on its own after some fixed number of checks.
     const { app } = bootApp({});
-    const banners: Array<{ message: string; opts: unknown }> = [];
-    app._showCenterStatus = (message: string, opts: unknown) => {
-      banners.push({ message, opts });
-      return { dismiss: () => {}, setMessage: () => {} };
-    };
+    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
     app.showToast = () => {};
+    let calls = 0;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return null;
+      calls += 1;
+      if (calls >= 20) return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
+      return { isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] };
+    };
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 1);
+
+    expect(calls).toBe(20); // it really did keep polling past what the old bounded wait allowed
+  });
+
+  it('clicking Cancel on the banner dismisses it, shows an info toast (not an error), and closes the session', async () => {
+    const { app } = bootApp({});
+    let onCancel: (() => void) | undefined;
+    let dismissed = false;
+    app._showCenterStatus = (_message: string, opts?: { onCancel?: () => void }) => {
+      onCancel = opts?.onCancel;
+      return { dismiss: () => (dismissed = true), setMessage: () => {} };
+    };
+    const toastCalls: Array<{ message: string; type: string }> = [];
+    app.showToast = (message: string, type = 'info') => {
+      toastCalls.push({ message, type });
+    };
     let closedSessionId: string | undefined;
     app.closeSession = async (id: string) => {
       closedSessionId = id;
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 30);
+    const watch = app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5);
+    // Give the loop a couple of ticks to actually be polling, then cancel it — a real
+    // click happens whenever the user gets around to it, not on the very first render.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(onCancel).toBeTypeOf('function');
+    onCancel!();
+    await watch;
 
-    const errorBanner = banners.find((b) => (b.opts as { type?: string } | undefined)?.type === 'error');
-    expect(errorBanner?.message).toMatch(/did not finish loading/i);
-    expect(errorBanner?.message).toMatch(/llama-swap server logs/i);
+    expect(dismissed).toBe(true);
+    const cancelToast = toastCalls.find((t) => /cancelled/i.test(t.message));
+    expect(cancelToast?.type).toBe('info'); // not 'error' — this was deliberate, not a failure
+    expect(cancelToast?.message).toMatch(/session has been closed/i);
     expect(closedSessionId).toBe('sess-1');
   });
 
   it('never closes anything when no sessionId was given (a caller that has none to close)', async () => {
     const { app } = bootApp({});
-    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
+    let onCancel: (() => void) | undefined;
+    app._showCenterStatus = (_message: string, opts?: { onCancel?: () => void }) => {
+      onCancel = opts?.onCancel;
+      return { dismiss: () => {}, setMessage: () => {} };
+    };
     app.showToast = () => {};
     let closeCalled = false;
     app.closeSession = async () => {
@@ -706,7 +765,10 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     };
     app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'something-else', state: 'ready' }] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', undefined, 5, 30);
+    const watch = app._watchLlamaSwapLoading('llama-box', 'qwen3', undefined, 5);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    onCancel!();
+    await watch;
 
     expect(closeCalled).toBe(false);
   });
@@ -726,7 +788,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     };
     app._apiJson = async () => ({ isLlamaSwap: false, running: [] });
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5);
 
     expect(bannerDismissed).toBe(true);
     expect(toastCalls).toHaveLength(0); // no follow-up warning toast
@@ -746,7 +808,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
       return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
     };
 
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5);
 
     expect(toastCalls.at(-1)).toMatch(/ready/i);
   });
@@ -766,7 +828,7 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
 
     // A huge interval that would time the test out if the function actually waited for
     // it before the first check.
-    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 60000, 300000);
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 60000);
 
     expect(calls).toBe(1);
   });
@@ -779,48 +841,34 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
       setMessage: () => {},
     });
     app.showToast = () => {};
-    // The FIRST call never sees its own target model ready, so left alone it would run all
-    // the way to its own timeout and (now) turn into an error + close its session — but no
-    // sessionId is passed, so there is nothing for it to close even if it does get there.
+    // The FIRST call never sees its own target model ready — left alone (unbounded, no
+    // timeout) it would poll forever, but being superseded below must still make it stop
+    // on its own very next isCurrent() check rather than needing a timeout to exit.
     app._apiJson = async (path: string) => {
       if (path === '/api/model-endpoints') return [];
       return { isLlamaSwap: true, running: [] };
     };
-    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', undefined, 5, 30);
+    const firstCall = app._watchLlamaSwapLoading('llama-box', 'model-a', undefined, 5);
 
-    // Second call, for a DIFFERENT model that IS ready right away, takes over the banner
-    // before the first call's own bounded wait has elapsed.
+    // Second call, for a DIFFERENT model that IS ready right away, takes over the banner.
     app._apiJson = async (path: string) => {
       if (path === '/api/model-endpoints') return [];
       return { isLlamaSwap: true, running: [{ model: 'model-b', state: 'ready' }] };
     };
-    await app._watchLlamaSwapLoading('llama-box', 'model-b', undefined, 5, 200);
+    await app._watchLlamaSwapLoading('llama-box', 'model-b', undefined, 5);
 
-    // Let the stale first call run out its own bounded wait and finish.
+    // Let the stale first call notice it's been superseded and return on its own.
     await firstCall;
 
-    // Whatever the first call did or didn't show along the way, its own eventual
-    // completion (a timeout, in this case) must never touch a banner state that belongs
-    // to the newer, still-current call — exactly one dismiss, for model-b, is the tell.
+    // Whatever the first call did or didn't show along the way, being superseded must
+    // never touch a banner state that belongs to the newer, still-current call — exactly
+    // one dismiss, for model-b, is the tell.
     expect(dismissCalls).toHaveLength(1);
     expect(dismissCalls[0]).toContain('model-b');
   });
 });
 
-describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => {
-  it('_estimateModelLoad picks the smallest matching bracket, and returns null for an unknown size', () => {
-    const { app } = bootApp({});
-    expect(app._estimateModelLoad(1)).toMatchObject({ label: '~5–15s' });
-    expect(app._estimateModelLoad(2)).toMatchObject({ label: '~5–15s' }); // inclusive upper bound
-    expect(app._estimateModelLoad(2.1)).toMatchObject({ label: '~15–45s' });
-    expect(app._estimateModelLoad(16.35)).toMatchObject({ label: '~1–3 min' }); // just over the 16GB bracket
-    expect(app._estimateModelLoad(200)).toMatchObject({ label: '~5+ min' });
-    expect(app._estimateModelLoad(undefined)).toBeNull();
-    expect(app._estimateModelLoad(0)).toBeNull();
-    expect(app._estimateModelLoad(-5)).toBeNull();
-    expect(app._estimateModelLoad(NaN)).toBeNull();
-  });
-
+describe('Custom Model Endpoint Profiles: model size lookup (no time estimate — see the unbounded-wait describe above)', () => {
   it('_lookupModelSizeGB reads the size off the matching endpoint/model, ignoring one with no parseable size', async () => {
     const { app } = bootApp({});
     app._apiJson = async (path: string) => {
@@ -848,7 +896,7 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
     await expect(app._lookupModelSizeGB('llama-box', 'qwen3')).resolves.toBeUndefined();
   });
 
-  it('the loading banner includes the size and estimate when the size is known', async () => {
+  it('the loading banner includes the size, and the generic hardware/model-size disclaimer, when the size is known', async () => {
     const { app } = bootApp({});
     const bannerMessages: string[] = [];
     app._showCenterStatus = (message: string) => {
@@ -865,12 +913,12 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
 
     await app._watchLlamaSwapLoading('llama-box', 'qwen3.8-27b-ud-q4_k_xl', undefined, 5);
 
-    expect(bannerMessages[0]).toMatch(
-      /^Loading qwen3\.8-27b-ud-q4_k_xl \(16\.4 GB, typically ~1–3 min\) on llama-box — .+ remaining$/
+    expect(bannerMessages[0]).toBe(
+      'Loading qwen3.8-27b-ud-q4_k_xl (16.4 GB) on llama-box — this can take a while depending on your hardware and the model size.'
     );
   });
 
-  it('the loading banner omits the size/estimate entirely when the size is unknown', async () => {
+  it('the loading banner omits the size but keeps the disclaimer when the size is unknown', async () => {
     const { app } = bootApp({});
     const bannerMessages: string[] = [];
     app._showCenterStatus = (message: string) => {
@@ -885,28 +933,41 @@ describe('Custom Model Endpoint Profiles: model-size load-time estimate', () => 
 
     await app._watchLlamaSwapLoading('llama-box', 'big', undefined, 5);
 
-    expect(bannerMessages[0]).toMatch(/^Loading big on llama-box — .+ remaining$/);
+    expect(bannerMessages[0]).toBe(
+      'Loading big on llama-box — this can take a while depending on your hardware and the model size.'
+    );
+  });
+});
+
+describe('Custom Model Endpoint Profiles: _showCenterStatus Cancel button (real DOM, not the stub)', () => {
+  it('renders a real, clickable Cancel button when onCancel is given, and wires it up', () => {
+    const { win, app } = bootAppWithRealCenterStatus();
+    let cancelled = false;
+
+    app._showCenterStatus('Loading qwen3 on llama-box…', { onCancel: () => (cancelled = true) });
+
+    const btn = win.document.querySelector('.center-status-cancel') as HTMLButtonElement | null;
+    expect(btn).not.toBeNull();
+    expect(btn!.textContent).toBe('Cancel');
+    btn!.onclick!(new (win as any).Event('click'));
+    expect(cancelled).toBe(true);
   });
 
-  it('uses the size-scaled estimate as the default timeout when maxWaitMs is not passed', async () => {
-    // A 200GB model estimates to the top "~5+ min" bracket (900000ms); a huge poll interval
-    // would time the TEST out if the function only waited the flat, smaller previous
-    // default (300000ms) instead of the size-scaled one.
-    const { app } = bootApp({});
-    app._showCenterStatus = () => ({ dismiss: () => {}, setMessage: () => {} });
-    app.showToast = () => {};
-    let calls = 0;
-    app._apiJson = async (path: string) => {
-      if (path === '/api/model-endpoints') return [{ id: 'llama-box', modelSizesGB: { huge: 200 } }];
-      calls += 1;
-      if (calls < 3) return { isLlamaSwap: true, running: [] }; // not ready on the first couple of checks
-      return { isLlamaSwap: true, running: [{ model: 'huge', state: 'ready' }] };
-    };
+  it('renders no Cancel button at all when onCancel is not given', () => {
+    const { win, app } = bootAppWithRealCenterStatus();
 
-    // pollIntervalMs only — maxWaitMs omitted, so it must fall back to the size estimate.
-    await app._watchLlamaSwapLoading('llama-box', 'huge', undefined, 5);
+    app._showCenterStatus('Loading qwen3 on llama-box…');
 
-    expect(calls).toBe(3);
+    expect(win.document.querySelector('.center-status-cancel')).toBeNull();
+  });
+
+  it("an 'error' banner keeps its own × close button rather than growing a redundant Cancel, even if onCancel is passed", () => {
+    const { win, app } = bootAppWithRealCenterStatus();
+
+    app._showCenterStatus('Something went wrong', { type: 'error', onCancel: () => {} });
+
+    expect(win.document.querySelector('.center-status-close')).not.toBeNull();
+    expect(win.document.querySelector('.center-status-cancel')).toBeNull();
   });
 });
 

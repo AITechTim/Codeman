@@ -1010,40 +1010,6 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * Rough, UNMEASURED load-time brackets by model file size, for the loading banner's text
-   * and as a size-scaled fallback timeout (larger models get longer before
-   * _watchLlamaSwapLoading gives up and warns). Sourced from typical local NVMe/SSD
-   * throughput for llama.cpp's mmap-and-warm sequence — NOT benchmarked against any real
-   * endpoint's actual hardware/storage (network storage, spinning disks, or a GPU with
-   * less VRAM than the model needs would all be meaningfully slower), so the label is an
-   * expectation-setter, never a guarantee. `maxGB` is the bracket's own upper bound
-   * (inclusive); brackets are checked in order, so list them smallest first.
-   */
-  _MODEL_LOAD_TIME_MATRIX: [
-    { maxGB: 2, label: '~5–15s', waitMs: 60000 },
-    { maxGB: 8, label: '~15–45s', waitMs: 120000 },
-    { maxGB: 16, label: '~30–90s', waitMs: 180000 },
-    { maxGB: 32, label: '~1–3 min', waitMs: 300000 },
-    { maxGB: 64, label: '~2–5 min', waitMs: 480000 },
-    { maxGB: Infinity, label: '~5+ min', waitMs: 900000 },
-  ],
-
-  /** `sizeGB` -> `{label, waitMs}` from `_MODEL_LOAD_TIME_MATRIX`, or `null` when `sizeGB`
-   *  is unknown (no estimate is always safer than a fabricated one). */
-  _estimateModelLoad(sizeGB) {
-    if (typeof sizeGB !== 'number' || !Number.isFinite(sizeGB) || sizeGB <= 0) return null;
-    return this._MODEL_LOAD_TIME_MATRIX.find((bracket) => sizeGB <= bracket.maxGB) ?? null;
-  },
-
-  /** `ms` -> `"1m 08s remaining"` / `"8s remaining"`, for the loading banner's live countdown. */
-  _formatRemaining(ms) {
-    const totalSec = Math.max(0, Math.ceil(ms / 1000));
-    const mins = Math.floor(totalSec / 60);
-    const secs = totalSec % 60;
-    return mins > 0 ? `${mins}m ${String(secs).padStart(2, '0')}s remaining` : `${secs}s remaining`;
-  },
-
-  /**
    * Strips llama.cpp's own bootlog prefix (`<uptime> <I|W|E> <component>  `, e.g.
    * `0.31.428.568 I srv  llama_server: model loaded`) for display, leaving just
    * `llama_server: model loaded` — the raw line from the server is kept as-is
@@ -1058,20 +1024,20 @@ Object.assign(CodemanApp.prototype, {
 
   /**
    * Polls llama-swap's own `/running` (via the read-only running-status route) until
-   * `modelId` reports `state: 'ready'`, showing a sticky banner with a live countdown the
-   * whole time so a slow unload/reload (measured well over a minute for a large model)
-   * reads as "loading, N seconds left", never as silence or a wrong answer from whatever
-   * was loaded before. Checks immediately (a fast load, or a re-apply onto an
-   * already-ready model, shouldn't wait a full interval to say so), then every
-   * `pollIntervalMs`. Bounded at `maxWaitMs` — defaults to a rough, size-scaled estimate
-   * (`_estimateModelLoad`) when the model's discovered size is known, falling back to a
-   * flat 5 minutes when it isn't.
+   * `modelId` reports `state: 'ready'`, showing a sticky banner the whole time so a slow
+   * unload/reload (measured well over a minute for a large model) reads as "loading,
+   * still working on it", never as silence or a wrong answer from whatever was loaded
+   * before. Checks immediately (a fast load, or a re-apply onto an already-ready model,
+   * shouldn't wait a full interval to say so), then every `pollIntervalMs`.
    *
-   * If the countdown reaches zero with the model still not ready, this is a real failure,
-   * not a "keep waiting" — the banner turns into a sticky error naming the llama-swap
-   * server's own logs as where to look, and `sessionId` (the session this was launched
-   * for) is closed automatically: a console left open and pointed at a model that never
-   * finished loading is worse than no console at all.
+   * Deliberately UNBOUNDED — no estimate, no countdown, no automatic give-up. An earlier
+   * version scaled a timeout off the model's discovered file size and auto-closed the
+   * session when it elapsed, but a real load's actual duration depends on hardware this
+   * feature has no way to know (VRAM, storage speed, what else is contending for the
+   * GPU), so any fixed number was a guess dressed up as a fact — the banner now says so
+   * outright instead of pretending to a precision it doesn't have, and a Cancel button on
+   * the banner itself (`_showCenterStatus`'s `onCancel`) is how the user ends it if it's
+   * taking too long, closing `sessionId` the same way the old timeout used to.
    *
    * `_watchLlamaSwapGeneration` guards against two overlapping calls (a second launch
    * started before the first one's loop finished) clobbering each other's banner:
@@ -1080,37 +1046,41 @@ Object.assign(CodemanApp.prototype, {
    * or overwrite the WRONG one, or close the WRONG session. Each call claims the counter
    * as its own "generation" and checks it still owns it before touching either.
    *
-   * `pollIntervalMs`/`maxWaitMs` exist to let a test drive this in milliseconds instead of
-   * minutes — real callers never pass `maxWaitMs`, which is what keeps the size-scaled
-   * default live here rather than only in a test fixture.
+   * `pollIntervalMs` exists to let a test drive this in milliseconds instead of seconds —
+   * real callers never pass it.
    */
-  async _watchLlamaSwapLoading(endpointId, modelId, sessionId, pollIntervalMs = 1000, maxWaitMs) {
+  async _watchLlamaSwapLoading(endpointId, modelId, sessionId, pollIntervalMs = 1000) {
     const generation = (this._watchLlamaSwapGeneration = (this._watchLlamaSwapGeneration || 0) + 1);
     const isCurrent = () => this._watchLlamaSwapGeneration === generation;
     const sizeGB = await this._lookupModelSizeGB(endpointId, modelId);
-    const estimate = this._estimateModelLoad(sizeGB);
-    const effectiveMaxWaitMs = maxWaitMs ?? estimate?.waitMs ?? 300000;
     if (!isCurrent()) return; // a newer launch already took over before the lookup even finished
-    const sizeSuffix = sizeGB
-      ? ` (${sizeGB.toFixed(1)} GB${estimate ? `, typically ${estimate.label}` : ''})`
-      : '';
-    const baseMessage = `Loading ${modelId}${sizeSuffix} on ${endpointId} —`;
-    // Second line, when llama-swap's /logs actually gives us one: the real backend
-    // llama-server process's own latest log line (load_model:/llama_server: ..., see
-    // getLatestLlamaSwapLogLine) — a countdown alone says "something is happening,
-    // trust me," this says what. Absent on the very first render (no poll has landed
-    // yet) and whenever the endpoint doesn't expose /logs at all — never fabricated.
-    const buildMessage = (remainingMs, logLine) => {
+    const sizeSuffix = sizeGB ? ` (${sizeGB.toFixed(1)} GB)` : '';
+    const baseMessage =
+      `Loading ${modelId}${sizeSuffix} on ${endpointId} — this can take a while depending on ` +
+      `your hardware and the model size.`;
+    // Second line, when llama-swap's own event feed actually gives us one: the real
+    // backend llama-server process's own latest log line (load_model:/llama_server: ...,
+    // see getLatestLlamaSwapLogLine) — a bare "please wait" says nothing is broken, this
+    // says what's actually happening. Absent on the very first render (no poll has
+    // landed yet) and whenever the endpoint doesn't expose it at all — never fabricated,
+    // and never cleared back to blank once seen (stays on the last real thing llama.cpp
+    // said if a later poll comes back with nothing new).
+    const buildMessage = (logLine) => {
       const line = this._formatLlamaLogLine(logLine);
-      return `${baseMessage} ${this._formatRemaining(remainingMs)}` + (line ? `\nllama.cpp: ${line}` : '');
+      return baseMessage + (line ? `\nllama.cpp: ${line}` : '');
     };
+    let cancelled = false;
     // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
     // sit on screen for well over a minute, easy to mistake for nothing happening there.
-    const deadline = Date.now() + effectiveMaxWaitMs;
-    const toast = this._showCenterStatus(buildMessage(deadline - Date.now()));
-    while (Date.now() < deadline) {
+    const toast = this._showCenterStatus(buildMessage(), {
+      onCancel: () => {
+        cancelled = true;
+      },
+    });
+    while (!cancelled) {
       const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
       if (!isCurrent()) return; // a newer launch took over the banner — this loop is done
+      if (cancelled) break;
       if (!status) {
         // transient failure — keep waiting rather than giving up early
       } else if (!status.isLlamaSwap) {
@@ -1123,16 +1093,17 @@ Object.assign(CodemanApp.prototype, {
         this.showToast(`${modelId} is ready`, 'success', { duration: 2500 });
         return;
       }
-      if (!isCurrent()) return;
-      toast?.setMessage(buildMessage(deadline - Date.now(), status?.logLine));
+      if (!isCurrent() || cancelled) break;
+      toast?.setMessage(buildMessage(status?.logLine));
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
     if (!isCurrent()) return;
-    this._showCenterStatus(
-      `${modelId} did not finish loading on ${endpointId} within the expected time. ` +
-        `Check the llama-swap server logs for details.` +
-        (sessionId ? ' The session has been closed.' : ''),
-      { type: 'error' }
+    // Cancelled by the user, not a timeout — an ordinary info toast, not a scary error
+    // banner, since this was deliberate rather than something going wrong.
+    toast?.dismiss();
+    this.showToast(
+      `Cancelled loading ${modelId} on ${endpointId}` + (sessionId ? ' — the session has been closed.' : '.'),
+      'info'
     );
     if (sessionId) {
       try {

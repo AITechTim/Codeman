@@ -8636,6 +8636,28 @@ kbd {
   opacity: 1;
 }
 
+/* The Cancel button on an 'info' banner (e.g. the model-loading banner) — a real button
+   rather than the bare "×" close glyph above, since "Cancel" is an action with a
+   consequence (the caller's onCancel closes a session), not a plain dismiss. */
+.center-status-cancel {
+  flex-shrink: 0;
+  pointer-events: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: inherit;
+  opacity: 0.75;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.center-status-cancel:hover {
+  opacity: 1;
+  border-color: var(--text-muted, var(--border));
+}
+
 .toast-success { border-color: rgba(34, 197, 94, 0.4); }
 .toast-error { border-color: rgba(239, 68, 68, 0.4); }
 .toast-warning { border-color: rgba(234, 179, 8, 0.4); }
