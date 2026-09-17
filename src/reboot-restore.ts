@@ -19,6 +19,13 @@
  * touching its status, so a pinned session a reboot killed still reads `idle` or
  * `busy` and stays eligible.
  *
+ * Ending the AGENT rather than the session leaves a third shape, and it is the one
+ * a real reboot caught this module getting wrong. `/exit` ends the CLI process
+ * while the session record survives, and the process-exit handler persists
+ * `pid: null` with `status: 'idle'` — indistinguishable by status from a session
+ * that was merely idle when the power went. The absent pid is what tells them
+ * apart, so a record without one is refused.
+ *
  * @dependencies types (SessionState), config/cli-registry
  * @consumedby web/server (plan build at boot), web/routes/reboot-restore-routes
  *
@@ -89,7 +96,7 @@ export function resolveResumeConversationId(state: SessionState): string {
 /**
  * Why one session was passed over. Reported for logging and shown to the user.
  *
- * The first six are decided before anything is built. `capacity-reached` and
+ * The first seven are decided before anything is built. `capacity-reached` and
  * `rebuild-failed` can only happen once a click is spending the plan, and they
  * are the two the banner must not confuse with a missing workspace: one means
  * "try again after closing something", the other means the CLI would not start.
@@ -99,6 +106,7 @@ export interface RebootRestoreRejection {
   reason:
     | 'no-persisted-record'
     | 'intentionally-ended'
+    | 'not-running'
     | 'respawn-blocked'
     | 'remote-or-docker'
     | 'unsupported-mode'
@@ -161,6 +169,21 @@ export function planRebootRestore(
     if (!RESTORABLE_STATUSES.has(state.status)) {
       // A pinned kill was demoted to `stopped`. Reviving it would undo the kill.
       skipped.push({ sessionId, reason: 'intentionally-ended' });
+      continue;
+    }
+    if (state.pid === null || state.pid === undefined) {
+      // The agent had already exited when the machine went down: `/exit` ends the
+      // process, and its exit handler persists `pid: null` with `status: 'idle'`
+      // before anything else can. Status alone cannot tell that apart from a
+      // session that was simply sitting idle when the power went, so without this
+      // a reboot restore spawns the agents the user deliberately closed — the
+      // exact case the eligibility rule exists to exclude.
+      //
+      // A heuristic, and deliberately the conservative one. A session that somehow
+      // persisted no pid while genuinely running is not offered, and its
+      // conversation stays reachable from the Resume list, which is where every
+      // session would be without this feature.
+      skipped.push({ sessionId, reason: 'not-running' });
       continue;
     }
     if (state.respawnBlocked === true) {

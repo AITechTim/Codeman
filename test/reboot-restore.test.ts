@@ -39,6 +39,7 @@ const NOW = 1_760_000_000_000;
 
 function persistedSession(overrides: Partial<SessionState> & { id: string }): SessionState {
   return {
+    // A live agent's record carries its process id; `/exit` persists null instead.
     pid: 99999,
     status: 'idle',
     workingDir: '/tmp/spike',
@@ -134,6 +135,32 @@ describe('which dead sessions may be rebuilt', () => {
   it('skips a CLI whose history the claude transcript reader does not understand', () => {
     const persisted = { c: persistedSession({ id: 'c', mode: 'codex' }) };
     expect(planRebootRestore(['c'], persisted, () => true).skipped[0].reason).toBe('unsupported-mode');
+  });
+});
+
+describe('a session whose agent had already exited', () => {
+  it('is refused, because `/exit` leaves the record reading idle with no pid', () => {
+    // What the process-exit handler persists: the CLI is gone, the record is not,
+    // and its status is indistinguishable from a session that was merely idle.
+    const persisted = { exited: persistedSession({ id: 'exited', status: 'idle', pid: null }) };
+    const plan = planRebootRestore(['exited'], persisted, () => true);
+    expect(plan.restore).toEqual([]);
+    expect(plan.skipped).toEqual([{ sessionId: 'exited', reason: 'not-running' }]);
+  });
+
+  it('still restores the session beside it that was running when the power went', () => {
+    const persisted = {
+      exited: persistedSession({ id: 'exited', pid: null }),
+      running: persistedSession({ id: 'running', pid: 4242 }),
+    };
+    const plan = planRebootRestore(['exited', 'running'], persisted, () => true);
+    expect(plan.restore.map((entry) => entry.sessionId)).toEqual(['running']);
+    expect(plan.skipped.map((s) => s.reason)).toEqual(['not-running']);
+  });
+
+  it('refuses a record with no pid field at all', () => {
+    const persisted = { odd: persistedSession({ id: 'odd', pid: undefined as unknown as null }) };
+    expect(planRebootRestore(['odd'], persisted, () => true).skipped[0].reason).toBe('not-running');
   });
 });
 
