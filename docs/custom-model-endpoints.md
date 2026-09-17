@@ -335,6 +335,28 @@ completions` with `max_tokens: 1` and one throwaway message — whenever the
   also carries `modelSwapInProgress: true` in that case, which is what
   drives the Run-menu picker's own "loading model" status banner.
 
+## Catching a swap after the fact
+
+The conflict check above only runs at the moment a session is created or a
+model is applied — it has no way to catch a swap that happens **later**.
+Confirmed live: a session created while nothing else conflicted at that
+exact instant can still get silently displaced afterward, once a
+_different_ session's own normal use (or its own create-time load trigger)
+asks llama-swap to load something else. llama-swap has no push
+notification of its own for this, so a background sweep
+(`detectCustomModelSwapDisplacements`, `CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS`
+= 20s in `server.ts`) polls `GET /running` once per distinct endpoint that
+has at least one live custom-model session, and compares each such
+session's own `modelId` against what is actually loaded. A session whose
+model is no longer in that list gets a `custom-model:swapped-out` SSE event
+(`{sessionId, sessionName, endpointId, previousModel, currentlyLoadedModel}`),
+shown as a global toast — global rather than tied to that session's tab,
+since the whole point is telling the user before they type into it
+expecting the model they picked. Notifies **once per displacement**: the
+same de-dupe `Set` clears a session's flag once its own model is loaded and
+ready again, so a later, genuinely new displacement notifies again rather
+than the session staying silently un-notified forever after the first one.
+
 ## Context-window floor warning
 
 Claude Code's own fixed per-turn overhead (system prompt + tool schemas,

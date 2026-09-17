@@ -428,6 +428,91 @@ export async function refreshAllCustomModelHosts(): Promise<void> {
   }
 }
 
+/** The subset of `Session` this sweep needs — kept minimal so a test can pass a plain object. */
+export interface CustomModelSessionLike {
+  id: string;
+  name: string;
+  customModel?: { endpointId: string; modelId: string; label?: string };
+}
+
+/** One session whose model was just found evicted, ready to broadcast as `CustomModelSwappedOut`. */
+export interface CustomModelSwapDisplacement {
+  sessionId: string;
+  sessionName: string;
+  endpointId: string;
+  previousModel: string;
+  currentlyLoadedModel: string;
+}
+
+/**
+ * Detects when a live session's own custom-model selection is no longer the model
+ * llama-swap actually has loaded — evicted by ANOTHER session's activity on the same
+ * endpoint, since llama.cpp/llama-swap runs one model at a time (the apply/create routes'
+ * own swap-conflict check only ever runs at THAT session's own launch/apply moment, so it
+ * cannot catch a later eviction triggered by a different session's normal use — confirmed
+ * live: a session created while nothing else had a live conflict at that instant can still
+ * get silently displaced afterward). Read-only, and best-effort per endpoint exactly like
+ * `refreshAllCustomModelHosts`'s sibling sweep — one endpoint's hiccup here never blocks
+ * checking the others.
+ *
+ * `notifiedSessionIds` is the caller's own de-dupe state (`server.ts` keeps one `Set` across
+ * sweeps), mutated in place: a session id is added once displaced and removed again once its
+ * own model is loaded and ready — so a LATER, genuinely new displacement can notify again
+ * rather than the session staying silently un-notified forever after the first one.
+ */
+export async function detectCustomModelSwapDisplacements(
+  sessions: Iterable<CustomModelSessionLike>,
+  notifiedSessionIds: Set<string>
+): Promise<CustomModelSwapDisplacement[]> {
+  const byEndpoint = new Map<string, CustomModelSessionLike[]>();
+  for (const session of sessions) {
+    if (!session.customModel) continue;
+    const group = byEndpoint.get(session.customModel.endpointId);
+    if (group) group.push(session);
+    else byEndpoint.set(session.customModel.endpointId, [session]);
+  }
+  if (byEndpoint.size === 0) return [];
+
+  const hosts = await readCustomModelHosts(getDataDir());
+  const displacements: CustomModelSwapDisplacement[] = [];
+
+  for (const [endpointId, group] of byEndpoint) {
+    const host = hosts.find((h) => h.id === endpointId);
+    if (!host) continue; // endpoint deleted since these sessions were created — nothing to check
+    let status: LlamaSwapStatus;
+    try {
+      status = await getLlamaSwapStatus(host);
+    } catch {
+      continue; // unreachable this cycle — try again next tick, not fatal to the sweep
+    }
+    // Not llama-swap (feature-detected) or nothing loaded at all: nothing has been evicted,
+    // by construction — a plain llama.cpp/OpenAI-compatible server only ever runs the one
+    // model it was started with, so there is no "current model" to conflict with.
+    if (!status.isLlamaSwap || status.running.length === 0) continue;
+    const currentlyLoaded = status.running.find((r) => r.state === 'ready')?.model ?? status.running[0]?.model;
+    if (!currentlyLoaded) continue;
+
+    for (const session of group) {
+      const modelId = session.customModel!.modelId;
+      const stillLoaded = status.running.some((r) => r.model === modelId);
+      if (stillLoaded) {
+        notifiedSessionIds.delete(session.id); // back to normal — a future eviction can notify again
+        continue;
+      }
+      if (notifiedSessionIds.has(session.id)) continue; // already told them once for this displacement
+      notifiedSessionIds.add(session.id);
+      displacements.push({
+        sessionId: session.id,
+        sessionName: session.name,
+        endpointId,
+        previousModel: modelId,
+        currentlyLoadedModel: currentlyLoaded,
+      });
+    }
+  }
+  return displacements;
+}
+
 export function registerCustomModelRoutes(app: FastifyInstance): void {
   app.get('/api/model-endpoints', async (req): Promise<RedactedHost[]> => {
     if (isMultiUserMode() && !isAdmin(req)) return [];

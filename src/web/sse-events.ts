@@ -5,7 +5,7 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * 158 event constants organized by category:
+ * 159 event constants organized by category:
  * - **Core** (1): init
  * - **Transport** (1): sse:heartbeat
  * - **Session lifecycle** (23): created, updated, deleted, terminal, idle, working, ...
@@ -28,6 +28,7 @@
  * - **Hooks** (10): idle_prompt, permission_prompt, elicitation_dialog, elicitation_complete, elicitation_response, stop, agent_working, teammate_idle, task_completed, prompt_submitted
  *   (agent_working is the odd one out: reported by the DeepSeek Harness status bridge, not by a Claude Code hook)
  * - **Approvals** (3): pending, updated, resolved (cross-session Approvals Inbox)
+ * - **Custom Model Endpoint Profiles** (1): swapped-out (a session's model got evicted by another session on the same llama-swap endpoint)
  * - **Orchestrator** (12): stateChanged, planProgress, planReady, phase*, verification, task*, completed, error
  * - **Clipboard** (1): write
  * - **Cases** (4): created, linked, deleted, order-changed
@@ -384,6 +385,19 @@ export const ApprovalUpdated = 'approval:updated' as const;
 /** A pending approval left the inbox (answered, superseded, expired, ...). */
 export const ApprovalResolved = 'approval:resolved' as const;
 
+// ─── Custom Model Endpoint Profiles ──────────────────────────────────────────
+
+/**
+ * A session's own custom-model selection is no longer the model llama-swap has loaded —
+ * ANOTHER session's activity on the same endpoint evicted it (llama.cpp/llama-swap runs
+ * one model at a time). Detected after the fact by a periodic sweep (`server.ts`), never
+ * at the moment of eviction itself, since llama-swap has no push notification of its own;
+ * this session's next prompt will trigger reloading its model, evicting whatever displaced
+ * it in turn. Fires at most once per displacement (cleared once the sweep sees the
+ * session's own model loaded again), so it can't spam on every sweep interval.
+ */
+export const CustomModelSwappedOut = 'custom-model:swapped-out' as const;
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 /** Orchestrator state machine transitioned. */
@@ -637,6 +651,9 @@ export const SseEvent = {
   ApprovalPending,
   ApprovalUpdated,
   ApprovalResolved,
+
+  // Custom Model Endpoint Profiles
+  CustomModelSwappedOut,
 
   // Orchestrator
   OrchestratorStateChanged,

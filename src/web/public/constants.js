@@ -1094,6 +1094,9 @@ const SSE_EVENTS = {
   APPROVAL_UPDATED: 'approval:updated',
   APPROVAL_RESOLVED: 'approval:resolved',
 
+  // Custom Model Endpoint Profiles
+  CUSTOM_MODEL_SWAPPED_OUT: 'custom-model:swapped-out',
+
   // Subagents (Claude Code background agents)
   SUBAGENT_DISCOVERED: 'subagent:discovered',
   SUBAGENT_UPDATED: 'subagent:updated',

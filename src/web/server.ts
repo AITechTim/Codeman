@@ -191,6 +191,7 @@ import {
   registerTabLayoutRoutes,
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
+  detectCustomModelSwapDisplacements,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { isLostWebviewFrameNavigation } from './webview-proxy.js';
@@ -204,6 +205,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SSE_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const CODEX_USAGE_POLL_INTERVAL_MS = 5 * 60_000;
 const CUSTOM_MODEL_REDISCOVER_INTERVAL_MS = 5 * 60_000;
+// Much shorter than the model-LIST refresh above on purpose: this catches an actual
+// eviction (a session's model no longer loaded, silently swapped out by another
+// session's use), which the user wants to know about promptly, not once every 5
+// minutes. Cheap either way — one /running GET per distinct endpoint with at least
+// one live custom-model session, not per session.
+const CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS = 20_000;
 
 function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -281,6 +288,8 @@ export class WebServer extends EventEmitter {
   // Store session listener references for explicit cleanup (prevents memory leaks)
   private sessionListenerRefs: Map<string, SessionListenerRefs> = new Map();
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
+  /** De-dupe state for the swap-displacement sweep — see detectCustomModelSwapDisplacements. */
+  private _customModelDisplacedNotified: Set<string> = new Set();
   /** Cron service (assigned in setupRoutes). */
   private cronService!: CronService;
   private sse: SseStreamManager;
@@ -1316,6 +1325,10 @@ export class WebServer extends EventEmitter {
     if (session) {
       session.ralphTracker.stopWatchingFixPlan();
     }
+
+    // Custom Model Endpoint Profiles: drop this session's swap-displacement notify flag
+    // (see _checkCustomModelSwapDisplacements below) so it can't linger in that Set forever.
+    this._customModelDisplacedNotified.delete(sessionId);
 
     // Kill all subagents spawned by this session (scoped to sessionId to avoid cross-session kills)
     if (session && killMux) {
@@ -2752,6 +2765,32 @@ export class WebServer extends EventEmitter {
         },
         CUSTOM_MODEL_REDISCOVER_INTERVAL_MS,
         { description: 'custom model endpoint re-discovery' }
+      );
+    }
+
+    // Custom Model Endpoint Profiles: the swap-conflict check on the apply/create routes
+    // only ever runs at THAT session's own launch/apply moment — it cannot catch a LATER
+    // eviction triggered by a different session's normal use, since llama-swap has no push
+    // notification of its own and only swaps in response to a real inference request
+    // (confirmed live: a session created while nothing else conflicted at that instant can
+    // still get silently displaced afterward). This periodic sweep is what catches that
+    // case after the fact and tells the displaced session's user, rather than leaving them
+    // to discover it only when their next prompt behaves unexpectedly.
+    if (!this.testMode) {
+      this.cleanup.setInterval(
+        () => {
+          detectCustomModelSwapDisplacements(this.sessions.values(), this._customModelDisplacedNotified)
+            .then((displacements) => {
+              for (const displacement of displacements) {
+                this.broadcast(SseEvent.CustomModelSwappedOut, displacement);
+              }
+            })
+            .catch((err) => {
+              console.error('[custom-model] swap-displacement check failed:', getErrorMessage(err));
+            });
+        },
+        CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS,
+        { description: 'custom model swap-displacement check' }
       );
     }
 

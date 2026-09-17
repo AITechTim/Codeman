@@ -89,6 +89,16 @@ error telling you to check the llama-swap server's own logs, and **the session t
 for is closed automatically** — a console left open and pointed at a model that never
 finished loading would just be confusing to leave sitting there.
 
+**You'll also be told if a session's model gets swapped out from under it later, not just
+at launch.** The conflict warning above only fires at the moment you launch or apply a
+model — llama.cpp only runs one model at a time, so if a DIFFERENT session using the same
+endpoint later triggers its own load, whatever was loaded before (including a session you
+already had running) gets silently evicted, with no warning at that instant since nothing
+conflicted when it was first set up. A background check (every 20 seconds) catches this
+after the fact and shows a toast naming which session lost its model and what's loaded now
+— so you know before typing into that session that it's about to reload (and, in turn,
+evict whatever displaced it).
+
 **Claude Code specifically gets three extra fixes applied automatically:**
 
 - Its discovered context length (see above) is passed through as
