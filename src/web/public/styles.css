@@ -6828,11 +6828,17 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
 /* Custom Model Endpoint Profiles: llama-swap model-swap confirmation — replaces a native
    confirm() popup (docs/custom-model-endpoints-plan.md) so it looks and feels like the
    rest of the app instead of a browser chrome dialog. Shares the context-window-too-small
-   modal's two fixes below since both can appear mid-launch, in the same spot, for the
-   same reason. */
-#customModelSwapConfirmModal .modal-footer {
+   modal's fixes below since both can appear mid-launch, in the same spot, for the same
+   reason — including this rule itself: there is no bare `.modal-footer` base style
+   anywhere in this file, and `.btn-toolbar` is `display: flex` (a block-level flex
+   container with no explicit `inline-flex`), so with no row layout of its own each
+   button took its own full-width line and the two stacked instead of sitting side by
+   side. Centred rather than flex-end per feedback — a two-button Cancel/confirm footer
+   reads better centred than pinned to one edge. */
+#customModelSwapConfirmModal .modal-footer,
+#customModelContextWarningModal .modal-footer {
   display: flex;
-  justify-content: flex-end;
+  justify-content: center;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
   border-top: 1px solid var(--border-color);
