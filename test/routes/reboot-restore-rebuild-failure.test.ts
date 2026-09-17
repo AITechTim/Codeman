@@ -4,10 +4,15 @@
  * The other route test file deliberately uses workspaces that do not exist, so it
  * never reaches `new Session()`. This one mocks the `Session` module so the route
  * runs its whole construction path — `addSession`, `setupSessionListeners`,
- * `reapplyPersistedSessionState`, `startInteractive` — and then throws where a
- * real one would when the CLI binary is missing from a freshly booted machine's
- * PATH. Without the mock there is no way to exercise that path, which is how the
- * original version of this route shipped a session leak the tests could not see.
+ * `reapplyPersistedSessionState`, `startInteractive` — and then throws.
+ *
+ * The mock is the only way in. Driven against a real server, `startInteractive()`
+ * does not throw for either obvious cause: the CLI resolver finds its binary by
+ * absolute path rather than through PATH, and tmux falls back to another
+ * directory rather than failing when it cannot enter the workspace. A mux-layer
+ * failure is what is left, and it cannot be provoked from a test. Without the
+ * mock this path would go unexercised, which is how the original version of this
+ * route shipped a session leak the tests could not see.
  *
  * It also covers the session caps, because those too are only reachable once the
  * route is actually willing to build something.

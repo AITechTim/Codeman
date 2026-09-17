@@ -220,8 +220,14 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           // One entry that will not start must not stop the rest of the pass, and
           // must not leave a registered session with no pane behind it: by this
           // point the session is in `ctx.sessions`, holds a tab-layout slot and has
-          // listeners, and the commonest cause is a CLI binary that is not on the
-          // PATH of a freshly booted machine.
+          // listeners.
+          //
+          // Reaching this is rarer than it looks, measured against a real server:
+          // the CLI resolver finds its binary by absolute path rather than through
+          // PATH, and tmux falls back to another directory rather than failing when
+          // it cannot enter the workspace, so neither of the two obvious "freshly
+          // booted machine" failures throws. What is left is the mux layer itself
+          // failing, which is why this path is defended rather than expected.
           console.error(`[reboot-restore] failed to rebuild ${entry.sessionId}:`, err);
           // Not cleanupSession(): that is the user-initiated delete, and it would
           // count this session's historical tokens into the lifetime totals, demote
