@@ -192,6 +192,7 @@ import {
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
   detectCustomModelSwapDisplacements,
+  pruneIdleLlamaSwapLogTails,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { isLostWebviewFrameNavigation } from './webview-proxy.js';
@@ -2788,6 +2789,10 @@ export class WebServer extends EventEmitter {
             .catch((err) => {
               console.error('[custom-model] swap-displacement check failed:', getErrorMessage(err));
             });
+          // Same cadence, unrelated concern: close any /logs tail (see
+          // getLatestLlamaSwapLogLine) nothing has polled in a while, so a loading banner
+          // that finished (or was abandoned) doesn't leave a connection open forever.
+          pruneIdleLlamaSwapLogTails();
         },
         CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS,
         { description: 'custom model swap-displacement check' }

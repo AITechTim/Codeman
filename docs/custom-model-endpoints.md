@@ -120,6 +120,29 @@ where to look, and the session the load was for is closed automatically —
 a console left open and pointed at a model that never finished loading is
 worse than no console at all.
 
+**The banner's second line is the real backend log line, not a guess.**
+llama-swap's `GET /api/events` SSE stream carries the actual `llama-server`
+process's own stdout — `load_model: loading model '<path>'`,
+`llama_server: model loaded`, tokenizer warnings, all of it — tagged
+`source: "upstream"`, distinct from llama-swap's own `source: "proxy"`
+request-access lines. `running-status`'s response now includes `logLine`
+(via `getLatestLlamaSwapLogLine`), and the banner shows it under the
+countdown, e.g. "llama.cpp: load_model: loading model '...'" — confirmed
+live end-to-end through a real forced swap, sequentially showing the model
+path, a tokenizer warning, then staying on whatever llama.cpp last printed
+once the load goes quiet (never cleared back to blank). ⚠️ **`GET /logs`
+— the endpoint this feature's own first cut was built against — turns out
+to carry ONLY llama-swap's own proxy request-access log.** Confirmed live
+it never showed a single backend line, even seconds after a real, verified
+model swap; `/api/events`'s `logData` frames are the only source that
+actually has it, and its own `source` field (`upstream` vs `proxy`) is
+what `getLatestLlamaSwapLogLine` filters on. One `/api/events` connection
+is held open per endpoint and reused across every session watching a load
+on it (confirmed live to stay open indefinitely, unlike `/logs`, which
+closes after a fixed ~100KB), idle-closed after 30s of nobody polling it
+(`pruneIdleLlamaSwapLogTails`, same 20s sweep as the swap-displacement
+check below).
+
 `defaultModelId` names which discovered model the picker pre-marks for that
 endpoint — the settings panel's Edit form exposes it as a select populated
 from the endpoint's own discovered `models`, and the route refuses a value

@@ -626,6 +626,54 @@ describe('Custom Model Endpoint Profiles: _watchLlamaSwapLoading polling', () =>
     expect(toastCalls.at(-1)).toMatch(/ready/i);
   });
 
+  it('adds a second line with the real llama.cpp log line once one is available, stripped of the bootlog prefix', async () => {
+    const { app } = bootApp({});
+    const bannerMessages: string[] = [];
+    app._showCenterStatus = (message: string) => {
+      bannerMessages.push(message);
+      return { dismiss: () => {}, setMessage: (next: string) => bannerMessages.push(next) };
+    };
+    app.showToast = () => {};
+    let statusCalls = 0;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints') return null; // size lookup — unrelated to this test
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        return {
+          isLlamaSwap: true,
+          running: [{ model: 'qwen3', state: 'starting' }],
+          logLine: '0.31.428.568 I srv  llama_server: model loaded',
+        };
+      }
+      return { isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] };
+    };
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+
+    // First render (before any poll has landed) has no log line at all.
+    expect(bannerMessages[0]).not.toMatch(/llama\.cpp:/);
+    // Second render carries the log line, bootlog prefix (timestamp/level/component) stripped.
+    const withLogLine = bannerMessages.find((m) => m.includes('llama.cpp:'));
+    expect(withLogLine).toContain('llama.cpp: llama_server: model loaded');
+    expect(withLogLine).not.toContain('0.31.428.568');
+    expect(withLogLine).not.toContain(' I srv');
+  });
+
+  it('shows no second line at all when the endpoint has no logLine to offer', async () => {
+    const { app } = bootApp({});
+    const bannerMessages: string[] = [];
+    app._showCenterStatus = (message: string) => {
+      bannerMessages.push(message);
+      return { dismiss: () => {}, setMessage: (next: string) => bannerMessages.push(next) };
+    };
+    app.showToast = () => {};
+    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
+
+    await app._watchLlamaSwapLoading('llama-box', 'qwen3', 'sess-1', 5, 200);
+
+    expect(bannerMessages.some((m) => m.includes('llama.cpp:'))).toBe(false);
+  });
+
   it('gives up after the bounded wait, turns the banner into a sticky error, and closes the session', async () => {
     const { app } = bootApp({});
     const banners: Array<{ message: string; opts: unknown }> = [];

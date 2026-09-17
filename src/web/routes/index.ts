@@ -31,6 +31,7 @@ export {
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
   detectCustomModelSwapDisplacements,
+  pruneIdleLlamaSwapLogTails,
   type CustomModelSessionLike,
   type CustomModelSwapDisplacement,
 } from './custom-model-routes.js';

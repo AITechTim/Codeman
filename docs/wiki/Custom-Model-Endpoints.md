@@ -89,6 +89,14 @@ error telling you to check the llama-swap server's own logs, and **the session t
 for is closed automatically** — a console left open and pointed at a model that never
 finished loading would just be confusing to leave sitting there.
 
+**The banner also shows a real, live second line of what llama.cpp itself is doing** — not
+a made-up progress phase, the actual next line the `llama-server` process printed, e.g.
+"llama.cpp: load_model: loading model '/models/.../Qwen3.8-27B.gguf'" then later
+"llama.cpp: llama_server: model loaded". It comes straight from llama-swap's own event
+feed, filtered down to just the backend process's own output (not llama-swap's own request
+logging), and stays on whatever it last said once the load goes quiet, rather than
+clearing back to nothing.
+
 **You'll also be told if a session's model gets swapped out from under it later, not just
 at launch.** The conflict warning above only fires at the moment you launch or apply a
 model — llama.cpp only runs one model at a time, so if a DIFFERENT session using the same

@@ -1044,6 +1044,19 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Strips llama.cpp's own bootlog prefix (`<uptime> <I|W|E> <component>  `, e.g.
+   * `0.31.428.568 I srv  llama_server: model loaded`) for display, leaving just
+   * `llama_server: model loaded` — the raw line from the server is kept as-is
+   * (`GET .../running-status`'s `logLine` field), this trims it only for the loading
+   * banner's second line. Defensive: a line that doesn't match this shape (a different
+   * llama.cpp build, or llama-swap's own format changing) is shown verbatim rather than
+   * mangled or dropped.
+   */
+  _formatLlamaLogLine(line) {
+    return typeof line === 'string' ? line.replace(/^[\d.]+\s+[IWE]\s+\S+\s+/, '') : line;
+  },
+
+  /**
    * Polls llama-swap's own `/running` (via the read-only running-status route) until
    * `modelId` reports `state: 'ready'`, showing a sticky banner with a live countdown the
    * whole time so a slow unload/reload (measured well over a minute for a large model)
@@ -1082,10 +1095,19 @@ Object.assign(CodemanApp.prototype, {
       ? ` (${sizeGB.toFixed(1)} GB${estimate ? `, typically ${estimate.label}` : ''})`
       : '';
     const baseMessage = `Loading ${modelId}${sizeSuffix} on ${endpointId} —`;
+    // Second line, when llama-swap's /logs actually gives us one: the real backend
+    // llama-server process's own latest log line (load_model:/llama_server: ..., see
+    // getLatestLlamaSwapLogLine) — a countdown alone says "something is happening,
+    // trust me," this says what. Absent on the very first render (no poll has landed
+    // yet) and whenever the endpoint doesn't expose /logs at all — never fabricated.
+    const buildMessage = (remainingMs, logLine) => {
+      const line = this._formatLlamaLogLine(logLine);
+      return `${baseMessage} ${this._formatRemaining(remainingMs)}` + (line ? `\nllama.cpp: ${line}` : '');
+    };
     // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
     // sit on screen for well over a minute, easy to mistake for nothing happening there.
     const deadline = Date.now() + effectiveMaxWaitMs;
-    const toast = this._showCenterStatus(`${baseMessage} ${this._formatRemaining(deadline - Date.now())}`);
+    const toast = this._showCenterStatus(buildMessage(deadline - Date.now()));
     while (Date.now() < deadline) {
       const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
       if (!isCurrent()) return; // a newer launch took over the banner — this loop is done
@@ -1102,7 +1124,7 @@ Object.assign(CodemanApp.prototype, {
         return;
       }
       if (!isCurrent()) return;
-      toast?.setMessage(`${baseMessage} ${this._formatRemaining(deadline - Date.now())}`);
+      toast?.setMessage(buildMessage(deadline - Date.now(), status?.logLine));
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
     if (!isCurrent()) return;

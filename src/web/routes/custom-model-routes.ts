@@ -334,6 +334,161 @@ export async function getLlamaSwapStatus(
   }
 }
 
+interface LlamaSwapLogTail {
+  latestLine?: string;
+  lastAccessedAt: number;
+  controller: AbortController;
+}
+
+/** One open `/api/events` tail per endpoint, keyed by host id — see `getLatestLlamaSwapLogLine`. */
+const llamaSwapLogTails = new Map<string, LlamaSwapLogTail>();
+
+/** A tail nothing has asked about in this long is closed by the next `pruneIdleLlamaSwapLogTails` sweep. */
+const LOG_TAIL_IDLE_MS = 30_000;
+
+/**
+ * Parses one `data: {...}` payload from llama-swap's `GET /api/events` SSE stream and
+ * returns the backend (never llama-swap's own proxy) log text it carries, or `undefined`
+ * for anything else (a different event `type`, a malformed frame, a proxy-sourced one).
+ *
+ * The real shape, confirmed live against a real llama-swap deployment — NOT documented
+ * anywhere the plan doc's original research found, and genuinely surprising the first
+ * time around: `GET /logs` (the endpoint that name suggests, and this feature's own
+ * first cut was built against) turns out to carry ONLY llama-swap's own proxy
+ * request-access log — it never once showed a single backend line even seconds after a
+ * real, confirmed model swap. The backend llama-server process's actual stdout
+ * (`load_model: ...`, `llama_server: model loaded`) only ever showed up in `/api/events`,
+ * as `{"type":"logData","data":"<JSON-string>"}` whose OWN `data` field parses to a
+ * second object, `{"data": "<newline-joined log text>", "source": "proxy" | "upstream"}`
+ * — `source` is the exact, explicit distinguisher (`upstream` = the backend process,
+ * `proxy` = llama-swap's own line), not a guessed regex against the text itself.
+ */
+function parseBackendLogDataEvent(dataLine: string): string | undefined {
+  let outer: unknown;
+  try {
+    outer = JSON.parse(dataLine);
+  } catch {
+    return undefined;
+  }
+  if (
+    !outer ||
+    typeof outer !== 'object' ||
+    (outer as { type?: unknown }).type !== 'logData' ||
+    typeof (outer as { data?: unknown }).data !== 'string'
+  ) {
+    return undefined;
+  }
+  let inner: unknown;
+  try {
+    inner = JSON.parse((outer as { data: string }).data);
+  } catch {
+    return undefined;
+  }
+  if (
+    !inner ||
+    typeof inner !== 'object' ||
+    (inner as { source?: unknown }).source !== 'upstream' ||
+    typeof (inner as { data?: unknown }).data !== 'string'
+  ) {
+    return undefined;
+  }
+  return (inner as { data: string }).data;
+}
+
+/**
+ * Reads `GET /api/events` forever (until `entry.controller` aborts it), updating
+ * `entry.latestLine` with the most recent BACKEND log line seen (see
+ * `parseBackendLogDataEvent`). Fire-and-forget: the caller never awaits this — it runs
+ * for the tail's whole lifetime in the background, and `getLatestLlamaSwapLogLine` just
+ * reads whatever `entry.latestLine` currently holds. SSE frames are separated by a blank
+ * line (`\n\n`), buffered the same way `/running`'s NDJSON-shaped siblings buffer partial
+ * chunks — a frame split across two `reader.read()` calls must not be parsed early.
+ */
+async function pumpLlamaSwapLogTail(
+  host: Pick<CustomModelHost, 'id' | 'baseUrl' | 'apiKey' | 'authStyle'>,
+  entry: LlamaSwapLogTail
+): Promise<void> {
+  try {
+    const res = await webviewFetch(new URL(`${host.baseUrl.replace(/\/+$/, '')}/api/events`), {
+      headers: authHeaders(host),
+      signal: entry.controller.signal,
+    });
+    if (!res.ok || !res.body) return;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
+        const dataLine = frame.split('\n').find((l) => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const backendText = parseBackendLogDataEvent(dataLine.slice('data:'.length));
+        if (!backendText) continue;
+        const lines = backendText.split('\n').filter((l) => l.trim());
+        if (lines.length > 0) entry.latestLine = lines[lines.length - 1]!.trim();
+      }
+    }
+  } catch {
+    // connection dropped / aborted / endpoint unreachable — a future access starts fresh
+  } finally {
+    llamaSwapLogTails.delete(host.id);
+  }
+}
+
+/**
+ * Real-time "what is llama.cpp actually doing right now" for the loading banner
+ * (docs/custom-model-endpoints-plan.md): llama-swap's `GET /api/events` SSE stream
+ * carries the backend llama-server process's own stdout — `load_model: loading model
+ * '<path>'`, `load_model: initializing, n_slots = N, n_ctx_slot = N`, `llama_server:
+ * model loaded`, etc — tagged `source: "upstream"`, distinct from llama-swap's own
+ * `source: "proxy"` request-access lines (see `parseBackendLogDataEvent`). Confirmed
+ * live against a real llama-swap deployment, including through an actual forced model
+ * swap end-to-end.
+ *
+ * Held OPEN per endpoint rather than re-opened on every 1s poll — confirmed live to stay
+ * open indefinitely (read past 220KB over 8 seconds with no `done`), unlike `/logs`
+ * (see `parseBackendLogDataEvent`'s doc comment), so reconnecting each poll would be
+ * pure waste. One connection is reused across every session currently watching a load on
+ * that endpoint; since llama.cpp/llama-swap only ever runs one model at a time, a line
+ * seen while a load is in flight is safe to attribute to that load (a deployment that
+ * could load several models concurrently would need a per-model tag this format doesn't
+ * provide).
+ *
+ * Lazily started on first access and idle-closed rather than left open forever — see
+ * `pruneIdleLlamaSwapLogTails`.
+ */
+export function getLatestLlamaSwapLogLine(
+  host: Pick<CustomModelHost, 'id' | 'baseUrl' | 'apiKey' | 'authStyle'>
+): string | undefined {
+  let entry = llamaSwapLogTails.get(host.id);
+  if (!entry) {
+    entry = { lastAccessedAt: Date.now(), controller: new AbortController() };
+    llamaSwapLogTails.set(host.id, entry);
+    void pumpLlamaSwapLogTail(host, entry);
+  }
+  entry.lastAccessedAt = Date.now();
+  return entry.latestLine;
+}
+
+/**
+ * Closes any log tail nothing has called `getLatestLlamaSwapLogLine` about in
+ * `LOG_TAIL_IDLE_MS` — a stream nobody is polling is an open connection with nothing to
+ * show for it. Called from the same periodic sweep as `detectCustomModelSwapDisplacements`
+ * in server.ts, not its own timer.
+ */
+export function pruneIdleLlamaSwapLogTails(now = Date.now()): void {
+  for (const [id, entry] of llamaSwapLogTails) {
+    if (now - entry.lastAccessedAt > LOG_TAIL_IDLE_MS) {
+      entry.controller.abort();
+      llamaSwapLogTails.delete(id);
+    }
+  }
+}
+
 /**
  * Actually kicks off llama-swap's lazy model load, rather than waiting for the launched
  * CLI's own first prompt to do it. llama-swap has no separate "switch model" admin
@@ -601,14 +756,21 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
   // Read-only, no admin gate: any session owner who can already point their own session
   // at this endpoint (POST .../custom-model, ungated by design — see session-routes.ts)
   // can equally ask what it currently has loaded, before or while that apply is pending.
-  app.get('/api/model-endpoints/:id/running-status', async (req): Promise<ApiResponse<LlamaSwapStatus>> => {
-    const { id } = req.params as { id: string };
-    const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
-    const host = hosts.find((item) => item.id === id);
-    if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
-    if (isBlockedWebviewUrl(host.baseUrl)) {
-      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Endpoint base URL is not allowed');
+  app.get(
+    '/api/model-endpoints/:id/running-status',
+    async (req): Promise<ApiResponse<LlamaSwapStatus & { logLine?: string }>> => {
+      const { id } = req.params as { id: string };
+      const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
+      const host = hosts.find((item) => item.id === id);
+      if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+      if (isBlockedWebviewUrl(host.baseUrl)) {
+        return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Endpoint base URL is not allowed');
+      }
+      const status = await getLlamaSwapStatus(host);
+      // Only worth tailing /logs once llama-swap is actually confirmed — a plain
+      // llama.cpp/OpenAI-compatible server has no such endpoint at all.
+      const logLine = status.isLlamaSwap ? getLatestLlamaSwapLogLine(host) : undefined;
+      return { success: true, data: { ...status, logLine } };
     }
-    return { success: true, data: await getLlamaSwapStatus(host) };
-  });
+  );
 }
