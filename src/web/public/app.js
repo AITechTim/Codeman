@@ -1921,6 +1921,16 @@ class CodemanApp {
    * the moment the response arrived, compared only against other client-side
    * readings, so there is no clock skew to worry about.
    *
+   * What this cutoff does NOT cover: the server appends output to the byte
+   * buffer and emits it in the same tick, but it BROADCASTS on a batch timer —
+   * 8ms over WebSocket, 16 to 50ms over SSE. The terminal route runs
+   * synchronously from `capture-pane` to its return, so a batch that was
+   * already pending when the capture ran leaves the server after the reply,
+   * arrives after `headersReceivedAt`, and is replayed although the capture
+   * holds it. The duplicate is one batch interval wide, against a recovery
+   * window that spans the whole chunked write. Closing it belongs on the
+   * server: flush that session's pending batch before taking the capture.
+   *
    * @param {{source?: string}} payload - The parsed `data` of a terminal response.
    * @param {number} headersReceivedAt - When that response reached this client.
    * @returns {{flushQueued: boolean, since: number}} Options for `_finishBufferLoad`.
@@ -2557,6 +2567,10 @@ class CodemanApp {
         });
         if (target === null || typeof this.terminal.scrollToLine !== 'function') this.terminal.scrollToBottom();
         else this.terminal.scrollToLine(target);
+        // The load's own replay sampled the sticky-scroll baseline while the
+        // terminal sat at the bottom of a just-rewritten buffer, so the next
+        // flush would scroll back down and undo the restore above.
+        this._syncStickyScrollBaseline();
         // Re-position local echo overlay at new prompt location
         this._localEchoOverlay?.rerender();
         // Resize PTY to match actual browser dimensions (critical for OpenCode
@@ -5842,6 +5856,12 @@ class CodemanApp {
       const delta = parsedBufferLength - rowsBefore;
       if (delta > 0) this.terminal.scrollToLine(delta);
       else this.terminal.scrollToTop();
+      // The load's own replay sampled the sticky-scroll baseline while the
+      // terminal sat at the bottom of a just-rewritten buffer, so the next
+      // flush would scroll back down and undo the restore above. This path is
+      // reached only from a scroll-up gesture, so being dragged down is the
+      // exact opposite of what the user asked for.
+      this._syncStickyScrollBaseline();
       timing.totalMs = performance.now() - requestStartedAt;
       this._recordTerminalLoadTiming(timing);
     } catch {

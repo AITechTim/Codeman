@@ -3131,6 +3131,27 @@ Object.assign(CodemanApp.prototype, {
     return buffer.viewportY >= buffer.baseY - 2;
   },
 
+  /**
+   * Re-take the sticky-scroll baseline from where the viewport now sits.
+   *
+   * `batchTerminalWrite` samples `_wasAtBottomBeforeWrite` before it queues
+   * data, and `flushPendingWrites` scrolls to the bottom off that sample. A
+   * buffer load that replays its queue samples at the worst possible moment:
+   * `_finishBufferLoad` runs inside `chunkedTerminalWrite`, before its promise
+   * resolves, with the terminal freshly reset and rewritten, so the sample is
+   * always true. A caller that then restores the reader's position would have
+   * that restore undone by the next flush.
+   *
+   * Every caller that scrolls the viewport somewhere other than the bottom
+   * after a load must call this, so the baseline describes the position the
+   * caller chose. `selectSession` and `_onSessionClearTerminal` deliberately
+   * end at the bottom, so for them the sampled true is already the truth and
+   * they do not call it.
+   */
+  _syncStickyScrollBaseline() {
+    this._wasAtBottomBeforeWrite = this.isTerminalAtBottom();
+  },
+
   // Record manual scroll gestures so sticky-scroll can give an upward scroll a
   // short grace window (see _hasRecentUserScrollUp). A downward scroll that
   // lands back at the bottom clears the suppression immediately.

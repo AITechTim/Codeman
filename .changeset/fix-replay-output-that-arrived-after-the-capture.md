@@ -34,3 +34,18 @@ takes the flush policy and applies it at its own finish sites.
 `_beginBufferLoad` no longer empties the queue when the same load re-enters it,
 which it does on every write, because that reset discarded the fetch window
 before anything could replay it.
+
+A path that replays its queue and then restores a scroll position re-takes the
+sticky-scroll baseline (`_syncStickyScrollBaseline`). The replay runs with the
+terminal freshly reset, so it reads as sitting at the bottom, and the next flush
+would scroll there and undo the restore. The backpressure refresh and the
+full-history re-pull are the two paths that restore a position, and both are
+ones a reader reaches while scrolled up.
+
+One duplicate window stays open and is not closable from the browser. The server
+appends output to the byte buffer in the same tick it emits, but broadcasts on a
+batch timer, 8ms over WebSocket and 16 to 50ms over SSE. A batch already pending
+when `capture-pane` ran therefore leaves the server after the reply and is
+replayed although the capture holds it. It is one batch interval wide, against a
+recovery window that spans the whole chunked write, and closing it means
+flushing that session's pending batch before taking the capture.

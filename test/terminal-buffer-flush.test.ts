@@ -85,6 +85,50 @@ function makeApp() {
 }
 
 /**
+ * A stub carrying the REAL `batchTerminalWrite` on top of the real begin/finish
+ * methods, so a replay samples the sticky-scroll baseline exactly as it does in
+ * the browser. The terminal is a fake whose `buffer.active` the test moves by
+ * hand, which is what a caller's `scrollToLine` does to a real one.
+ */
+function makeScrollApp() {
+  const buffer = { viewportY: 0, baseY: 100 };
+  const app = {
+    buffer,
+    terminal: { buffer: { active: buffer } },
+    sessions: new Map(),
+    activeSessionId: null,
+    pendingWrites: [] as string[],
+    writeFrameScheduled: false,
+    _wasAtBottomBeforeWrite: false,
+    _bufferLoadSeq: 0,
+    _bufferLoadOwner: null as string | null,
+    _isLoadingBuffer: false,
+    _loadBufferQueue: null as { at: number; data: string }[] | null,
+    _scheduleTerminalWriteFlush: vi.fn(),
+    batchTerminalWrite: mixin.batchTerminalWrite as (data: string) => void,
+    isTerminalAtBottom: mixin.isTerminalAtBottom as () => boolean,
+    _syncStickyScrollBaseline: mixin._syncStickyScrollBaseline as () => void,
+    _beginBufferLoad: mixin._beginBufferLoad as BufferLoadApp['_beginBufferLoad'],
+    _finishBufferLoad: mixin._finishBufferLoad as BufferLoadApp['_finishBufferLoad'],
+  };
+  return app;
+}
+
+/**
+ * Slice one class method out of app.js, from its header to the next method's.
+ *
+ * Bounding the slice matters: the two methods checked below are not followed by
+ * a JSDoc block, so a scan for the next comment would run on into unrelated
+ * code and match its scroll calls instead of theirs.
+ */
+function methodBody(source: string, method: string): string {
+  const start = source.search(new RegExp(`^ {2}(?:async )?${method}\\(`, 'm'));
+  expect(start, `${method} not found in app.js`).toBeGreaterThan(-1);
+  const next = /^ {2}(?:async )?[A-Za-z_$][\w$]*\(/m.exec(source.slice(start + 1));
+  return next ? source.slice(start, start + 1 + next.index) : source.slice(start);
+}
+
+/**
  * Simulate a live SSE event arriving while a buffer load is in progress.
  * Mirrors batchTerminalWrite's queue branch, which stamps each entry with its
  * arrival time so a flush can replay only the tail (see the `since` tests).
@@ -239,6 +283,60 @@ describe('buffer-load flush (COD-144)', () => {
     app._finishBufferLoad(second, { flushQueued: true, since: 0 });
 
     expect(writes).toEqual(['belongs-to-this-load']);
+  });
+
+  // ── The sticky-scroll baseline across a replay ──
+  //
+  // `batchTerminalWrite` samples `_wasAtBottomBeforeWrite` before queueing, and
+  // `flushPendingWrites` scrolls to the bottom off that sample. The replay runs
+  // inside `chunkedTerminalWrite` before its promise resolves, with the terminal
+  // freshly reset and rewritten, so the sample is always true. A caller that
+  // then restores the reader's position would have that restore undone.
+
+  it('the replay latches the baseline true, and the viewport restore re-takes it', () => {
+    const app = makeScrollApp();
+    const owner = app._beginBufferLoad('load-scroll');
+    pushWhileLoading(app as unknown as BufferLoadApp, 'output-after-the-capture', 100);
+
+    // The load ends with the terminal reset and rewritten, so it reads as bottom.
+    app.buffer.viewportY = app.buffer.baseY;
+    app._finishBufferLoad(owner, { flushQueued: true, since: 0 });
+    expect(app._wasAtBottomBeforeWrite).toBe(true);
+
+    // The caller now puts the reader back where they were reading.
+    app.buffer.viewportY = 40;
+    app._syncStickyScrollBaseline();
+
+    // The next flush must leave them there.
+    expect(app._wasAtBottomBeforeWrite).toBe(false);
+  });
+
+  it('a restore that lands back at the bottom keeps sticky scroll armed', () => {
+    const app = makeScrollApp();
+    const owner = app._beginBufferLoad('load-scroll-bottom');
+    pushWhileLoading(app as unknown as BufferLoadApp, 'output-after-the-capture', 100);
+
+    app.buffer.viewportY = app.buffer.baseY;
+    app._finishBufferLoad(owner, { flushQueued: true, since: 0 });
+    app._syncStickyScrollBaseline();
+
+    // A reader who was already at the bottom still wants to be carried along.
+    expect(app._wasAtBottomBeforeWrite).toBe(true);
+  });
+
+  it('both callers that restore a scroll position re-take the baseline', () => {
+    // The wiring lives in app.js, outside this file's vm harness. Without it the
+    // two methods below restore the viewport and the next flush undoes it.
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+
+    for (const method of ['_onSessionNeedsRefresh', '_maybeRefetchFullHistory']) {
+      const body = methodBody(source, method);
+      const restoreAt = body.lastIndexOf('scrollToLine(');
+      const syncAt = body.indexOf('this._syncStickyScrollBaseline()');
+      expect(restoreAt, `${method} no longer restores a scroll position`).toBeGreaterThan(-1);
+      expect(syncAt, `${method} never re-takes the baseline`).toBeGreaterThan(-1);
+      expect(syncAt, `${method} re-takes the baseline before its restore`).toBeGreaterThan(restoreAt);
+    }
   });
 
   it('empty queue + flushQueued is a no-op (no throw, no writes)', () => {

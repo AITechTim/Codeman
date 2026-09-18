@@ -165,6 +165,9 @@ describe('output emitted during a capture load', () => {
     context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     page = await context.newPage();
     const sessionId = await openSession(page);
+    // Without this, a failed create passes the zero-hit assertion below
+    // vacuously — nothing was loaded, so nothing was replayed.
+    expect(sessionId).toBeTruthy();
 
     expect(await runLoad(page, sessionId, 'history')).toBe(0);
 

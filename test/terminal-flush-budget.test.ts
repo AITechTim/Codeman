@@ -322,6 +322,51 @@ describe('terminal flush budget', () => {
     expect(app._bufferLoadOwner).toBe(null);
   });
 
+  // ── Which payloads end their load by replaying the queue ──
+  //
+  // A pane capture is current only up to capture time, so the tail that arrived
+  // after the response exists nowhere else and has to be replayed. The server's
+  // accumulated byte history is current up to the response, so replaying on top
+  // of it would duplicate output. `_bufferLoadFinishOpts` is the one place that
+  // decides this, for all four paths that fetch a terminal buffer and write it.
+
+  it('replays the tail for a visible-pane capture', () => {
+    const { CodemanApp } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+
+    expect(app._bufferLoadFinishOpts({ source: 'mux-visible' }, 1234)).toEqual({
+      flushQueued: true,
+      since: 1234,
+    });
+  });
+
+  it('replays the tail for a full-history capture', () => {
+    const { CodemanApp } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+
+    expect(app._bufferLoadFinishOpts({ source: 'mux-full-history' }, 1234)).toEqual({
+      flushQueued: true,
+      since: 1234,
+    });
+  });
+
+  it('discards the queue for the accumulated byte history', () => {
+    const { CodemanApp } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+
+    expect(app._bufferLoadFinishOpts({ source: 'history' }, 1234).flushQueued).toBe(false);
+  });
+
+  it('discards the queue for a payload that names no source', () => {
+    // Fails toward the safe answer: a duplicated Ink redraw corrupts the screen,
+    // while a dropped tail is repaired by the CLI's next full repaint.
+    const { CodemanApp } = loadAppHarness();
+    const app = Object.create(CodemanApp.prototype) as any;
+
+    expect(app._bufferLoadFinishOpts({}, 1234).flushQueued).toBe(false);
+    expect(app._bufferLoadFinishOpts(undefined, 1234).flushQueued).toBe(false);
+  });
+
   it('does not snap back to bottom during Codex Working redraws right after the user scrolls up', () => {
     const { app } = loadTerminalUiHarness('codex');
     const scrollToBottom = vi.fn();
