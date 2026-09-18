@@ -2373,6 +2373,7 @@ export class WebServer extends EventEmitter {
       'scheduled:',
       'team:',
       'case:',
+      'custom-model:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
       const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string } };

@@ -80,8 +80,6 @@ const ALLOWED_BRANCHES: Record<string, string> = {
   "web/routes/session-routes.ts::mode === 'pi'": 'legacy <Mode>Config plumbing',
   "web/routes/session-routes.ts::mode === 'grok'": 'legacy <Mode>Config plumbing',
   "web/routes/session-routes.ts::mode === 'deepseek'": 'legacy <Mode>Config plumbing',
-  "web/routes/session-routes.ts::mode === 'omp'":
-    'legacy <Mode>Config plumbing (custom-model launchModel merge onto ompConfig, same selection resolveOmpConfigForCreate already makes internally)',
   "web/server.ts::mode === 'opencode'": 'legacy <Mode>Config plumbing (session recovery)',
   "web/server.ts::mode === 'codex'": 'legacy <Mode>Config plumbing (session recovery)',
   "web/server.ts::mode === 'gemini'": 'legacy <Mode>Config plumbing (session recovery)',

@@ -3576,6 +3576,12 @@ export function registerSessionRoutes(
     // a lighter version of them, since this is the same server-side authority reached a
     // different way, not a separate, less-checked path.
     let qsCustomModelEnvOverrides = qsGatedEnvOverrides;
+    // Only the INJECTED keys (never the caller's envOverrides merged in) — this is what
+    // setCustomModel() bookkeeping must be given below. The Session constructor already
+    // applies qsCustomModelEnvOverrides (the full merged set) directly; re-merging that
+    // full set into setCustomModel() would put CLAUDE_CODE_EFFORT_LEVEL back after the
+    // constructor stripped it (see setCustomModel()'s own doc comment in session.ts).
+    let qsCustomModelAppliedEnvOverrides: Record<string, string> | undefined;
     let qsCustomModelLaunchModel: string | undefined;
     let qsCustomModelSessionId: string | undefined;
     let qsCustomModelSwapInProgress = false;
@@ -3670,6 +3676,7 @@ export function registerSessionRoutes(
       }
 
       qsCustomModelEnvOverrides = { ...qsGatedEnvOverrides, ...cmApplied.envOverrides };
+      qsCustomModelAppliedEnvOverrides = cmApplied.envOverrides;
       qsCustomModelLaunchModel = cmApplied.launchModel;
       qsCustomModelBookkeeping = {
         endpointId: cmEndpoint.id,
@@ -3689,7 +3696,7 @@ export function registerSessionRoutes(
       }
     }
 
-    const session = new Session({
+    const qsSessionOptions: ConstructorParameters<typeof Session>[0] = {
       id: qsCustomModelSessionId,
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
@@ -3705,23 +3712,10 @@ export function registerSessionRoutes(
       codexConfig: mode === 'codex' ? qsGatedCodexConfig : undefined,
       geminiConfig: mode === 'gemini' ? qsGatedGeminiConfig : undefined,
       antigravityConfig: mode === 'antigravity' ? qsGatedAntigravityConfig : undefined,
-      piConfig:
-        mode === 'pi'
-          ? qsCustomModelLaunchModel !== undefined
-            ? { ...(qsGatedPiConfig ?? {}), model: qsCustomModelLaunchModel }
-            : qsGatedPiConfig
-          : undefined,
-      grokConfig:
-        mode === 'grok'
-          ? qsCustomModelLaunchModel !== undefined
-            ? { ...(qsGatedGrokConfig ?? {}), model: qsCustomModelLaunchModel }
-            : qsGatedGrokConfig
-          : undefined,
+      piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
+      grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
-      ompConfig:
-        mode === 'omp' && qsCustomModelLaunchModel !== undefined
-          ? { ...(qsResolvedOmpConfig ?? {}), model: qsCustomModelLaunchModel }
-          : qsResolvedOmpConfig,
+      ompConfig: qsResolvedOmpConfig,
       envOverrides: qsCustomModelEnvOverrides,
       effort,
       remote,
@@ -3729,7 +3723,25 @@ export function registerSessionRoutes(
       resumeSessionId: dockerResumeId,
       tmuxHistoryLimit: qsTerminalHistoryConfig.tmuxHistoryLimit,
       parentSessionId: qsParentSessionId,
-    });
+    };
+    // Force the custom-model selection's launchModel (pi/omp `custom/<id>`, grok's
+    // `[model.<name>]` block name) onto whichever config field the registry says the
+    // CLI's `model` launch param lives in — mirrors Session._withCustomModelLaunchModel,
+    // which the restart-in-place path already uses, rather than a hardcoded per-CLI
+    // branch here that a CLI landing its injection recipe later would silently miss.
+    if (qsCustomModelLaunchModel !== undefined) {
+      const qsCustomModelField = getCli(mode)?.launch.legacyConfigField;
+      if (qsCustomModelField) {
+        const qsSessionOptionsBag = qsSessionOptions as unknown as Record<string, unknown>;
+        qsSessionOptionsBag[qsCustomModelField] = {
+          ...((qsSessionOptionsBag[qsCustomModelField] as Record<string, unknown>) ?? {}),
+          model: qsCustomModelLaunchModel,
+        };
+      } else {
+        qsSessionOptions.model = qsCustomModelLaunchModel;
+      }
+    }
+    const session = new Session(qsSessionOptions);
 
     // Records the selection for session.customModel/getCustomModelForPersist() and future
     // clear/switch calls — the actual env vars and launch-model config are already part of
@@ -3737,7 +3749,7 @@ export function registerSessionRoutes(
     // this is bookkeeping only, never a restart: setCustomModel() is synchronous state, no
     // tmux IO of its own (see its own doc comment in session.ts).
     if (qsCustomModelBookkeeping) {
-      session.setCustomModel(qsCustomModelBookkeeping, qsCustomModelEnvOverrides);
+      session.setCustomModel(qsCustomModelBookkeeping, qsCustomModelAppliedEnvOverrides);
     }
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting

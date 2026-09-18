@@ -108,6 +108,18 @@ function applyStoredApiKey(incoming: CustomModelHost, existing: CustomModelHost)
   return incoming.apiKey ? incoming : { ...incoming, apiKey: existing.apiKey };
 }
 
+/**
+ * `modelContextLengths`/`modelSizesGB` are server-populated by discovery, never
+ * user-entered, and PUT replaces the whole record — so merge them back in from the
+ * stored host rather than trust whatever the editor's body carried (or omitted).
+ * The editor only ever sends `models`/`lastDiscoveredAt` verbatim from its cached
+ * copy; requiring it to also round-trip these two is exactly the kind of thing a
+ * future caller forgets, same class of bug `applyStoredApiKey` exists to prevent.
+ */
+function applyDiscoveredFields(incoming: CustomModelHost, existing: CustomModelHost): CustomModelHost {
+  return { ...incoming, modelContextLengths: existing.modelContextLengths, modelSizesGB: existing.modelSizesGB };
+}
+
 function authHeaders(host: Pick<CustomModelHost, 'apiKey' | 'authStyle'>): Record<string, string> {
   const headers: Record<string, string> = {};
   const apiKey = host.apiKey?.trim();
@@ -705,7 +717,7 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
     const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
     const index = hosts.findIndex((item) => item.id === id);
     if (index === -1) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
-    const host = applyStoredApiKey(incoming, hosts[index]);
+    const host = applyDiscoveredFields(applyStoredApiKey(incoming, hosts[index]), hosts[index]);
     const next = [...hosts];
     next[index] = host;
     await writeCustomModelHosts(CODEMAN_CONFIG_DIR, next);

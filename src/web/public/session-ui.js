@@ -962,7 +962,9 @@ Object.assign(CodemanApp.prototype, {
     if (!ok || !data || data.success === false) {
       switchingToast?.dismiss();
       const detail = data?.error ? `: ${data.error}` : res ? ` (HTTP ${res.status})` : ' (request failed)';
-      this.showToast(`Session started on the native backend — could not apply the custom endpoint${detail}`, 'error');
+      this.showToast(`Session started on the native backend — could not apply the custom endpoint${detail}`, 'error', {
+        duration: 0,
+      });
       return;
     }
 
