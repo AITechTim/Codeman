@@ -341,6 +341,78 @@ describe('a capture bigger than the terminal', () => {
     await context.close();
   }, 60_000);
 
+  it('hands over text typed but not yet submitted before it replays', async () => {
+    // On a touch device the characters the user has typed live ONLY in the
+    // local-echo overlay until Enter; they have never reached the PTY. The
+    // replay re-enters `selectSession` with `forceReload` on the session that
+    // is still active, and that branch used to null `activeSessionId` before
+    // `_cleanupPreviousSession` ran, so the flush there saw no session and the
+    // unconditional `clear()` afterwards took the characters with it. Nothing
+    // the user did triggered that: the replay fires on its own the moment a
+    // tab switch finishes, which is exactly when someone typing into a
+    // still-loading terminal has text in the overlay.
+    context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    page = await context.newPage();
+    const sessionId = await openSession(page);
+
+    const fetches = { n: 0, urls: [] as string[] };
+    await stubTerminal(page, 200, fetches);
+    await consumeFullHistory(page, sessionId, fetches);
+
+    // Headless chromium reports `isTouchDevice()` false even with `hasTouch`,
+    // so the overlay would stay off and the whole case would pass vacuously.
+    // The setting is what `_updateLocalEchoState()` reads, so it survives the
+    // recompute that every select runs; the flag is forced too, for the window
+    // before the next recompute. Record what crosses into the delivery layer,
+    // which is the seam the text failed to cross.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        app: {
+          _localEchoEnabled: boolean;
+          _sendInputAsync: (id: string, text: string, opts?: unknown) => void;
+          terminal?: { focus: () => void };
+          loadAppSettingsFromStorage: () => Record<string, unknown>;
+        };
+        __sentInputs: { id: string; text: string }[];
+      };
+      const settings = w.app.loadAppSettingsFromStorage();
+      settings.localEchoEnabled = true;
+      localStorage.setItem('codeman-app-settings', JSON.stringify(settings));
+      w.app._localEchoEnabled = true;
+      w.__sentInputs = [];
+      const original = w.app._sendInputAsync.bind(w.app);
+      w.app._sendInputAsync = (id: string, text: string, opts?: unknown) => {
+        w.__sentInputs.push({ id, text });
+        return original(id, text, opts);
+      };
+      w.app.terminal?.focus();
+    });
+
+    await page.keyboard.type('hello-unsent');
+    // The premise: the characters really are sitting in the overlay, unsent.
+    // Without this the case would pass on a build where typing goes straight
+    // to the PTY and there is nothing to lose.
+    const pendingBefore = await page.evaluate(
+      () =>
+        (window as unknown as { app: { _localEchoOverlay?: { pendingText: string } } }).app._localEchoOverlay
+          ?.pendingText ?? ''
+    );
+    expect(pendingBefore).toBe('hello-unsent');
+
+    // The captured pane is taller than the terminal, so this select replays.
+    await select(page, sessionId, { forceReload: true });
+    expect(fetches.n).toBe(2);
+
+    const sent = await page.evaluate(
+      () => (window as unknown as { __sentInputs: { id: string; text: string }[] }).__sentInputs
+    );
+    expect(sent.map((s) => s.text)).toContain('hello-unsent');
+    expect(sent.find((s) => s.text === 'hello-unsent')?.id).toBe(sessionId);
+
+    await closeSession(page, sessionId);
+    await context.close();
+  }, 60_000);
+
   it('does not replay a pane already at the size the client asked for', async () => {
     // `getTerminalDimensions()` floors at 40x10 while `fitAddon.fit()` does
     // not, so a viewport this small leaves the terminal shorter than the size

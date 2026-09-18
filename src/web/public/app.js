@@ -5783,28 +5783,7 @@ class CodemanApp {
         if (ta) ta.dispatchEvent(new CompositionEvent('compositionend', { data: '' }));
       }
     } catch {}
-    // Flush local echo text to PTY before switching tabs.
-    // Send as a single batch (no Enter) so it lands in the session's readline
-    // input buffer — avoids "old text resent on Enter" and overlay render bugs.
-    // Track flushed length so _render() offsets the overlay correctly even before
-    // the PTY echo arrives in the terminal buffer.
-    if (this.activeSessionId) {
-      const echoText = this._localEchoOverlay?.pendingText || '';
-      // Include buffer-detected flushed text (from Tab completion, etc.)
-      // so it's preserved across tab switches.
-      const existingFlushed = this._localEchoOverlay?.getFlushed()?.count || 0;
-      const existingFlushedText = this._localEchoOverlay?.getFlushed()?.text || '';
-      if (echoText) {
-        this._sendInputAsync(this.activeSessionId, echoText);
-      }
-      const totalOffset = existingFlushed + echoText.length;
-      if (totalOffset > 0) {
-        if (!this._flushedOffsets) this._flushedOffsets = new Map();
-        if (!this._flushedTexts) this._flushedTexts = new Map();
-        this._flushedOffsets.set(this.activeSessionId, totalOffset);
-        this._flushedTexts.set(this.activeSessionId, existingFlushedText + echoText);
-      }
-    }
+    this._flushLocalEchoTo(this.activeSessionId);
     this._localEchoOverlay?.clear();
     // Predictions are ephemeral + already sent: nothing to save/restore
     // across a tab switch (unlike the buffer overlay's setFlushed machinery)
@@ -5816,6 +5795,45 @@ class CodemanApp {
     // re-enabling detection for tab completion and other legitimate cases.
     if (this._localEchoOverlay && !this._flushedOffsets?.has(newSessionId)) {
       this._localEchoOverlay.suppressBufferDetection();
+    }
+  }
+
+  /**
+   * Hand the local-echo overlay's unsent text to `sessionId` before anything
+   * clears it, and record what has now been flushed so `_render()` offsets the
+   * overlay correctly even before the PTY echo comes back.
+   *
+   * On a touch device the characters the user has typed live ONLY here until
+   * Enter — they have never reached the PTY — so whoever clears the overlay
+   * owes them a flush first. It is sent as one batch with no Enter, so it lands
+   * in the session's readline buffer rather than submitting a line the user has
+   * not finished.
+   *
+   * ⚠️ The session is a PARAMETER because the two callers are looking at
+   * different ones. `_cleanupPreviousSession` flushes to the tab being left,
+   * which is still `activeSessionId` when it runs. The `forceReload` branch in
+   * `selectSession` flushes to the tab being RELOADED, and must do it before it
+   * nulls `activeSessionId`: reading the field after that null is what silently
+   * dropped the text, since the guard here then saw no session and the
+   * unconditional `clear()` that follows took the characters with it.
+   * @param {string|null} sessionId
+   */
+  _flushLocalEchoTo(sessionId) {
+    if (!sessionId) return;
+    const echoText = this._localEchoOverlay?.pendingText || '';
+    // Include buffer-detected flushed text (from Tab completion, etc.)
+    // so it's preserved across tab switches.
+    const existingFlushed = this._localEchoOverlay?.getFlushed()?.count || 0;
+    const existingFlushedText = this._localEchoOverlay?.getFlushed()?.text || '';
+    if (echoText) {
+      this._sendInputAsync(sessionId, echoText);
+    }
+    const totalOffset = existingFlushed + echoText.length;
+    if (totalOffset > 0) {
+      if (!this._flushedOffsets) this._flushedOffsets = new Map();
+      if (!this._flushedTexts) this._flushedTexts = new Map();
+      this._flushedOffsets.set(sessionId, totalOffset);
+      this._flushedTexts.set(sessionId, existingFlushedText + echoText);
     }
   }
 
@@ -6093,6 +6111,13 @@ class CodemanApp {
       this._loadBufferQueue = null;
       this._terminalRefreshOwner = null;
       this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
+      // Anything typed but not yet submitted lives in the local-echo overlay and
+      // has never reached the PTY. `_cleanupPreviousSession` below flushes it,
+      // but only for a session it can still see, and the null on the next line
+      // hides this one from it. Flush first or the characters are cleared
+      // unread. The geometry replay re-enters here with no gesture behind it,
+      // so on a touch device this fires while the user is still typing.
+      this._flushLocalEchoTo(sessionId);
       this.activeSessionId = null;
     }
     // Focus terminal SYNCHRONOUSLY before any await — iOS Safari only honors
