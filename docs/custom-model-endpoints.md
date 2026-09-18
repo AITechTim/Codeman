@@ -290,7 +290,13 @@ size`. No entry for the model in `modelContextLengths` means the var is
   [`docs/wiki/Agent-CLIs.md`](wiki/Agent-CLIs.md), just applied
   automatically here. Best-effort: a platform that refuses the symlink keeps
   the pre-existing blind-response-viewer side effect rather than failing the
-  whole custom-model apply over it.
+  whole custom-model apply over it. ⚠️ **This relocates the whole `.claude`
+  tree, not just transcripts**: a custom-model Claude session also loses the
+  user's global `settings.json`, user-level skills (the codeman agent skill
+  included), user-level agents and commands, and the MCP servers configured
+  in `~/.claude.json` — none of those are symlinked back, only `projects` is.
+  A fine trade for "point this session at my local llama.cpp," but worth
+  knowing before it surprises you mid-session.
 
 **That isolated directory needed one more fix to actually be usable
 non-interactively.** An otherwise-empty `CLAUDE_CONFIG_DIR` has none of a

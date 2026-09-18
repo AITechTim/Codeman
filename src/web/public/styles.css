@@ -8526,8 +8526,8 @@ kbd {
 
 .toast-message {
   flex: 1;
-  /* Errors are sticky by default (showToast) precisely so a longer, specific
-     message survives to be read — let it wrap instead of clipping. */
+  /* A sticky toast (showToast's opts.duration: 0) can carry a longer, specific
+     message — let it wrap instead of clipping. */
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -8586,6 +8586,15 @@ kbd {
 .center-status-banner.show {
   opacity: 1;
   transform: translate(-50%, -50%) scale(1);
+}
+
+/* `hidden` has to be re-asserted over the `display: flex` above, or `dismiss()`
+   setting `el.hidden = true` does nothing (same trap as `.home-sessions[hidden]`
+   below): the card stays laid out at `opacity: 0` with its text/cancel/close
+   children still `pointer-events: auto`, an invisible click-blocker dead centre
+   over the terminal until the page reloads. */
+.center-status-banner[hidden] {
+  display: none;
 }
 
 .center-status-spinner {

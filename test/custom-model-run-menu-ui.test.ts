@@ -969,6 +969,16 @@ describe('Custom Model Endpoint Profiles: _showCenterStatus Cancel button (real 
     expect(win.document.querySelector('.center-status-close')).not.toBeNull();
     expect(win.document.querySelector('.center-status-cancel')).toBeNull();
   });
+
+  it('re-asserts [hidden] over the flex display, so dismiss() actually hides it', () => {
+    // .center-status-banner is display:flex, which defeats the `hidden` attribute —
+    // dismiss()'s only visibility lever — unless this rule exists: without it the card
+    // stays laid out at opacity:0 with its text/cancel/close children still
+    // pointer-events:auto, an invisible click-blocker dead centre over the terminal
+    // until the page reloads. Same trap as .home-sessions[hidden], see home-sessions.test.ts.
+    const css = readFileSync(new URL('../src/web/public/styles.css', import.meta.url), 'utf-8');
+    expect(css).toMatch(/\.center-status-banner\[hidden\]\s*\{\s*display:\s*none;/);
+  });
 });
 
 describe("Custom Model Endpoint Profiles: requiresContextWarning (this CLI's own overhead can exceed a small model's real context)", () => {

@@ -191,6 +191,7 @@ import {
   registerTabLayoutRoutes,
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
+  readCustomModelEndpointsEnabled,
   detectCustomModelSwapDisplacements,
   pruneIdleLlamaSwapLogTails,
   tryWebviewRefererFallback,
@@ -2761,9 +2762,18 @@ export class WebServer extends EventEmitter {
     if (!this.testMode) {
       this.cleanup.setInterval(
         () => {
-          refreshAllCustomModelHosts().catch((err) => {
-            console.error('[custom-model] periodic re-discovery failed:', getErrorMessage(err));
-          });
+          // Reads the setting fresh on every tick, same reasoning as
+          // readPlanUsageTelemetryEnabled() beside it: a live toggle takes effect
+          // on the very next cycle, not just at server boot, and turning the
+          // feature off actually stops the polling instead of only hiding the UI.
+          void readCustomModelEndpointsEnabled()
+            .then((enabled) => {
+              if (!enabled) return;
+              return refreshAllCustomModelHosts();
+            })
+            .catch((err) => {
+              console.error('[custom-model] periodic re-discovery failed:', getErrorMessage(err));
+            });
         },
         CUSTOM_MODEL_REDISCOVER_INTERVAL_MS,
         { description: 'custom model endpoint re-discovery' }

@@ -16,7 +16,7 @@
 
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { ApiErrorCode, createErrorResponse, type ApiResponse } from '../../types.js';
-import { isAdmin, parseBody } from '../route-helpers.js';
+import { isAdmin, parseBody, readJsonConfig, SETTINGS_PATH } from '../route-helpers.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import { getDataDir } from '../../config/instance.js';
 import { isBlockedWebviewUrl } from '../webview-egress-policy.js';
@@ -563,6 +563,19 @@ function applyDiscoveredModels(host: CustomModelHost, result: DiscoveryResult): 
     modelSizesGB,
     lastDiscoveredAt: new Date().toISOString(),
   };
+}
+
+/**
+ * `customModelEndpointsEnabled` defaults OFF (unlike `showPlanUsageLimits`'s
+ * absent-means-on in `readPlanUsageTelemetryEnabled`), so mirror the frontend's
+ * own gate (`session-ui.js`'s `!settings.customModelEndpointsEnabled`) rather
+ * than that reader's default. Exists so the periodic re-discovery sweep in
+ * server.ts can skip entirely while the feature is off, instead of polling
+ * every saved endpoint forever regardless of the setting.
+ */
+export async function readCustomModelEndpointsEnabled(): Promise<boolean> {
+  const settings = await readJsonConfig<Record<string, unknown>>(SETTINGS_PATH, 'settings.json', {});
+  return settings.customModelEndpointsEnabled === true;
 }
 
 /**

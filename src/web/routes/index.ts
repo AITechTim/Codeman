@@ -30,6 +30,7 @@ export { registerTabLayoutRoutes } from './tab-layout-routes.js';
 export {
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
+  readCustomModelEndpointsEnabled,
   detectCustomModelSwapDisplacements,
   pruneIdleLlamaSwapLogTails,
   type CustomModelSessionLike,
