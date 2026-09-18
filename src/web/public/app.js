@@ -6528,14 +6528,30 @@ class CodemanApp {
       // size that survived the load rather than the one the capture was taken
       // at. The two differ whenever the terminal was still settling.
       const dimsAfterLoad = this.getTerminalDimensions?.();
+      // Only a visible-frame capture positions its rows absolutely, and only
+      // that frame can be damaged by a terminal of the wrong size. A `full=1`
+      // body is linear scrollback closed by a RELATIVE cursor move
+      // (`formatCursorRestore`), which is relative precisely so the browser's
+      // row count need not match the pane's, and a `history` body is the byte
+      // stream, which carries no row alignment to protect. Replaying either at
+      // a different size repairs nothing, and the full-history replay costs a
+      // second whole-scrollback capture to learn that. Since the first select
+      // of every non-shell session per page takes the full-history path, an
+      // ungated comparison fires most often on the one response it cannot help.
+      const framePositionsRowsAbsolutely = data.source === 'mux-visible';
       const sizeMovedUnderLoad =
+        framePositionsRowsAbsolutely &&
         !!dimsAtCapture &&
         !!dimsAfterLoad &&
         (dimsAfterLoad.cols !== dimsAtCapture.cols || dimsAfterLoad.rows !== dimsAtCapture.rows);
       // A capture positions every row absolutely, so a pane taller than this
       // terminal writes its overflow rows onto the last line and loses the rows
-      // it overwrote. That happens when the capture wins a race against the
-      // resize meant to precede it, which is what the retry below repairs.
+      // it overwrote. A pane WIDER than this terminal damages the same frame a
+      // second way: `formatPaneSnapshot` paints each row out to the pane's own
+      // width, so a narrower browser wraps every painted row, and the wrap on
+      // the last one scrolls the whole frame up by a row. Both happen when the
+      // capture wins a race against the resize meant to precede it, which is
+      // what the retry below repairs.
       //
       // It also happens when `Session.resize` DECLINED the resize, which it does
       // for a small viewport while a desktop viewport's size claim is live. The
@@ -6545,8 +6561,17 @@ class CodemanApp {
       // changing who owns the pane size, which is a policy question this does
       // not touch. What the flag does buy there is that the client can SEE the
       // mismatch at all, which it previously could not.
+      //
+      // An ABSENT field is not a fit. It means the capture reported no geometry
+      // at all, so nothing was positioned and there is nothing to repair.
       const capturedTallerThanTerminal =
-        Number.isFinite(data.captureRows) && data.captureRows > (this.terminal?.rows || 0);
+        framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureRows) &&
+        data.captureRows > (this.terminal?.rows || 0);
+      const capturedWiderThanTerminal =
+        framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureCols) &&
+        data.captureCols > (this.terminal?.cols || 0);
 
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.
@@ -6654,7 +6679,7 @@ class CodemanApp {
       // `resizeRetry` caps this at one attempt, so two competing fits cannot
       // trade replays forever.
       if (
-        (sizeMovedUnderLoad || capturedTallerThanTerminal) &&
+        (sizeMovedUnderLoad || capturedTallerThanTerminal || capturedWiderThanTerminal) &&
         !options?.resizeRetry &&
         !this._isStaleSelect(selectGen)
       ) {

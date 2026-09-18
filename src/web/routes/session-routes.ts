@@ -2792,10 +2792,16 @@ export function registerSessionRoutes(
       // positions every row absolutely, so a client whose terminal has fewer
       // rows than this overwrites its last line with the overflow and loses
       // the rows underneath. The client compares these against its own size.
-      // Falls back to the session's own geometry when the capture reported
-      // none (cursor query failed, or the buffer came from byte history).
-      captureCols: captureOpts.capturedGeometry?.cols ?? session.ptyCols,
-      captureRows: captureOpts.capturedGeometry?.rows ?? session.ptyRows,
+      //
+      // BOTH FIELDS ARE ABSENT when the capture reported no geometry, and that
+      // is the honest answer rather than a gap to paper over: the cursor query
+      // is what produces the absolute addressing in the first place, so a
+      // capture that lost it returned a raw frame with no row positioning in
+      // it, and a byte-history response was never positioned at all. Reporting
+      // the session's own PTY size here would name a geometry no frame was
+      // built for and invite the client to repair damage that does not exist.
+      captureCols: captureOpts.capturedGeometry?.cols,
+      captureRows: captureOpts.capturedGeometry?.rows,
     };
   });
 

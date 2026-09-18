@@ -1,13 +1,20 @@
 /**
- * @fileoverview A capture drawn for a taller pane makes the client replay once.
+ * @fileoverview A capture drawn for a bigger pane makes the client replay once.
  *
  * A visible-frame capture repaints each row at an absolute position, counting
- * up to the PANE's height. A terminal shorter than that clamps every address
- * past its own height onto its last line, so the overflow rows overwrite one
- * another and the rows underneath are lost. The client cannot see that from
- * the escape sequence, so the terminal response reports the geometry the
- * capture was taken at (`captureCols`/`captureRows`) and `selectSession`
- * replays once at the size that stuck.
+ * up to the PANE's height and out to the PANE's width. A terminal shorter than
+ * that clamps every address past its own height onto its last line, so the
+ * overflow rows overwrite one another and the rows underneath are lost. A
+ * narrower terminal wraps every painted row, and the wrap on the last one
+ * scrolls the whole frame up by one. The client cannot see either from the
+ * escape sequence, so the terminal response reports the geometry the capture
+ * was taken at (`captureCols`/`captureRows`) and `selectSession` replays once
+ * at the size that stuck.
+ *
+ * The comparison runs on a `mux-visible` response ONLY. The other two sources
+ * position no rows absolutely, so a size mismatch damages neither and a replay
+ * repairs neither, and the last case here pins that the expensive one is left
+ * alone.
  *
  * These drive the REAL client in chromium and stub only the terminal endpoint,
  * because the mismatch itself needs two viewports to stage against live tmux.
@@ -50,8 +57,19 @@ function paneSnapshot(rows: number): string {
 /**
  * Serve every terminal fetch from a stub reporting `captureRows`, counting the
  * fetches. The real route needs live tmux to produce a mismatched frame.
+ *
+ * `source` and `captureCols` default to the visible-frame case, which is the
+ * only response whose rows are addressed absolutely and therefore the only one
+ * a replay can repair. A test that varies either says so.
  */
-async function stubTerminal(page: Page, captureRows: number, counter: { n: number; urls: string[] }) {
+async function stubTerminal(
+  page: Page,
+  captureRows: number,
+  counter: { n: number; urls: string[] },
+  options: { source?: string; captureCols?: number } = {}
+) {
+  const source = options.source ?? 'mux-visible';
+  const captureCols = options.captureCols ?? 200;
   await page.route('**/api/sessions/*/terminal*', async (route) => {
     counter.n += 1;
     counter.urls.push(route.request().url());
@@ -67,14 +85,17 @@ async function stubTerminal(page: Page, captureRows: number, counter: { n: numbe
           retainedBytes: 1024,
           truncated: false,
           truncationReason: null,
-          source: 'mux-visible',
-          captureCols: 200,
+          source,
+          captureCols,
           captureRows,
         },
       }),
     });
   });
 }
+
+/** The widest terminal this suite's 1280px viewport can produce, with margin. */
+const WIDER_THAN_ANY_TERMINAL_COLS = 500;
 
 async function openSession(page: Page): Promise<string> {
   await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
@@ -99,6 +120,11 @@ async function openSession(page: Page): Promise<string> {
 /** The terminal is sized by the first select, so this only reads after one. */
 async function terminalRows(page: Page): Promise<number> {
   return page.evaluate(() => (window as unknown as { app: { terminal?: { rows: number } } }).app.terminal?.rows ?? 0);
+}
+
+/** As above, for the width half of the comparison. */
+async function terminalCols(page: Page): Promise<number> {
+  return page.evaluate(() => (window as unknown as { app: { terminal?: { cols: number } } }).app.terminal?.cols ?? 0);
 }
 
 async function select(page: Page, sessionId: string, options: object = {}): Promise<void> {
@@ -190,11 +216,64 @@ describe('a capture taller than the terminal', () => {
     // frame fits, nothing is clamped, and nothing needs repeating. A retry here
     // would double the work of every tab switch.
     const fetches = { n: 0, urls: [] as string[] };
-    await stubTerminal(page, 5, fetches);
+    await stubTerminal(page, 5, fetches, { captureCols: 40 });
     await select(page, sessionId);
 
     expect(await terminalRows(page)).toBeGreaterThan(5);
     expect(fetches.n).toBe(1);
+
+    await closeSession(page, sessionId);
+    await context.close();
+  }, 60_000);
+
+  it('replays once when the captured pane is wider', async () => {
+    // A pane wider than the terminal damages the same frame a second way.
+    // `formatPaneSnapshot` paints every row out to the PANE's width, so a
+    // narrower browser wraps each painted row, and the wrap on the last row
+    // scrolls the whole frame up by one. The height here fits deliberately, so
+    // the width is the only thing that can trigger the replay.
+    context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    page = await context.newPage();
+    const sessionId = await openSession(page);
+
+    const fetches = { n: 0, urls: [] as string[] };
+    await stubTerminal(page, 5, fetches, { captureCols: WIDER_THAN_ANY_TERMINAL_COLS });
+    await select(page, sessionId);
+
+    expect(await terminalRows(page)).toBeGreaterThan(5);
+    expect(await terminalCols(page)).toBeLessThan(WIDER_THAN_ANY_TERMINAL_COLS);
+    expect(fetches.n).toBe(2);
+
+    await closeSession(page, sessionId);
+    await context.close();
+  }, 60_000);
+
+  it('does not replay a full-history response, whatever geometry it reports', async () => {
+    // A `full=1` body is linear scrollback closed by a RELATIVE cursor move,
+    // which is relative precisely so the browser's row count need not match the
+    // pane's. A mismatch there is not damage and a replay cannot repair it, so
+    // the geometry comparison must not fire on it. This is the path that makes
+    // the gate worth having: `_fullHistoryLoaded` is empty on the first select
+    // of every non-shell session per page, so an ungated comparison would pull
+    // the entire tmux scrollback a second time on every page load and every
+    // first tab switch, for a session whose pane a desktop tab is holding too
+    // tall to ever fit.
+    context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    page = await context.newPage();
+    const sessionId = await openSession(page);
+
+    const fetches = { n: 0, urls: [] as string[] };
+    await stubTerminal(page, 200, fetches, {
+      source: 'mux-full-history',
+      captureCols: WIDER_THAN_ANY_TERMINAL_COLS,
+    });
+    await select(page, sessionId);
+
+    // Both dimensions are mismatched, so height alone is not what spares it.
+    expect(await terminalRows(page)).toBeLessThan(200);
+    expect(await terminalCols(page)).toBeLessThan(WIDER_THAN_ANY_TERMINAL_COLS);
+    expect(fetches.n).toBe(1);
+    expect(fetches.urls.filter((u) => u.includes('full=1'))).toHaveLength(1);
 
     await closeSession(page, sessionId);
     await context.close();

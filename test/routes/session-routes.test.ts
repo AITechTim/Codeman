@@ -811,14 +811,14 @@ describe('session-routes', () => {
       expect(body.data.captureRows).toBe(50);
     });
 
-    it('falls back to the session geometry when the capture reports none', async () => {
+    it('omits the geometry when the capture reports none', async () => {
       // The cursor query can fail, and a byte-history response never captures
-      // at all. The session's own PTY size is the best answer available, and a
-      // missing field would read as "no mismatch" and suppress the client's
-      // repair.
+      // at all. Neither frame was positioned, so neither can be damaged by a
+      // terminal of the wrong size. Naming the session's own PTY size here
+      // would describe a geometry no frame was built for, and the client would
+      // read it as a mismatch worth replaying for.
       harness.ctx._session.terminalBuffer = 'byte history only';
       (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
-      harness.ctx._session.resize(111, 44, { force: true });
 
       const res = await harness.app.inject({
         method: 'GET',
@@ -827,8 +827,8 @@ describe('session-routes', () => {
 
       const body = JSON.parse(res.body);
       expect(body.data.source).toBe('history');
-      expect(body.data.captureCols).toBe(111);
-      expect(body.data.captureRows).toBe(44);
+      expect(body.data.captureCols).toBeUndefined();
+      expect(body.data.captureRows).toBeUndefined();
     });
 
     // ── COD-47: full tmux scrollback replay on full page reload ──
