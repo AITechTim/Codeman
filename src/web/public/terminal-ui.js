@@ -3142,11 +3142,22 @@ Object.assign(CodemanApp.prototype, {
    * always true. A caller that then restores the reader's position would have
    * that restore undone by the next flush.
    *
-   * Every caller that scrolls the viewport somewhere other than the bottom
-   * after a load must call this, so the baseline describes the position the
-   * caller chose. `selectSession` and `_onSessionClearTerminal` deliberately
-   * end at the bottom, so for them the sampled true is already the truth and
-   * they do not call it.
+   * `_onSessionNeedsRefresh` and `_maybeRefetchFullHistory` restore a position
+   * and both call this, so their baseline describes the position they chose.
+   *
+   * The other two load paths do not call it, for different reasons.
+   * `_onSessionClearTerminal` resets and rewrites with no scroll afterwards,
+   * so the sampled true is already the truth there. `selectSession` does NOT
+   * end at the bottom, whatever its `scrollToBottom()` after the write
+   * suggests: it ends at `scrollToLastNonEmptyLine()`, which targets
+   * `lastNonEmptyLine - rows + 2` and therefore parks ABOVE `baseY` whenever
+   * the replayed frame keeps trailing blank rows, which a full capture does on
+   * purpose. Its baseline is a stale true. What decides whether that matters
+   * is the sticky snap in `flushPendingWrites`, and since de864e7d that snap
+   * fires only when the flush found the viewport already at the bottom
+   * (`preserveViewportY === null`), which a parked selectSession viewport is
+   * not. Do not read the absent call here as a claim that selectSession lands
+   * at the bottom.
    */
   _syncStickyScrollBaseline() {
     this._wasAtBottomBeforeWrite = this.isTerminalAtBottom();
