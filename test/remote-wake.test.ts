@@ -22,8 +22,11 @@ import {
   buildMagicPacket,
   createDefaultRemoteWakeDeps,
   decideRemoteInputAction,
+  isProbeable,
   parseMacList,
+  probeRemoteHostReachable,
   resolveWakeTarget,
+  runRemoteWakeCommand,
   sendWakePackets,
   waitUntilRemoteReady,
   wakeConfigured,
@@ -217,6 +220,7 @@ interface Harness {
   writeViaMux: ReturnType<typeof vi.fn>;
   noteReconnected: ReturnType<typeof vi.fn>;
   events: string[];
+  payloads: Array<{ event: string; payload: Record<string, unknown> }>;
 }
 
 function harness(
@@ -229,6 +233,7 @@ function harness(
   const writeViaMux = vi.fn(async () => !opts.writesFail);
   const noteReconnected = vi.fn();
   const events: string[] = [];
+  const payloads: Array<{ event: string; payload: Record<string, unknown> }> = [];
 
   const deps: RemoteWakeDeps = {
     probe,
@@ -236,7 +241,10 @@ function harness(
     waitUntilReady,
     delay: async () => {},
     noteReconnected,
-    broadcast: (event) => events.push(event),
+    broadcast: (event, payload) => {
+      events.push(event);
+      payloads.push({ event, payload });
+    },
     log: () => {},
     ...(opts.resolveRemote ? { resolveRemote: opts.resolveRemote } : {}),
   };
@@ -258,6 +266,7 @@ function harness(
     writeViaMux,
     noteReconnected,
     events,
+    payloads,
   };
 }
 
@@ -361,15 +370,24 @@ describe('RemoteWakeRegistry', () => {
     expect(h.events).not.toContain('remote:sessionReconnected');
   });
 
-  it('retains input that could not be written and reports nothing lost', async () => {
+  it('drops the buffer when a flush write fails, so nothing is replayed by a later wake', async () => {
+    // Retaining the chunk was the earlier behaviour, and it was worse: the wake still
+    // resolves and marks the host reachable, so the next input takes the deliver path
+    // while the retained chunk waits for the NEXT wake — replayed hours later, after
+    // everything typed since. Same policy as the oversized paste: dropped, logged.
     const h = harness({ writesFail: true });
     h.probe.mockResolvedValue(false);
 
     await h.registry.handleInput(h.session, 'abc');
+    await h.registry.handleInput(h.session, 'def');
     await h.registry.wake(h.session);
 
     expect(h.writeViaMux).toHaveBeenCalledTimes(1);
-    expect(h.registry.pendingBytes('sess-1')).toBe(3);
+    expect(h.registry.pendingBytes('sess-1')).toBe(0);
+    // And the recovered host takes the deliver path from here, with nothing behind it.
+    h.probe.mockClear();
+    await expect(h.registry.handleInput(h.session, 'g')).resolves.toBe('deliver');
+    expect(h.registry.pendingBytes('sess-1')).toBe(0);
   });
 
   it('flushes the chunk it is writing out of the buffer first, so a concurrent enqueue cannot drop a different one', async () => {
@@ -527,6 +545,160 @@ describe('RemoteWakeRegistry', () => {
 });
 
 // ========== Host-scoped wake (session create/attach) ==========
+
+describe('isProbeable', () => {
+  const base: WakeableRemote = { hostId: 'h', label: 'H', host: '10.0.0.9', wakeMac: '04:d9:f5:80:c6:58' };
+
+  it('is true for a host reached directly', () => {
+    expect(isProbeable(base)).toBe(true);
+    expect(isProbeable({ ...base, extraSshOptions: ['ServerAliveCountMax=3', 'StrictHostKeyChecking=no'] })).toBe(true);
+  });
+
+  it('is false behind a jump host, a SOCKS proxy, or a ProxyCommand/ProxyJump option', () => {
+    expect(isProbeable({ ...base, jumpHost: 'bastion.example' })).toBe(false);
+    expect(isProbeable({ ...base, socksProxy: '127.0.0.1:1080' })).toBe(false);
+    expect(isProbeable({ ...base, extraSshOptions: ['ProxyCommand=cloudflared access ssh --hostname %h'] })).toBe(
+      false
+    );
+    expect(isProbeable({ ...base, extraSshOptions: ['proxyjump=bastion'] })).toBe(false);
+  });
+});
+
+describe('RemoteWakeRegistry — a proxied host is reachability-unknown', () => {
+  // The bare TCP probe connects to `host:port`, which a jump-host/SOCKS host does not
+  // answer even while ssh works. Acting on that verdict buffered input for the life of
+  // the session (the readiness poll could never succeed), showed a permanent banner and
+  // hid the real ssh error behind "not reachable". Unknown is not asleep.
+  const proxied: WakeableRemote = {
+    hostId: 'behind-bastion',
+    label: 'Behind bastion',
+    host: '10.20.0.5',
+    jumpHost: 'bastion.example',
+    wakeCommand: '/usr/local/bin/wake-behind-bastion',
+  };
+
+  it('delivers every input without probing, buffering or waking', async () => {
+    const h = harness({ remote: proxied });
+    await expect(h.registry.handleInput(h.session, 'ls\r')).resolves.toBe('deliver');
+    await expect(h.registry.handleInput(h.session, 'pwd\r')).resolves.toBe('deliver');
+    expect(h.probe).not.toHaveBeenCalled();
+    expect(h.wake).not.toHaveBeenCalled();
+    expect(h.registry.pendingBytes('sess-1')).toBe(0);
+  });
+
+  it('answers null (unknown), never false, so the UI has no banner to raise', async () => {
+    const h = harness({ remote: proxied });
+    await expect(h.registry.checkReachable(h.session, { force: true })).resolves.toBeNull();
+    await expect(h.registry.checkHostReachable(proxied, { force: true })).resolves.toBeNull();
+    expect(h.probe).not.toHaveBeenCalled();
+  });
+
+  it('does not gate a create/attach request on it (unprobeable, like no-target)', async () => {
+    const h = harness({ remote: proxied });
+    await expect(h.registry.ensureHostAwake(proxied)).resolves.toBe('unprobeable');
+    expect(h.probe).not.toHaveBeenCalled();
+    expect(h.wake).not.toHaveBeenCalled();
+  });
+
+  it('lets the send-and-wait path through, and fires the manual wake blind', async () => {
+    const h = harness({ remote: proxied });
+    await expect(h.registry.ensureAwake(h.session)).resolves.toBe(true);
+    expect(h.wake).not.toHaveBeenCalled();
+
+    // The button: the user asked, so the target goes out — but nothing can verify the
+    // host came back, so there is no readiness poll, no reattach and no "waking" toast
+    // promising a wait that does not happen.
+    await expect(h.registry.ensureAwake(h.session, { force: true })).resolves.toBe(true);
+    expect(h.wake).toHaveBeenCalledTimes(1);
+    expect(h.waitUntilReady).not.toHaveBeenCalled();
+    expect(h.reattachRemote).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+
+    h.wake.mockResolvedValueOnce(false);
+    await expect(h.registry.ensureAwake(h.session, { force: true })).resolves.toBe(false);
+
+    // A wake IO that throws is a failed wake, not a rejected route — and the public
+    // `wake()` takes the same blind path, so nobody can poll readiness through a proxy.
+    h.wake.mockRejectedValueOnce(new Error('udp socket exploded'));
+    await expect(h.registry.wake(h.session)).resolves.toBe(false);
+    expect(h.waitUntilReady).not.toHaveBeenCalled();
+  });
+});
+
+describe('RemoteWakeRegistry — SSE payload routing', () => {
+  const hostRemote: WakeableRemote = {
+    hostId: 'hufflepuff',
+    label: 'Hufflepuff',
+    host: '192.168.50.137',
+    wakeMac: '04:d9:f5:80:c6:58',
+  };
+
+  it('a session wake names its session, so the server routes it to the owner', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+    await h.registry.handleInput(h.session, 'x');
+    await h.registry.wake(h.session);
+    const waking = h.payloads.find((p) => p.event === 'remote:hostWaking')!;
+    expect(waking.payload).toMatchObject({ sessionId: 'sess-1', hostId: 'hufflepuff', label: 'Hufflepuff' });
+    expect(waking.payload).not.toHaveProperty('username');
+  });
+
+  it('a create/attach wake has no session, so it names the requesting user instead', async () => {
+    // Without it the server can only fail closed (admins only) — the requester would
+    // never see their own wake. The payload carries `hostId`/`label`, which non-admins
+    // are not shown elsewhere, so it must not go global either.
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+    h.waitUntilReady.mockResolvedValue(false);
+    await expect(h.registry.ensureHostAwake(hostRemote, { requestedBy: 'alice' })).resolves.toBe('failed');
+    const [waking, failed] = ['remote:hostWaking', 'remote:hostWakeFailed'].map(
+      (event) => h.payloads.find((p) => p.event === event)!.payload
+    );
+    expect(waking).toMatchObject({ forNewSession: true, username: 'alice' });
+    expect(failed).toMatchObject({ forNewSession: true, username: 'alice' });
+    expect(waking).not.toHaveProperty('sessionId');
+  });
+
+  it('omits the requester when the route did not name one (single-user mode)', async () => {
+    const h = harness({ remote: hostRemote });
+    h.probe.mockResolvedValue(false);
+    await h.registry.ensureHostAwake(hostRemote);
+    expect(h.payloads.find((p) => p.event === 'remote:hostWaking')!.payload).not.toHaveProperty('username');
+  });
+});
+
+describe('real IO is refused under vitest', () => {
+  // Every consumer injects its IO (RemoteWakeDeps, the socket factory). The guard is
+  // what makes that seam mandatory: a test that reaches the defaults fails loudly here
+  // instead of opening a TCP connection, spawning a process or broadcasting UDP from CI.
+  const target: WakeableRemote = { hostId: 'h', label: 'H', host: '127.0.0.1', port: 1 };
+
+  it('the TCP probe', () => {
+    expect(() => probeRemoteHostReachable(target)).toThrow(/disabled under test/);
+  });
+
+  it('the wake command', () => {
+    expect(() => runRemoteWakeCommand('/bin/true')).toThrow(/disabled under test/);
+  });
+
+  it('the UDP broadcast — only with the DEFAULT socket, an injected one still works', async () => {
+    await expect(sendWakePackets([[1, 2, 3, 4, 5, 6]])).rejects.toThrow(/disabled under test/);
+  });
+
+  it('the readiness poll, which probes by default', async () => {
+    await expect(waitUntilRemoteReady(target, { timeoutMs: 10, intervalMs: 1 })).rejects.toThrow(/disabled under test/);
+  });
+
+  it('the default deps poll readiness with the INJECTED probe, never the real one', async () => {
+    // `createDefaultRemoteWakeDeps({ probe })` used to override `probe` alone while
+    // `waitUntilReady` kept the module default — so a shutdown test polled a production
+    // address until the guard above made it fail instead of connecting.
+    const probe = vi.fn(async () => true);
+    const deps = createDefaultRemoteWakeDeps({ probe });
+    await expect(deps.waitUntilReady(target, { timeoutMs: 10 })).resolves.toBe(true);
+    expect(probe).toHaveBeenCalledWith(target);
+  });
+});
 
 describe('RemoteWakeRegistry — host-scoped wake for a request that waits on it', () => {
   const hostRemote: WakeableRemote = {

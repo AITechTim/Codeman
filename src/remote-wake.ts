@@ -147,6 +147,29 @@ export interface WakeableRemote {
   label: string;
   host: string;
   port?: number;
+  /** SSH jump host (`-J`): the host is reached THROUGH it, never directly. */
+  jumpHost?: string;
+  /** SOCKS5 proxy (`ProxyCommand=nc -X 5 …`): same, the direct address may not even route. */
+  socksProxy?: string;
+  /** Extra `-o KEY=VALUE` options; a `ProxyCommand`/`ProxyJump` in here proxies the host too. */
+  extraSshOptions?: string[];
+}
+
+/**
+ * Whether the bare TCP probe can answer for this host at all. Pure.
+ *
+ * The probe connects straight to `host:port`. A host behind a jump host or a SOCKS
+ * proxy (the cloudflared case) is reachable ONLY through that proxy, so the direct
+ * connect fails while ssh works — and every consumer of the verdict would then act on
+ * a "sleeping" host that is fine: a permanent banner, a create-path gate that hides the
+ * real ssh error, and (with a wake target) input buffered for the life of the session
+ * because the readiness poll can never succeed. Such a host is reachability-UNKNOWN:
+ * the registry never buffers for it, never gates on it, and reports `null` rather than
+ * `false`. A wake target can still be fired for it, blind.
+ */
+export function isProbeable(remote: WakeableRemote): boolean {
+  if (remote.jumpHost || remote.socksProxy) return false;
+  return !(remote.extraSshOptions ?? []).some((option) => /^\s*proxy(command|jump)\s*=/i.test(option));
 }
 
 /**
@@ -270,12 +293,14 @@ export function wakeConfigured(remote: WakeableRemote | undefined): WakeConfigur
 
 /**
  * Outcome of waking a host for a caller that has NO session yet (the create/attach
- * routes). A union rather than a boolean because the three cases need different
- * handling: `'no-target'` must leave the caller's behavior byte-identical (no probe,
- * no extra latency for a host without WoL), and only `'failed'` is an error that
- * deserves its own message instead of the caller's usual one.
+ * routes). A union rather than a boolean because the cases need different handling:
+ * `'no-target'` must leave the caller's behavior byte-identical (no probe, no extra
+ * latency for a host without WoL), `'unprobeable'` likewise (a proxied host, see
+ * {@link isProbeable} — the probe cannot tell asleep from awake, so nothing is gated on
+ * it), and only `'failed'` is an error that deserves its own message instead of the
+ * caller's usual one.
  */
-export type HostWakeOutcome = 'no-target' | 'ready' | 'failed';
+export type HostWakeOutcome = 'no-target' | 'unprobeable' | 'ready' | 'failed';
 
 /**
  * State key for a host-scoped wake. Prefixed so it can never collide with a session
@@ -368,15 +393,21 @@ export class RemoteWakeRegistry {
   }
 
   /**
-   * Reachability for the UI: probe unless a recent result is still fresh.
+   * Reachability for the UI: probe unless a recent result is still fresh. `null` for a
+   * host the probe cannot reach (see {@link isProbeable}): unknown is not unreachable.
    *
    * Shares the per-session probe state with the input path on purpose — a fresh
    * answer is exactly what the input ladder wants, and an `unreachable` verdict here
    * makes the next keystroke buffer + wake instead of vanishing into a stalled pane.
    */
-  async checkReachable(session: WakeableSession, opts: { force?: boolean; ttlMs?: number } = {}): Promise<boolean> {
+  async checkReachable(
+    session: WakeableSession,
+    opts: { force?: boolean; ttlMs?: number } = {}
+  ): Promise<boolean | null> {
     const remote = await this._effectiveRemote(session);
     if (!remote) return true;
+    // `null`, never `false`: the UI keys the banner on a PROVEN unreachable host.
+    if (!isProbeable(remote)) return null;
     const state = this._state(session.id);
     const ttl = opts.force ? 0 : (opts.ttlMs ?? REMOTE_WAKE_REACHABILITY_TTL_MS);
     if (Date.now() - state.probedAt >= ttl) {
@@ -396,6 +427,10 @@ export class RemoteWakeRegistry {
    */
   async handleInput(session: WakeableSession, data: string): Promise<RemoteInputOutcome> {
     const remote = await this._effectiveRemote(session);
+    // A proxied host can never pass the readiness poll, so buffering for it would hold
+    // the bytes for the life of the session (reproduced upstream: three inputs, nothing
+    // written, no reattach). Deliver, as if the feature were off.
+    if (remote && !isProbeable(remote)) return 'deliver';
     const state = this._state(session.id);
     const target = resolveWakeTarget(remote);
     const action = decideRemoteInputAction({
@@ -433,7 +468,11 @@ export class RemoteWakeRegistry {
   async ensureAwake(session: WakeableSession, opts: { force?: boolean; timeoutMs?: number } = {}): Promise<boolean> {
     if (this.stopped) return false;
     const remote = await this._effectiveRemote(session);
-    if (!remote || !resolveWakeTarget(remote)) return true;
+    const target = resolveWakeTarget(remote);
+    if (!remote || !target) return true;
+    // A proxied host: the send-and-wait path has nothing to gate on (unknown is not
+    // asleep), so it delivers; the manual button still wakes, blind (see `wake`).
+    if (!isProbeable(remote)) return opts.force ? this.wake(session, opts) : true;
     const state = this._state(session.id);
     // `force` is the manual path (a user pressed "wake"): a cached "reachable" from
     // seconds ago must not talk the button out of waking a host that just slept.
@@ -452,9 +491,16 @@ export class RemoteWakeRegistry {
    * Host-scoped reachability, for a caller that has no session yet (create/attach).
    * Shares the per-HOST probe state with {@link ensureHostAwake}, so the probe the
    * wake flow just paid for also answers "was that ssh failure really a sleeping
-   * machine?". Never wakes anything — it is a question, not an action.
+   * machine?". Never wakes anything — it is a question, not an action. `null` when the
+   * question cannot be answered (see {@link isProbeable}).
    */
-  async checkHostReachable(remote: WakeableRemote, opts: { force?: boolean; ttlMs?: number } = {}): Promise<boolean> {
+  async checkHostReachable(
+    remote: WakeableRemote,
+    opts: { force?: boolean; ttlMs?: number } = {}
+  ): Promise<boolean | null> {
+    // `null` for a proxied host: callers gate on `=== false` (proven unreachable), so an
+    // unknown verdict leaves their ordinary error path — "needs tmux" — intact.
+    if (!isProbeable(remote)) return null;
     const state = this._state(hostWakeKey(remote.hostId));
     const ttl = opts.force ? 0 : (opts.ttlMs ?? REMOTE_WAKE_REACHABILITY_TTL_MS);
     if (Date.now() - state.probedAt >= ttl) {
@@ -472,8 +518,14 @@ export class RemoteWakeRegistry {
    * nothing and behaves exactly as before. Single-flight per host, so a double click
    * (or two cases on the same host) sends one packet and shares one readiness poll.
    */
-  async ensureHostAwake(remote: WakeableRemote, opts: { timeoutMs?: number } = {}): Promise<HostWakeOutcome> {
+  async ensureHostAwake(
+    remote: WakeableRemote,
+    opts: { timeoutMs?: number; requestedBy?: string } = {}
+  ): Promise<HostWakeOutcome> {
     if (!resolveWakeTarget(remote)) return 'no-target';
+    // The probe cannot tell a proxied host asleep from awake, and a wake that cannot
+    // verify readiness would only delay the request by its whole budget. Not gated.
+    if (!isProbeable(remote)) return 'unprobeable';
     if (this.stopped) return 'failed';
     const state = this._state(hostWakeKey(remote.hostId));
     if (state.waking) return (await state.waking) ? 'ready' : 'failed';
@@ -493,12 +545,16 @@ export class RemoteWakeRegistry {
    * user-initiated and the host only wakes once), and keying them together would mean a
    * create request joining an unrelated session's wake and inheriting its budget.
    */
-  private async wakeHost(remote: WakeableRemote, opts: { timeoutMs?: number }): Promise<boolean> {
+  private async wakeHost(remote: WakeableRemote, opts: { timeoutMs?: number; requestedBy?: string }): Promise<boolean> {
     const state = this._state(hostWakeKey(remote.hostId));
     if (state.waking) return state.waking;
     state.waking = (async (): Promise<boolean> => {
       try {
-        return await this._wakeAndWait(remote, state, { timeoutMs: opts.timeoutMs, forNewSession: true });
+        return await this._wakeAndWait(remote, state, {
+          timeoutMs: opts.timeoutMs,
+          forNewSession: true,
+          requestedBy: opts.requestedBy,
+        });
       } catch (err) {
         // Injected IO is documented not to throw, but a rejected promise here would
         // surface as an unhandled rejection AND take the route down with it (the
@@ -522,6 +578,7 @@ export class RemoteWakeRegistry {
     const remote = await this._effectiveRemote(session);
     const target = resolveWakeTarget(remote);
     if (!remote || !target) return true;
+    if (!isProbeable(remote)) return this._wakeBlind(remote, target);
     const state = this._state(session.id);
     if (state.waking) return state.waking;
 
@@ -557,6 +614,24 @@ export class RemoteWakeRegistry {
   }
 
   /**
+   * Fire the wake target for a host whose readiness cannot be verified (see
+   * {@link isProbeable}): no readiness poll (it could never succeed), no reattach (the
+   * COD-108 watcher owns the pane once ssh works again), no `hostWaking` broadcast (its
+   * toast promises a wait that does not happen). The caller learns only whether the
+   * packet/command went out — and a wake IO that throws is a failed wake, never a
+   * rejected route.
+   */
+  private async _wakeBlind(remote: WakeableRemote, target: NonNullable<WakeTarget>): Promise<boolean> {
+    this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) via ${target.kind}, blind: proxied host`);
+    try {
+      return await this.deps.wake(target);
+    } catch (err) {
+      this.deps.log?.(`[RemoteWake] unexpected failure: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
    * Broadcast + run the wake target + wait for SSH. Shared by the session flow (which
    * then reattaches and flushes the buffer) and the create/attach flow (which has no
    * pane yet). On failure the probe state is reset so the NEXT attempt probes and
@@ -565,11 +640,18 @@ export class RemoteWakeRegistry {
   private async _wakeAndWait(
     remote: WakeableRemote,
     state: WakeState,
-    opts: { sessionId?: string; timeoutMs?: number; forNewSession?: boolean } = {}
+    opts: { sessionId?: string; timeoutMs?: number; forNewSession?: boolean; requestedBy?: string } = {}
   ): Promise<boolean> {
     const target = resolveWakeTarget(remote);
     if (!target) return true;
     const forWhat = opts.sessionId ? `for session ${opts.sessionId}` : 'for a new session';
+    // Routing for multi-user mode (server.ts `deriveSseHint`): a session-scoped event
+    // reaches its owner, and the create/attach wake has no session yet — so it names
+    // the requesting user instead, or it would reach admins only. The payload carries
+    // `hostId`/`label`, which non-admins are not shown elsewhere, so it must not go global.
+    const scope = opts.sessionId
+      ? { sessionId: opts.sessionId }
+      : { forNewSession: true, ...(opts.requestedBy ? { username: opts.requestedBy } : {}) };
     // No `sessionId` for a create-path wake: the toast handler is then the only one
     // that acts (a banner for a session that does not exist yet would have no target),
     // which is exactly the `forNewSession` distinction the UI renders.
@@ -580,7 +662,7 @@ export class RemoteWakeRegistry {
     // something the user can disprove by typing (browser keystrokes go over the
     // WebSocket, which never passes through this registry).
     this.deps.broadcast?.('remote:hostWaking', {
-      ...(opts.sessionId ? { sessionId: opts.sessionId } : { forNewSession: true }),
+      ...scope,
       hostId: remote.hostId,
       label: remote.label,
       queuedInput: state.pending.length > 0,
@@ -603,7 +685,7 @@ export class RemoteWakeRegistry {
         `[RemoteWake] ${remote.label} did not come back — ${opts.forNewSession ? 'the session was not started' : 'input stays buffered'}`
       );
       this.deps.broadcast?.('remote:hostWakeFailed', {
-        ...(opts.sessionId ? { sessionId: opts.sessionId } : { forNewSession: true }),
+        ...scope,
         hostId: remote.hostId,
         label: remote.label,
         queuedInput: state.pending.length > 0,
@@ -699,10 +781,15 @@ export class RemoteWakeRegistry {
       state.pending = state.pending.slice(1);
       const ok = await session.writeViaMux(chunk).catch(() => false);
       if (!ok) {
-        // Retain it, IN ORDER: a failed write must not reorder the queue behind it.
-        state.pending = [chunk, ...state.pending];
+        // Drop the rest, and say so. Retaining it looked safer but was worse: the wake
+        // still resolves and marks the host reachable, so the NEXT input takes the
+        // deliver path while the old chunks sit here — to be replayed by the next wake,
+        // possibly hours later, after everything typed since, and maybe ending in a
+        // carriage return. Same policy as the oversized paste: gone, with a log line.
+        const dropped = state.pending.length + 1;
+        state.pending = [];
         this.deps.log?.(
-          `[RemoteWake] flush failed for session ${session.id} — ${state.pending.length} chunk(s) retained`
+          `[RemoteWake] flush failed for session ${session.id} — ${dropped} buffered chunk(s) dropped rather than replayed on a later wake`
         );
         return;
       }
@@ -713,7 +800,21 @@ export class RemoteWakeRegistry {
 // ========== Default IO ==========
 
 /**
- * Cheap reachability probe: a bare TCP connect to the SSH port.
+ * Under vitest none of this may do real IO (a TCP connect, a child process, a UDP
+ * broadcast) — mirrors `remote-files.ts`. Every consumer injects its deps
+ * (`RemoteWakeDeps`, the socket factory); this is what makes that seam non-optional
+ * instead of a convention the next test can forget.
+ */
+function assertNotUnderTest(what: string): void {
+  if (process.env.VITEST) {
+    throw new Error(`remote-wake: ${what} is disabled under test — inject a fake (RemoteWakeDeps / WakeSocketFactory)`);
+  }
+}
+
+/**
+ * Cheap reachability probe: a bare TCP connect to the SSH port. Only meaningful for a
+ * host the registry deems probeable (see {@link isProbeable}); the registry never asks
+ * it about a proxied host.
  *
  * Deliberately NOT an `ssh … true` probe: that opens a full session (auth,
  * remote log, process) every throttle window for a question a SYN already
@@ -725,6 +826,7 @@ export function probeRemoteHostReachable(
   remote: WakeableRemote,
   timeoutMs = REMOTE_WAKE_PROBE_TIMEOUT_MS
 ): Promise<boolean> {
+  assertNotUnderTest('the TCP probe');
   const port = remote.port ?? DEFAULT_SSH_PORT;
   return new Promise((resolve) => {
     let settled = false;
@@ -748,6 +850,7 @@ export function probeRemoteHostReachable(
  * than throwing: a broken wake command must not break the input route.
  */
 export function runRemoteWakeCommand(command: string, timeoutMs = REMOTE_WAKE_COMMAND_TIMEOUT_MS): Promise<boolean> {
+  assertNotUnderTest('the wake command');
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value: boolean) => {
@@ -790,7 +893,10 @@ export function runRemoteWakeCommand(command: string, timeoutMs = REMOTE_WAKE_CO
 export function sendWakePackets(
   addresses: number[][],
   port = 9,
-  createSocket: WakeSocketFactory = () => dgram.createSocket('udp4')
+  createSocket: WakeSocketFactory = () => {
+    assertNotUnderTest('the UDP broadcast');
+    return dgram.createSocket('udp4');
+  }
 ): Promise<boolean> {
   if (addresses.length === 0) return Promise.resolve(false);
   return new Promise((resolve) => {
@@ -884,12 +990,20 @@ function delayOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Production wiring: all IO defaults, overridable for tests. */
+/**
+ * Production wiring: all IO defaults, overridable for tests.
+ *
+ * The readiness poll uses the SAME probe as the rest of the deps, overridden or not.
+ * Wiring it to the module default instead let a caller that injected `probe` still
+ * poll the real host during the wait — under vitest, a TCP connect to a production
+ * address on every shutdown test (which the vitest guard is what finally caught).
+ */
 export function createDefaultRemoteWakeDeps(overrides: Partial<RemoteWakeDeps> = {}): RemoteWakeDeps {
+  const probe = overrides.probe ?? probeRemoteHostReachable;
   return {
-    probe: probeRemoteHostReachable,
+    probe,
     wake: (target) => (target.kind === 'command' ? runRemoteWakeCommand(target.command) : sendWakePackets(target.macs)),
-    waitUntilReady: (remote, opts) => waitUntilRemoteReady(remote, opts),
+    waitUntilReady: (remote, opts) => waitUntilRemoteReady(remote, { ...opts, probe }),
     delay,
     ...overrides,
   };

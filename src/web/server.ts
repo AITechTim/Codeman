@@ -2349,11 +2349,19 @@ export class WebServer extends EventEmitter {
       'scheduled:',
       'team:',
       'case:',
+      'remote:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
-      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string } };
+      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string }; username?: string };
       const sessionId = d.sessionId ?? d.id ?? d.session?.id;
       const owner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
+      // `remote:hostWaking` / `remote:hostWakeFailed` for a create/attach wake have no
+      // session yet (nothing exists until the host is up), so the registry names the
+      // requesting user instead; the payload carries `hostId`/`label`, which non-admins
+      // are not shown elsewhere. No session and no requester: admins only (fail closed).
+      if (!sessionId && event.startsWith('remote:') && d.username) {
+        return { username: d.username, sessionScoped: true };
+      }
       return { owner, sessionScoped: true };
     }
     // #20/#38: clipboard:write writes into the receiver's OS clipboard — route it to

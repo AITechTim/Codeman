@@ -177,6 +177,8 @@ export const MuxDied = 'mux:died' as const;
 export const MuxStatsUpdated = 'mux:statsUpdated' as const;
 
 // ─── Remote auto-reconnect (COD-108) + wake-on-LAN ───────────────────────────
+// Session-scoped in multi-user mode (`deriveSseHint`): routed to the session's owner,
+// or — for a wake with no session yet — to the requesting `username` in the payload.
 
 /** A remote session's local ssh pane died; an auto-reconnect attempt is starting. */
 export const RemoteSessionDropped = 'remote:sessionDropped' as const;
@@ -187,6 +189,8 @@ export const RemoteReconnectExhausted = 'remote:reconnectExhausted' as const;
 /**
  * User input arrived for a session whose host is unreachable, so a Wake-on-LAN
  * command was started (see `remote-wake.ts`). Input sent meanwhile is buffered.
+ * Payload: `sessionId` (session wake) or `forNewSession: true` + `username`
+ * (create/attach wake), `hostId`, `label`, `queuedInput`.
  */
 export const RemoteHostWaking = 'remote:hostWaking' as const;
 /** The host did not come back within the wake timeout — buffered input is still held. */

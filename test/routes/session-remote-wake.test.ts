@@ -151,6 +151,19 @@ describe('POST /api/sessions/:id/input — wake-on-LAN', () => {
     expect(h.wake).not.toHaveBeenCalled();
   });
 
+  it('writes straight into a proxied host with a wake target: no probe, no buffer, no wake', async () => {
+    // With a target configured, the old verdict buffered EVERY input for the life of
+    // the session: the readiness poll can never succeed through a proxy, so nothing was
+    // ever flushed (three inputs, nothing written, buffer non-empty — reproduced upstream).
+    const h = await harness({ remote: { ...remoteSession, socksProxy: '127.0.0.1:1080' }, hostUp: false });
+    const session = h.ctx.sessions.get(SESSION_ID)!;
+    for (const input of ['a', 'b', 'c']) expect((await send(h.app, { input, useMux: true })).statusCode).toBe(200);
+    expect(session.writeBuffer).toEqual(['a', 'b', 'c']);
+    expect(h.probe).not.toHaveBeenCalled();
+    expect(h.wake).not.toHaveBeenCalled();
+    expect(h.registry.pendingBytes(SESSION_ID)).toBe(0);
+  });
+
   it('wakes before writing on the send-and-wait path (no buffering, the response waits anyway)', async () => {
     const h = await harness({ hostUp: false });
     const session = h.ctx.sessions.get(SESSION_ID)!;
@@ -187,6 +200,17 @@ describe('GET /api/sessions/:id/reachability', () => {
     const body = (await get(h.app, `/api/sessions/${SESSION_ID}/reachability`)).json();
     expect(body.data.reachable).toBe(false);
     expect(body.data.wakeConfigured).toBe('none');
+  });
+
+  it('reports a proxied host as unknown, not unreachable, and never probes it', async () => {
+    // A jump-host / SOCKS host does not answer the bare TCP probe even while ssh works;
+    // `reachable:false` here drew a permanent banner over a healthy session.
+    const h = await harness({ remote: { ...remoteSession, jumpHost: 'bastion.example' }, hostUp: false });
+    const body = (await get(h.app, `/api/sessions/${SESSION_ID}/reachability`)).json();
+    expect(body.data.reachable).toBeNull();
+    expect(body.data.probeable).toBe(false);
+    expect(body.data.wakeConfigured).toBe('command');
+    expect(h.probe).not.toHaveBeenCalled();
   });
 });
 

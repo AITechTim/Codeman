@@ -9,10 +9,17 @@
  * nothing happening" into one click.
  *
  * Behavior:
- *  - Polls `GET /api/sessions/:id/reachability` for the ACTIVE remote session only
- *    (on tab activation and every `POLL_MS` while the tab is visible). The endpoint
- *    shares the server's probe cache with the input path, so opening the tab also
- *    primes the wake path.
+ *  - Asks `GET /api/sessions/:id/reachability` for the ACTIVE remote session only:
+ *    once when the tab is activated (a user action), and every `POLL_MS` while the tab
+ *    is visible ONLY for a host with a wake target. The timer is the one thing here that
+ *    is not user-driven, and each poll is a TCP connect to the host — the same
+ *    timer-driven traffic invariant #2 rejects keepalives for: it cannot wake a host,
+ *    but it can keep an activity-based suspend timer from firing. So a host Codeman
+ *    could not wake anyway is never polled on a timer. A host behind a jump host or
+ *    SOCKS proxy (`probeable: false`) is never polled at all: the probe cannot reach
+ *    it, so its answer would only ever be a false "asleep". The endpoint shares the
+ *    server's probe cache with the input path, so opening the tab also primes the
+ *    wake path.
  *  - Unreachable + a configured wake target → "Wake" button → `POST /api/sessions/:id/wake`
  *    (which wakes, waits, reattaches the pane and flushes buffered input).
  *  - Unreachable + NO wake target → "Configure WoL" → `#wakeConfigModal`, a small form
@@ -46,6 +53,11 @@ Object.assign(CodemanApp.prototype, {
       wakeConfigured: 'none',
       host: '',
       label: '',
+      /**
+       * False for a host the server's probe cannot reach (behind a jump host or SOCKS
+       * proxy): its reachability is unknown, so there is no banner and no polling.
+       */
+      probeable: true,
       /** True between clicking Wake and the answer coming back. */
       waking: false,
       /**
@@ -79,17 +91,22 @@ Object.assign(CodemanApp.prototype, {
   /** Create the page-wide poller once (interval + a visibility wake-up). */
   _ensureHostWakePoller() {
     if (this._hostWakeTimer) return;
-    this._hostWakeTimer = setInterval(() => this._hostWakeTick(), HOST_WAKE_POLL_MS);
+    this._hostWakeTimer = setInterval(() => this._hostWakeTick({ periodic: true }), HOST_WAKE_POLL_MS);
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') this._hostWakeTick();
+      if (document.visibilityState === 'visible') this._hostWakeTick({ periodic: true });
     });
   },
 
   /**
    * One poller tick: resolve the ACTIVE session, reset the banner when it changed, and
    * ask the server. No-op while the page is hidden (a background tab must not poll).
+   *
+   * `periodic` marks the timer (and the visibility wake-up) as opposed to a tab
+   * activation: a periodic tick polls only a host with a wake target, see the module
+   * comment. The activation poll is what still offers "Configure WoL" for a sleeping
+   * host that has none — one connect, on a user action.
    */
-  _hostWakeTick() {
+  _hostWakeTick({ periodic = false } = {}) {
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     const sessionId = this.activeSessionId;
     const session = sessionId && this.sessions ? this.sessions.get(sessionId) : null;
@@ -103,7 +120,9 @@ Object.assign(CodemanApp.prototype, {
       return;
     }
     let state = this._hostWake;
+    let fresh = false;
     if (!state || state.sessionId !== sessionId) {
+      fresh = true;
       state = this._hostWake = this._hostWakeState();
       state.sessionId = sessionId;
       state.host = session.remote.host || '';
@@ -114,8 +133,14 @@ Object.assign(CodemanApp.prototype, {
       // path is configured, so a command-only host is not mislabelled 'mac' until the
       // first poll lands.
       state.wakeConfigured = session.remote.wakeMac ? 'mac' : session.remote.wakeCommand ? 'command' : 'none';
+      // Known from the payload already: a proxied host is not probeable (the server
+      // says so too, on every answer), so not even the activation poll is worth a
+      // round trip whose verdict could only be a wrong "asleep".
+      state.probeable = !(session.remote.jumpHost || session.remote.socksProxy);
       this._renderHostWakeBanner();
     }
+    if (!state.probeable) return;
+    if (periodic && !fresh && state.wakeConfigured === 'none') return;
     this._pollHostReachability();
   },
 
@@ -130,7 +155,10 @@ Object.assign(CodemanApp.prototype, {
       if (!data.success) return;
       // The tab may have changed while this was in flight.
       if (this._hostWake !== state || state.sessionId !== sessionId) return;
+      // `reachable` is `null` (unknown, not unreachable) for a host the probe cannot
+      // reach — only a PROVEN `false` may raise the banner.
       state.reachable = data.data.reachable !== false;
+      if (data.data.probeable === false) state.probeable = false;
       state.wakeConfigured = data.data.wakeConfigured || 'none';
       if (data.data.host) state.host = data.data.host;
       if (data.data.label) state.label = data.data.label;

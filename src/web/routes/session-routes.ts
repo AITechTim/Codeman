@@ -72,6 +72,7 @@ import {
   RemoteWakeRegistry,
   REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
   createDefaultRemoteWakeDeps,
+  isProbeable,
   type WakeableRemote,
 } from '../../remote-wake.js';
 import { clampWaitMs, MAX_BUFFER_SCAN_BYTES } from '../../config/agent-wait.js';
@@ -760,7 +761,8 @@ export function resolveOmpConfigForCreate(
 /**
  * `RemoteHost` → the wake registry's host shape. They differ in one field name only
  * (`id` in host config vs `hostId` on a session's `remote`), but the rename is load-
- * bearing: the registry keys its per-host wake state on `hostId`.
+ * bearing: the registry keys its per-host wake state on `hostId`. The proxy fields
+ * travel too: they are what tells the registry its probe cannot reach this host.
  */
 function wakeableHost(host: RemoteHost): WakeableRemote {
   return {
@@ -770,6 +772,9 @@ function wakeableHost(host: RemoteHost): WakeableRemote {
     port: host.port,
     wakeMac: host.wakeMac,
     wakeCommand: host.wakeCommand,
+    jumpHost: host.jumpHost,
+    socksProxy: host.socksProxy,
+    extraSshOptions: host.extraSshOptions,
   };
 }
 
@@ -892,6 +897,8 @@ export function registerSessionRoutes(
       // answers with an ssh failure that blames anything but the machine being asleep.
       const hostWake = await remoteWake.ensureHostAwake(wakeableHost(host), {
         timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+        // No session yet, so the wake events name their requester (multi-user routing).
+        requestedBy: ownerFor(req),
       });
       if (hostWake === 'failed') {
         return createErrorResponse(
@@ -1535,13 +1542,18 @@ export function registerSessionRoutes(
     const { id } = req.params as { id: string };
     const session = findSessionOrFail(ctx, id, req);
     const remote = session.remote;
-    if (!remote) return { success: true, data: { reachable: true, wakeConfigured: 'none' as const } };
+    if (!remote) {
+      return { success: true, data: { reachable: true, probeable: true, wakeConfigured: 'none' as const } };
+    }
     const force = (req.query as { force?: string })?.force === '1';
+    // `reachable: null` + `probeable: false` for a host behind a jump host / SOCKS proxy:
+    // the probe cannot reach it, so the UI shows no banner and stops polling.
     const reachable = await remoteWake.checkReachable(session, { force });
     return {
       success: true,
       data: {
         reachable,
+        probeable: isProbeable(remote),
         wakeConfigured: await remoteWake.wakeConfigured(session),
         host: remote.host,
         label: remote.label,
@@ -3264,6 +3276,8 @@ export function registerSessionRoutes(
       // host on every schedule (the failure invariant #1 exists to prevent).
       const hostWake = await remoteWake.ensureHostAwake(wakeableHost(host), {
         timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+        // No session yet, so the wake events name their requester (multi-user routing).
+        requestedBy: ownerFor(req),
       });
       if (hostWake === 'failed') {
         return createErrorResponse(
@@ -3280,7 +3294,10 @@ export function registerSessionRoutes(
         // An unreachable host and a host without tmux fail the same way over ssh, so the
         // probe's own message would send the user hunting for a tmux install. Ask the
         // registry (which just probed, when it woke the host) which of the two it is.
-        if (!(await remoteWake.checkHostReachable(wakeableHost(host)))) {
+        // `=== false` on purpose: a proxied host answers `null` (the probe cannot reach
+        // it), and an unknown verdict must not replace the real ssh error with
+        // "not reachable" over a host that is fine.
+        if ((await remoteWake.checkHostReachable(wakeableHost(host))) === false) {
           return createErrorResponse(
             ApiErrorCode.OPERATION_FAILED,
             hostWake === 'no-target'

@@ -24,14 +24,14 @@ custom port, identity file, `-J` jump host, `-o ProxyCommand`).
 
 Types live in `src/types/session.ts`; persistence in `src/remote-hosts.ts`.
 
-| Type                                         | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `RemoteSshOptions`                           | The **HOW-to-reach** fields, shared by host + session: `identityFile`, `socksProxy` (`host:port`), `jumpHost` (`[user@]host[:port]`), `extraSshOptions` (`KEY=VALUE[]`). Every field optional — all-absent reproduces port-22, default-identity, directly-SSH-able behavior.                                                                                                                                                                                                               |
-| `RemoteHost` (extends `RemoteSshOptions`)    | A saved host: `id`, `label`, `host`, `username`, `port?`, `commands?` (per-mode launch command override).                                                                                                                                                                                                                                                                                                                                                                                  |
-| `RemoteCase`                                 | A working directory on a host: `name`, `type: 'remote'`, `hostId`, `remotePath`.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Type | Role |
+|------|------|
+| `RemoteSshOptions` | The **HOW-to-reach** fields, shared by host + session: `identityFile`, `socksProxy` (`host:port`), `jumpHost` (`[user@]host[:port]`), `extraSshOptions` (`KEY=VALUE[]`). Every field optional — all-absent reproduces port-22, default-identity, directly-SSH-able behavior. |
+| `RemoteHost` (extends `RemoteSshOptions`) | A saved host: `id`, `label`, `host`, `username`, `port?`, `commands?` (per-mode launch command override). |
+| `RemoteCase` | A working directory on a host: `name`, `type: 'remote'`, `hostId`, `remotePath`. |
 | `SessionRemote` (extends `RemoteSshOptions`) | The resolved bundle stamped onto a live session: host coordinates + `remotePath` + `commands`, plus **`owned?`** and **`remoteSessionName?`** (COD-105 — see [Ownership](#ownership-launched-vs-discovered-and-attached-cod-105)). Built by `toSessionRemote(host, case)` (sets `owned: true`) for the launch path, or `toAttachedSessionRemote(host, name, path)` (sets `owned: false`) for the attach path. Both copy the advanced SSH options through so every connection is identical. |
-| `RemoteCommandMode`                          | `Extract<SessionMode, 'shell' \| 'claude' \| 'opencode' \| 'codex' \| 'gemini' \| 'antigravity' \| 'pi' \| 'grok' \| 'deepseek' \| 'omp'>` — the modes that can run remotely.                                                                                                                                                                                                                                                                                                              |
-| `RemoteSessionInfo` (COD-105)                | One discovered remote tmux session: `name` (always `codeman-*`), `attached` (a client is connected), `created` (epoch s), `windows`. Returned by `listRemoteCodemanSessions()`.                                                                                                                                                                                                                                                                                                            |
+| `RemoteCommandMode` | `Extract<SessionMode, 'shell' \| 'claude' \| 'opencode' \| 'codex' \| 'gemini' \| 'antigravity' \| 'pi' \| 'grok' \| 'deepseek' \| 'omp'>` — the modes that can run remotely. |
+| `RemoteSessionInfo` (COD-105) | One discovered remote tmux session: `name` (always `codeman-*`), `attached` (a client is connected), `created` (epoch s), `windows`. Returned by `listRemoteCodemanSessions()`. |
 
 Persistence is two flat JSON arrays in the instance data dir:
 
@@ -73,7 +73,7 @@ Rules that keep this safe — **do not bypass them by hand-building an ssh line 
   single-quote `shellescape`d (`'…'` with embedded `'\''`). The helper mirrors
   the one in `tmux-manager.ts`.
 - **`~`/`$HOME` in `identityFile` is expanded at build time** (`expandIdentityPath`),
-  _before_ escaping — ssh does not expand `~` inside `-i`, and the escaped value
+  *before* escaping — ssh does not expand `~` inside `-i`, and the escaped value
   never reaches a shell that would.
 - **The ProxyCommand is one shellescaped `-o KEY=VALUE` token**, so its spaces and
   the `%h`/`%p` placeholders reach ssh as a single argument. `%h %p` survive
@@ -112,7 +112,7 @@ Key points:
   asymmetry: **discovery/attach (COD-105) target the canonical `-L codeman`
   socket** — they join sessions the remote's own Codeman manages, while owned
   durable launches live on `-L codeman-remote`.
-- **`exec <cli>`** replaces the pane shell with the agent, so the pane PID _is_
+- **`exec <cli>`** replaces the pane shell with the agent, so the pane PID *is*
   the agent. The per-mode command comes from `remote.commands?.[mode]` or
   `defaultRemoteCommandForMode(mode)` (`exec claude` / `exec opencode` /
   `exec codex` / `exec gemini` / `exec agy` / `exec bash -l`).
@@ -133,9 +133,9 @@ Because durable remote sessions require tmux on the remote host,
 `checkRemoteTmuxAvailable(host)` runs `command -v tmux` over SSH **before**
 creating a remote case/session and returns a structured, never-throwing result:
 
-- empty stdout / non-zero exit → _"remote host `<host>` needs tmux installed for
-  durable remote sessions"_
-- stderr present → _"could not verify tmux on remote host `<host>`: `<stderr>`"_
+- empty stdout / non-zero exit → *"remote host `<host>` needs tmux installed for
+  durable remote sessions"*
+- stderr present → *"could not verify tmux on remote host `<host>`: `<stderr>`"*
   (a real connection failure, surfaced to the operator)
 - success → `{ ok: true, tmuxPath }`
 
@@ -152,7 +152,7 @@ skipped; command construction is still asserted by unit tests.
 
 ## Ownership: launched vs. discovered-and-attached (COD-105)
 
-COD-104 (above) was Phase 1 — Codeman _launches_ a remote session and owns it.
+COD-104 (above) was Phase 1 — Codeman *launches* a remote session and owns it.
 COD-105 is Phase 2 — Codeman can also **discover** `codeman-*` tmux sessions
 already running on a remote host (created by the remote's own Codeman or another
 instance) and **attach** to one it didn't launch. Ownership decides what happens
@@ -193,7 +193,7 @@ remote command line by ownership:
 
 - **`owned === false`** → `buildRemoteAttachCommand(remote, name)` — emits
   `ssh … -t … 'tmux -L codeman attach -t <remoteSessionName>'`. It uses **`attach`,
-  NOT `new-session -A`**, so it only _joins_ an existing session and never creates
+  NOT `new-session -A`**, so it only *joins* an existing session and never creates
   one.
 - **owned (default)** → `buildRemoteLaunchCommand` (the COD-104 path above).
 
@@ -201,7 +201,7 @@ remote command line by ownership:
 
 `TmuxManager.killSession()` has an **early return for non-owned remote sessions**:
 it tears down **only the LOCAL pane** holding the ssh client (`tmux -L codeman
-kill-session` on _this_ host's socket). Killing the local ssh sends SIGHUP to the
+kill-session` on *this* host's socket). Killing the local ssh sends SIGHUP to the
 remote `tmux attach`, which **detaches** — the durable remote session survives.
 The early return is a structural guarantee that **no code path can ever issue a
 remote `kill-session` for a session we don't own** — the only `kill-session` run is
@@ -261,16 +261,16 @@ perfectly (#415). `src/remote-files.ts` is the one module that reads remote byte
 and it follows the same rule as the launch path: every ssh command line comes from
 `buildSshConnectionArgs()` — **never** a hand-built ssh line.
 
-| Request                                                                          | What happens                                                                                                                                                                                                       |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /api/sessions/:id/file-raw`                                                 | Streamed over `ssh` (`cat`, or `tail -c +N \| head -c L` for a `Range`); the same 200/206/416 contract as a local file, so `<video>`/`<audio>` seeking works                                                       |
-| `GET /api/sessions/:id/file-content`                                             | `cat` into memory, capped by the existing text limit; `edit=1` answers `400` (see below) and `editable` is always `false`                                                                                          |
-| `PUT /api/sessions/:id/file-content`                                             | `400` before any path is looked at: the guard sits AHEAD of the local path validation, because with a same-named directory on the Codeman host (an `sshfs` mount) the write would otherwise land on the local twin |
-| `GET /api/sessions/:id/file-preview`                                             | Non-office files redirect to `file-raw` (which works remotely); docx/pptx answer `400`                                                                                                                             |
-| `GET /api/sessions/:id/file-thumbnail`                                           | `400` for remote files                                                                                                                                                                                             |
-| `POST /api/sessions/:id/attachments`                                             | Registers an absolute path that lives on the **remote** host (a clicked link pointing outside the case directory) by probing it there                                                                              |
-| `GET /api/sessions/:id/attachments/:attachmentId/raw`                            | Streams the registered remote file over ssh, same 200/206/416 contract; `preview` (office) and `thumbnail` answer `400`                                                                                            |
-| `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing`; the history list resolves EVERY entry in one batched probe, never one connection per entry                                    |
+| Request | What happens |
+|---------|--------------|
+| `GET /api/sessions/:id/file-raw` | Streamed over `ssh` (`cat`, or `tail -c +N \| head -c L` for a `Range`); the same 200/206/416 contract as a local file, so `<video>`/`<audio>` seeking works |
+| `GET /api/sessions/:id/file-content` | `cat` into memory, capped by the existing text limit; `edit=1` answers `400` (see below) and `editable` is always `false` |
+| `PUT /api/sessions/:id/file-content` | `400` before any path is looked at: the guard sits AHEAD of the local path validation, because with a same-named directory on the Codeman host (an `sshfs` mount) the write would otherwise land on the local twin |
+| `GET /api/sessions/:id/file-preview` | Non-office files redirect to `file-raw` (which works remotely); docx/pptx answer `400` |
+| `GET /api/sessions/:id/file-thumbnail` | `400` for remote files |
+| `POST /api/sessions/:id/attachments` | Registers an absolute path that lives on the **remote** host (a clicked link pointing outside the case directory) by probing it there |
+| `GET /api/sessions/:id/attachments/:attachmentId/raw` | Streams the registered remote file over ssh, same 200/206/416 contract; `preview` (office) and `thumbnail` answer `400` |
+| `GET /api/sessions/:id/attachments/:attachmentId`, `GET …/attachments` (history) | Size/mtime/existence resolved over ssh, so a remote entry is not reported `missing`; the history list resolves EVERY entry in one batched probe, never one connection per entry |
 
 ⚠️ The attachment route is the one a clicked path takes when it is **outside** the case
 directory (a remote `/tmp` scratchpad capture, a screenshot elsewhere in the home dir):
@@ -397,14 +397,36 @@ machine is asleep. With a wake target the action is **Wake** (`POST /api/session
 with none it is **Configure WoL** and opens `#wakeConfigModal`, a small form for that host's
 `wakeMac`/`wakeCommand` that saves with `PUT /api/remote-hosts/:id` (in multi-user mode that
 GET is admin-only, so a non-admin is told the setting is admin-only instead of "host not
-found"). Reachability for the banner comes from `GET /api/sessions/:id/reachability`, polled
-for the active remote session (30 s, visible tab only). ⚠️ The button is pressed from the SAME
+found"). Reachability for the banner comes from `GET /api/sessions/:id/reachability`: once
+when the remote tab is activated (a user action), and every 30 s while the tab is visible
+**only for a host with a wake target** — each poll is a TCP connect to the host, and a timer
+that connects to a host Codeman could not wake anyway is exactly the timer-driven traffic
+the keepalive rule below rejects (it cannot wake a host, but it can keep an activity-based
+suspend timer from firing). A host the probe cannot reach (see the next section) is never
+polled. ⚠️ The button is pressed from the SAME
 dashboard as Run/Attach, so it holds its request open under the same proxy and uses the same
 40 s budget — and it **queues nothing**: browser keystrokes travel over the WebSocket, which
 deliberately does not pass through the registry (that is the hot path this feature keeps its
 hands off), so the banner says "waiting for the host to come back" for the button and only
 claims "input is queued" when the HTTP input path actually buffered bytes
 (`queuedInput` on the two SSE events).
+
+**Hosts behind a jump host or SOCKS proxy are reachability-UNKNOWN.** The probe is a bare
+TCP connect to `host:port`, and a host reached through `jumpHost`, `socksProxy` or a
+`ProxyCommand`/`ProxyJump` in `extraSshOptions` does not answer that even while ssh works —
+the direct address may not route at all (the cloudflared case). Acting on the resulting
+"unreachable" verdict was wrong three times over: a permanent banner over a healthy session,
+a create-path error that replaced a genuine "needs tmux" with "not reachable", and — with a
+wake target configured — every HTTP input buffered for the life of the session, because the
+readiness poll could never succeed. `isProbeable()` (`remote-wake.ts`) decides from the
+proxy fields, which travel on `WakeableRemote`; for such a host the registry delivers input
+unchanged, `GET …/reachability` answers `reachable: null, probeable: false` (unknown is not
+`false`, and only a proven `false` raises the banner), the create/attach path is not gated
+(`ensureHostAwake` → `'unprobeable'`, handled like `'no-target'`), and the quick-start
+"not reachable" message is reserved for a **proven** unreachable host (`=== false`). A wake
+target can still be fired for it through `POST /api/sessions/:id/wake`, blind: the packet or
+command goes out and the response says only whether it did — no readiness poll, no reattach
+(the COD-108 watcher owns the pane once ssh works again), no "waking" toast.
 
 The invariants worth keeping:
 
@@ -438,7 +460,11 @@ The invariants worth keeping:
   is deliberately NOT wake-aware**, so typing into a sleeping host sends nothing and queues
   nothing (the banner's Wake button is the recovery for that case, which is why it must not
   promise queued input). The **send-and-wait** path blocks on the wake instead — its response
-  is open anyway, and buffering would break the wait contract.
+  is open anyway, and buffering would break the wait contract. ⚠️ A flush write that FAILS
+  drops the whole remaining buffer (logged) rather than retaining it: the wake still resolves
+  and marks the host reachable, so the next input takes the deliver path while a retained
+  chunk would wait for the NEXT wake — replayed hours later, after everything typed since,
+  possibly ending in a carriage return. Same policy as the oversized paste.
 - **The command runs without a shell** (`spawn(path, [], { stdio: 'ignore' })` — `shell`
   defaults to `false`), the schema
   requires a single executable path (no arguments, no `$`/backtick), and `wakeMac` is a
@@ -458,26 +484,41 @@ The invariants worth keeping:
   its handlers are the ONLY definitions, since a second one in another mixin would be
   silently shadowed by script order. Both carry `queuedInput`, which is true only when the
   server actually holds bytes for that session — the wording keys off that, not off "a wake
-  is running", so the button path never claims input is queued.
+  is running", so the button path never claims input is queued. In multi-user mode the
+  whole `remote:` family is **session-scoped** (`deriveSseHint`, `server.ts`): an event with
+  a `sessionId` reaches that session's owner, and the create/attach wake — which has no
+  session yet — carries the requesting `username` instead (`ensureHostAwake({ requestedBy })`),
+  since its payload names a `hostId`/`label` that `GET /api/remote-hosts` withholds from
+  non-admins. With neither, it reaches admins only.
+- **No real IO under vitest.** `probeRemoteHostReachable`, `runRemoteWakeCommand` and the
+  default UDP socket of `sendWakePackets` throw under `VITEST` (as `remote-files.ts` does),
+  so a test that reaches the defaults fails loudly instead of connecting, spawning or
+  broadcasting from CI. Every consumer injects its IO (`RemoteWakeDeps`, the socket
+  factory); `createDefaultRemoteWakeDeps({ probe })` also polls readiness with THAT probe,
+  which is the leak the guard found.
 
 Tests: `test/remote-wake.test.ts` (decision/throttle table, single-flight registry,
-buffering + flush order, MAC parsing/magic packet, live host-config resolution, and the wiring
-guard) and `test/routes/session-remote-wake.test.ts` (the input route buffers instead of writing
-into a sleeping host, the reachability route never wakes, and the wake route reports the
-no-target case the UI turns into "configure WoL").
+buffering + flush order, MAC parsing/magic packet, live host-config resolution, the proxied
+host, SSE payload routing, the vitest IO guard, and the wiring guard),
+`test/routes/session-remote-wake.test.ts` (the input route buffers instead of writing into a
+sleeping host — and writes straight into a proxied one —, the reachability route never wakes
+and reports a proxied host as unknown, and the wake route reports the no-target case the UI
+turns into "configure WoL"), `test/sse-routing-remote.test.ts` (multi-user routing of the
+`remote:` family) and `test/host-wake-banner.test.ts` (banner visibility and when the poller
+may connect).
 
 ## API
 
 Routes are registered in `src/web/routes/case-routes.ts`:
 
-| Method   | Path                                 | Purpose                                                                                        |
-| -------- | ------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `GET`    | `/api/remote-hosts`                  | List saved hosts                                                                               |
-| `POST`   | `/api/remote-hosts`                  | Create a host                                                                                  |
-| `PUT`    | `/api/remote-hosts/:id`              | Update a host                                                                                  |
-| `DELETE` | `/api/remote-hosts/:id`              | Delete a host                                                                                  |
-| `GET`    | `/api/remote-hosts/:hostId/sessions` | Discover `codeman-*` sessions on the host (COD-105; `listRemoteCodemanSessions`, never errors) |
-| `POST`   | `/api/cases/remote-link`             | Link a case to a remote host (creates the `RemoteCase`)                                        |
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/remote-hosts` | List saved hosts |
+| `POST` | `/api/remote-hosts` | Create a host |
+| `PUT` | `/api/remote-hosts/:id` | Update a host |
+| `DELETE` | `/api/remote-hosts/:id` | Delete a host |
+| `GET` | `/api/remote-hosts/:hostId/sessions` | Discover `codeman-*` sessions on the host (COD-105; `listRemoteCodemanSessions`, never errors) |
+| `POST` | `/api/cases/remote-link` | Link a case to a remote host (creates the `RemoteCase`) |
 
 `RemoteHost` accepts the optional `wakeMac` (magic packet, sent by Codeman) and `wakeCommand`
 (single executable path, run without a shell, takes precedence) — see **Wake-on-LAN from user
