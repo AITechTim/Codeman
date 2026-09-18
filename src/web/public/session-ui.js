@@ -1257,6 +1257,44 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  /** Reads the "Instance count" stepper, clamped like runClaude()'s own copy. */
+  _readTabCount() {
+    return Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
+  },
+
+  /**
+   * Launches `tabCount` quick-start sessions of one non-Claude mode
+   * sequentially, selecting the first once all are up. Shared by every
+   * run*() below except runClaude() (which has its own remote/docker
+   * branching and parallel-create path) — before this helper existed, each
+   * of them ignored the "Instance count" stepper entirely and always
+   * launched exactly one session, with no error, just the wrong count.
+   * `buildBody(sessionName)` returns that mode's quick-start POST body.
+   */
+  async _launchQuickStartInstances(caseName, tabCount, label, buildBody, ownsLaunchTerminal) {
+    const startNumber = this._nextCaseSessionStartNumber(caseName);
+    let firstSessionId = null;
+    if (tabCount > 1) {
+      this._appendSessionLaunchStatus(ownsLaunchTerminal, `Starting ${tabCount} ${label} session(s) in ${caseName}...`);
+    }
+    for (let i = 0; i < tabCount; i++) {
+      const sessionName = `w${startNumber + i}-${caseName}`;
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildBody(sessionName)),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || `Failed to start ${label}`);
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+      if (!firstSessionId) firstSessionId = data.data.sessionId;
+    }
+    if (tabCount > 1) {
+      this._appendSessionLaunchStatus(ownsLaunchTerminal, `All ${tabCount} ${label} session(s) ready`);
+    }
+    return firstSessionId;
+  },
+
   async runOpenCode() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
     // Remote cases run the CLI on the REMOTE host — the local /api/opencode/status
@@ -1285,27 +1323,27 @@ Object.assign(CodemanApp.prototype, {
       // Quick-start with opencode mode (auto-allow tools by default).
       // No `effort` field — it's Claude-specific (OpenCode has no /effort).
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'OpenCode',
+        (sessionName) => ({
           caseName,
           mode: 'opencode',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             openCodeConfig: { autoAllowTools: true },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start OpenCode');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
       // Switch to the new session (don't pre-set activeSessionId — selectSession
       // early-returns when IDs match, skipping buffer load and sendResize)
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1339,13 +1377,15 @@ Object.assign(CodemanApp.prototype, {
 
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'Codex',
+        (sessionName) => ({
           caseName,
           mode: 'codex',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             codexConfig: {
               dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
@@ -1354,16 +1394,14 @@ Object.assign(CodemanApp.prototype, {
             },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Codex');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
       // Switch to the new session (don't pre-set activeSessionId — selectSession
       // early-returns when IDs match, skipping buffer load and sendResize)
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1396,25 +1434,25 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'Gemini',
+        (sessionName) => ({
           caseName,
           mode: 'gemini',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             geminiConfig: { approvalMode: 'yolo' },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1447,25 +1485,25 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'Antigravity',
+        (sessionName) => ({
           caseName,
           mode: 'antigravity',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             antigravityConfig: { dangerouslySkipPermissions: true },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Antigravity');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1507,22 +1545,22 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'Pi',
+        (sessionName) => ({
           caseName,
           mode: 'pi',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote || Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Pi');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1555,24 +1593,24 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'OMP',
+        (sessionName) => ({
           caseName,
           mode: 'omp',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start OMP');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1614,25 +1652,25 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'Grok',
+        (sessionName) => ({
           caseName,
           mode: 'grok',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             grokConfig: { alwaysApprove: true },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Grok');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
@@ -1692,25 +1730,25 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const tabCount = this._readTabCount();
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        'DeepSeek',
+        (sessionName) => ({
           caseName,
           mode: 'deepseek',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          sessionName,
           ...(isRemote ? {} : {
             deepSeekConfig: { permissionMode: 'danger-full-access' },
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start DeepSeek');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
