@@ -1917,23 +1917,36 @@ class CodemanApp {
    * browser after the response headers can already be in it. Such a load
    * replays exactly that tail; discarding it drops the CLI's output for the
    * rest of the load window, and its next partial redraw then lands on a frame
-   * the terminal never received. A payload built from the server's accumulated
-   * byte history needs the opposite: that history is current up to the
-   * response, so replaying the queue on top of it would duplicate output.
+   * the terminal never received.
+   *
+   * A `history` payload is the server's byte buffer alone: the direct-PTY
+   * fallback, or a mux pane whose capture came back empty. The route reads
+   * that buffer in the same synchronous tick it takes the capture, so it is
+   * current up to the route's own read and no further, which is the same
+   * exposure. It deliberately keeps the pre-existing discard all the same:
+   * both cases are rare, neither has been measured, and a duplicated Ink
+   * redraw is more visible than a few milliseconds of missing output.
+   * `capturedFromMux` below is the one line to widen if either turns out to
+   * matter.
    *
    * `headersReceivedAt` is the caller's own `performance.now()` reading from
    * the moment the response arrived, compared only against other client-side
    * readings, so there is no clock skew to worry about.
    *
-   * What this cutoff does NOT cover: the server appends output to the byte
-   * buffer and emits it in the same tick, but it BROADCASTS on a batch timer —
-   * 8ms over WebSocket, 16 to 50ms over SSE. The terminal route runs
-   * synchronously from `capture-pane` to its return, so a batch that was
-   * already pending when the capture ran leaves the server after the reply,
-   * arrives after `headersReceivedAt`, and is replayed although the capture
-   * holds it. The duplicate is one batch interval wide, against a recovery
-   * window that spans the whole chunked write. Closing it belongs on the
-   * server: flush that session's pending batch before taking the capture.
+   * What this cutoff does NOT cover, and there are two contributors. The
+   * server appends output to the byte buffer and emits it in the same tick,
+   * but BROADCASTS on a batch timer (8ms over WebSocket, 16 to 50ms over SSE),
+   * and the terminal route runs synchronously from `capture-pane` to its
+   * return, so a batch already pending when the capture ran leaves the server
+   * after the reply, arrives after `headersReceivedAt`, and is replayed
+   * although the capture holds it. Separately, `captureActivePaneBuffer` is
+   * `execSync`, which blocks the event loop for the whole capture: anything
+   * tmux had already painted into the pane that the server had not yet read
+   * from the attach PTY is in the capture too, is broadcast only after the
+   * reply, and replays the same way. The duplicate is one batch interval plus
+   * one capture wide, against a recovery window that spans the whole chunked
+   * write. Closing it belongs on the server: flush that session's pending
+   * batch before taking the capture.
    *
    * @param {{source?: string}} payload - The parsed `data` of a terminal response.
    * @param {number} headersReceivedAt - When that response reached this client.

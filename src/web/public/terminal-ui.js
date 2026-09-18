@@ -3925,6 +3925,30 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Open a buffer load: live terminal events are queued from here until
+   * `_finishBufferLoad` decides what to do with them. Returns the load token the
+   * finish call must present; a stale token makes that call a no-op.
+   *
+   * @param {string} [owner] Reuse an existing token to re-enter the same load
+   *   (see below); omit it to start a new one.
+   * @returns {string} The load token.
+   */
+  _beginBufferLoad(owner) {
+    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
+    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    // `selectSession` opens the load before its fetch, and `chunkedTerminalWrite`
+    // opens it again under the SAME owner when it starts writing. Resetting the
+    // queue on that second call would throw away everything that arrived during
+    // the fetch, which on the capture path is output no buffer holds. Re-entering
+    // one load keeps its queue; a genuinely new load still starts empty.
+    const reentering = this._bufferLoadOwner === loadOwner && Array.isArray(this._loadBufferQueue);
+    this._bufferLoadOwner = loadOwner;
+    this._isLoadingBuffer = true;
+    if (!reentering) this._loadBufferQueue = [];
+    return loadOwner;
+  },
+
+  /**
    * Complete a buffer load: unblock live SSE writes.
    * Called when chunkedTerminalWrite finishes (or is skipped for empty buffers).
    *
@@ -3960,21 +3984,6 @@ Object.assign(CodemanApp.prototype, {
    *   is true, replay queued events whose arrival timestamp is at or after
    *   `since` (default 0, meaning the whole queue).
    */
-  _beginBufferLoad(owner) {
-    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
-    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
-    // `selectSession` opens the load before its fetch, and `chunkedTerminalWrite`
-    // opens it again under the SAME owner when it starts writing. Resetting the
-    // queue on that second call would throw away everything that arrived during
-    // the fetch, which on the capture path is output no buffer holds. Re-entering
-    // one load keeps its queue; a genuinely new load still starts empty.
-    const reentering = this._bufferLoadOwner === loadOwner && Array.isArray(this._loadBufferQueue);
-    this._bufferLoadOwner = loadOwner;
-    this._isLoadingBuffer = true;
-    if (!reentering) this._loadBufferQueue = [];
-    return loadOwner;
-  },
-
   _finishBufferLoad(owner, opts) {
     if (owner !== undefined && this._bufferLoadOwner !== owner) {
       return false;

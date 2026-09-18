@@ -1,20 +1,31 @@
 /**
- * @fileoverview Regression tests for the buffer-load flush path (COD-144).
+ * @fileoverview Regression tests for the buffer-load flush path: what becomes of
+ * the live terminal events queued while a buffer load runs, once the load ends.
  *
- * Bug: newly launched Shell sessions rendered BLANK until a tab-switch. The
- * buffer-load path (`selectSession` → `_beginBufferLoad`/`_finishBufferLoad`)
- * QUEUES live SSE terminal events while `_isLoadingBuffer` is true, then on
- * completion DISCARDS the queue (`_loadBufferQueue = null`). That de-dup is
- * correct for an established session (the fetched buffer already contains the
- * queued output, so replaying it would duplicate Ink redraws). But for a
- * brand-new shell the fetch resolves BEFORE the PTY emits its prompt — the
- * fetched buffer is empty and the prompt arrives only as a queued event, which
- * then gets discarded → blank terminal.
+ * Two rules, each from a real bug.
  *
- * Fix: `_finishBufferLoad(owner, { flushQueued })` REPLAYS the queued events
- * through `batchTerminalWrite()` (after `_isLoadingBuffer` is cleared, so they
- * write through normally) ONLY when the load painted nothing. The default path
- * (no opts) still discards, preserving de-dup for established sessions.
+ * COD-144: newly launched Shell sessions rendered BLANK until a tab-switch. The
+ * load path (`selectSession` → `_beginBufferLoad`/`_finishBufferLoad`) queues
+ * live events while `_isLoadingBuffer` is true and used to DISCARD the queue on
+ * completion. Right for a buffer built from the server's byte history (the
+ * queued output is already in it, so replaying it duplicates Ink redraws),
+ * wrong for a brand-new shell whose fetch resolves BEFORE the PTY emits its
+ * prompt: the prompt arrived only as a queued event and was thrown away. A
+ * caller that knows the load painted nothing passes `{ flushQueued: true }`
+ * and the queue is REPLAYED through `batchTerminalWrite()` after
+ * `_isLoadingBuffer` is cleared, so the events write through normally.
+ *
+ * #436: a tmux pane capture is current only as of the instant `capture-pane`
+ * ran, so everything the CLI printed between the capture and the end of the
+ * chunked write was queued and dropped, and its next partial redraw landed on
+ * a frame the terminal never received. Queue entries now carry their arrival
+ * time and `_finishBufferLoad` takes a `since` cutoff, so a capture load
+ * replays exactly the tail that arrived after the response headers. All four
+ * fetch-and-write paths take that policy from one helper,
+ * `_bufferLoadFinishOpts`, and a static scan below pins each of them to it,
+ * because the same fix had already been written into one path out of four,
+ * twice. A path that replays and then restores a scroll position re-takes the
+ * sticky-scroll baseline (`_syncStickyScrollBaseline`), pinned the same way.
  *
  * Loaded via `vm` with a stubbed context (no jsdom — jsdom is broken on this
  * box; see connection-indicator.test.ts). We extract the REAL
