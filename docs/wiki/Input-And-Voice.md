@@ -27,6 +27,15 @@ The result is the property you want on a phone: a connection that drops mid-prom
 loses the prompt and never delivers it twice. Two browser tabs on the same session coexist,
 and only a reconnect from the *same* tab supersedes the old connection.
 
+## Selecting and copying
+
+Agent CLIs hold the mouse: clicks and drags are reported into the transcript rather than
+selecting text. `Shift+drag` starts a selection anyway, right-click copies it (with nothing
+selected the native context menu is left alone), and `Ctrl+Shift+C` copies without ever
+interrupting. **Auto Copy Selection** in **App Settings → Terminal & Input**, off by
+default, copies the moment you release the mouse. On phones, long-press selects; see
+[Mobile Guide](Mobile-Guide).
+
 ## Zero-lag local echo
 
 On touch devices, keystrokes are painted in the terminal immediately and sent when you press
@@ -55,6 +64,8 @@ reconcile against the real buffer and only apply while the cursor is on the comp
 Chinese, Japanese, and Korean input needs an IME, and an IME needs a real text field.
 Turning on CJK input in **App Settings → Terminal & Input** puts an always-visible textarea
 below the terminal that owns composition, then delivers the composed text to the session.
+Ctrl- and Alt-modified navigation keys typed through it reach the CLI as the modified
+sequences, so word jumps and history keys keep working.
 
 ## Voice dictation
 

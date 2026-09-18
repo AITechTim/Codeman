@@ -110,6 +110,22 @@ it is written. Outside the workspace they open in the preview instead: the tail 
 
 Nothing is registered until you click. Opening a file this way does not add an attachment card.
 
+## Remote (SSH) cases
+
+In a remote case the workspace lives on the other machine, and so do the files. Previews,
+downloads, text reads and the clicked-path route all go over the same ssh connection the
+session uses: one `realpath` plus `stat` probe for the file and the workspace root, then a
+streamed `cat` (or a slice of it, so video seeking works). Symlinks are resolved on the host
+that can resolve them, the size cap applies to the remote size before a byte is requested,
+and an unreachable host answers 502 rather than pretending the file is missing. Nothing is
+ever copied onto the Codeman host, and a same-named local file is never served under a
+remote name.
+
+Not available over ssh, and said so with a 400 instead of a misleading 404: editing in
+place, Office previews and generated thumbnails (both need the bytes on the server's disk),
+the file tree and path picker, and the tail viewer. Docker cases are unaffected, because
+their workspace is bind-mounted at the same path.
+
 ## The path picker
 
 For choosing a path rather than typing one. It appears in two places:

@@ -24,6 +24,23 @@ Switching tabs does not reload a dashboard. Frames stay alive in the background,
 took a while to authenticate is still there when you come back. Past six live frames, the
 least recently viewed is dropped to bound memory.
 
+## Single-page apps, reloads and links
+
+A history-routed dashboard (React Router, Vue Router, a Vite dev server) sees the path it
+would see on its own origin, not the proxy prefix, so it renders its real route instead of
+its own "page not found". A navigation the page starts itself afterwards, a dev server's
+full reload or a root-absolute `location.href`, would land outside the proxy with no
+capability; Codeman recognises it, answers with a small recovery page, and remounts the
+frame at the path that was lost, bounded to five recoveries a minute per frame. A reload on
+the dashboard's landing page is recovered the same way.
+
+A `localhost` or `127.0.0.1` link in agent output opens as a web tab automatically, reusing
+a saved dashboard for the same server or saving one under its `host:port`. On a phone that
+address only exists on the Codeman box, so the link would otherwise be a guaranteed
+connection error. LAN and tailnet addresses still open directly. `*.localhost` names are
+deliberately not auto-routed: they are DNS names rather than address literals, and the link
+came from agent output. Add such a dashboard by hand instead.
+
 ## Why dashboards are proxied
 
 A plain cross-origin iframe fails three ways at once in the setup Codeman actually ships in:
@@ -88,6 +105,12 @@ it checks the server's reach, not the browser's.
 The proxy authenticates on an in-memory capability embedded in the path, which is why it is
 exempt from the cookie and Origin checks that every API route enforces. That exemption is
 fenced to safe methods and non-API paths, and there is a test pinning it in place.
+
+Saved URLs are refused when they point at a link-local or cloud-metadata address, at save
+time and again against the address the name resolves to at connect time; loopback and
+private ranges stay allowed, because a `localhost` Grafana is the feature. Capabilities are
+revoked on logout, and proxied responses carry a same-origin referrer policy so a dashboard
+cannot hand the capability-bearing URL to a third party.
 
 Two failure modes that only appear inside a sandboxed frame, and that curl can never
 reproduce, are handled: runtime-built root-absolute URLs escaping the injected base, and

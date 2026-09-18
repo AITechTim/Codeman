@@ -21,6 +21,12 @@ No. Codeman drives agent CLIs you have already installed and logged in yourself.
 subscription or key that CLI uses is what pays for the tokens. Codeman never collects,
 stores, or refreshes your credentials.
 
+### Which agent CLIs does it support?
+
+Claude Code, OpenCode, Codex, Gemini, Antigravity, Pi, Grok Build, DeepSeek Harness and
+OMP, plus a plain shell, chosen per session. Claude is the reference mode and a few features
+are Claude-only; [Agent CLIs](Agent-CLIs) has the table.
+
 ### Does Codeman send my code or prompts anywhere?
 
 No. There is no telemetry, no analytics, and no phone-home. The only network traffic

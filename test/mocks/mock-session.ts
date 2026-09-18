@@ -68,6 +68,9 @@ export class MockSession extends EventEmitter {
     this.lastSubmitAt = Date.now();
   }
 
+  /** Mirrors Session.trackUserInput (the send-key route feeds it around the write path). */
+  trackUserInput(_data: string): void {}
+
   private _muxName: string | null = null;
 
   constructor(id: string = 'mock-session-id') {

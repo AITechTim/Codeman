@@ -58,6 +58,24 @@ export type SessionMode =
   | 'deepseek'
   | 'omp';
 
+/**
+ * Who owns a session's name. `placeholder`: Codeman's own `w<n>-<case>` (or no
+ * name at all), still eligible for auto-naming. `auto`: titled after its first
+ * prompt (`w<n>-<case>: <title>`), which happens once. `manual`: set by a
+ * person; auto-naming never touches it.
+ */
+export type SessionNameSource = 'placeholder' | 'auto' | 'manual';
+
+/** Options for `Session.write()` / `Session.writeViaMux()`. */
+export interface SessionWriteOptions {
+  /**
+   * The bytes were typed by a person, or sent by an agent on their behalf
+   * (browser keystrokes, `POST /api/sessions/:id/input`). Only such input can
+   * name a tab; Ralph, respawn, cron and approval writes leave this unset.
+   */
+  fromUser?: boolean;
+}
+
 export type RemoteCommandMode = Extract<
   SessionMode,
   'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp'
@@ -640,6 +658,8 @@ export interface SessionState {
   lastActivityAt: number;
   /** Session display name */
   name?: string;
+  /** Who owns the name (see `SessionNameSource`); absent on states persisted before auto-naming existed. */
+  nameSource?: SessionNameSource;
   /** Session mode */
   mode?: SessionMode;
   /** Auto-clear enabled */

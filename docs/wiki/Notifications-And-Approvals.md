@@ -33,8 +33,8 @@ reloading the dashboard while a permission dialog is blocking a session does not
 with a normal-looking tab.
 
 For Claude sessions, these come from Claude Code's hooks and are precise about *why* the
-session stopped. For other CLIs there are no hooks, so you get the coarser output-based
-signal.
+session stopped; DeepSeek Harness sessions report the same states themselves. For the other
+CLIs there are no hooks, so you get the coarser output-based signal.
 
 ## Window title and OS notifications
 
@@ -62,7 +62,8 @@ Once subscribed, a blocking prompt reaches your phone even from a locked screen.
 
 ## The Approvals Inbox
 
-**Opt-in, off by default. Claude sessions only.**
+**Opt-in, off by default. Claude sessions, plus DeepSeek Harness sessions, whose terminal
+front door reports its prompts to Codeman.**
 
 One queue of every prompt currently waiting on a human, across all your sessions, answerable
 in place. When you have eight workers running, this is the difference between checking eight
@@ -136,7 +137,8 @@ from the lock screen.
 - **No push over plain HTTP.** It is a browser requirement, not a Codeman one.
 - **iOS needs the home screen install.** A Safari tab will never receive push.
 - **The bell is invisible at zero.** That is deliberate, not a broken setting.
-- **Approvals are Claude-only.** They are built on hook events the other CLIs do not emit.
+- **Approvals need real signals.** They are built on hook events, which Claude emits and
+  DeepSeek Harness reports itself; the other CLIs do neither.
 - **A stale menu answer is refused, not sent.** If you answer a card for a dialog that has
   since gone away, Codeman declines rather than typing a digit into the composer.
 

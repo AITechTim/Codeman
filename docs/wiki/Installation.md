@@ -9,7 +9,7 @@ Getting Codeman onto a machine, verifying it works, updating it, and removing it
 | **macOS or Linux** | Windows works through WSL2. See [Windows](#windows-wsl) below.                                                                        |
 | **Node.js 22+**  | The installer offers to install it if missing.                                                                                          |
 | **tmux**         | Not optional. Sessions live inside tmux, which is what makes them survive a server restart, a dropped connection, or a closed laptop.    |
-| **An agent CLI** | At least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex/cli), [Antigravity](https://antigravity.google), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Pi](https://pi.dev). Plain shell sessions need none. See [Agent CLIs](Agent-CLIs). |
+| **An agent CLI** | At least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex/cli), [Antigravity](https://antigravity.google), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Pi](https://pi.dev), [Grok Build](https://github.com/xai-org/grok-build), [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), [OMP](https://github.com/can1357/oh-my-pi). Plain shell sessions need none. See [Agent CLIs](Agent-CLIs). |
 
 Codeman itself sends no telemetry and phones no home. The only network traffic is your
 browser to your server, and whatever the agent CLI you chose does on its own.
@@ -20,13 +20,16 @@ browser to your server, and whatever the agent CLI you chose does on its own.
 curl -fsSL https://getcodeman.com/install | bash
 ```
 
-This installs Node.js and tmux if they are missing, clones Codeman into `~/.codeman/app`,
-and builds it.
+This installs Node.js, tmux and a build toolchain if they are missing (node-pty ships no
+Linux prebuild, so it compiles from source), clones Codeman into `~/.codeman/app`, and
+builds it.
 
 What it asks you:
 
 1. **Permission for every system change.** Package installs and agent CLI downloads are
-   prompted individually. Nothing is installed silently.
+   prompted individually. Nothing is installed silently. If no agent CLI is found, a menu
+   offers to install any of them (DeepSeek excepted: its npm package installs only a
+   launcher with no runnable profile), or you skip and install one yourself later.
 2. **How the dashboard should be reachable.** Three choices:
    - **Tailscale** (recommended for phone access): keeps the loopback bind and walks you
      through `tailscale serve`, including the tailnet HTTPS toggle, then verifies the result
@@ -101,6 +104,21 @@ at server start, so markup changes need a restart.
 
 See [Contributing](Contributing) for the rest of the development loop.
 
+## Route D: Docker Compose
+
+Codeman itself can run in a container and spawn Docker cases as sibling containers through
+the host's Docker socket. Copy `docker/.env.example` to `docker/.env`, set
+`CODEMAN_PASSWORD`, then:
+
+```bash
+bash docker/Start-Codeman.sh
+```
+
+Run the script again after updating rather than a plain `docker compose up`, so the rebuilt
+image, the refreshed volumes and the entrypoint arrive together. The full guide, including
+storage and networking options, is
+[`docker/README.md`](https://github.com/Ark0N/Codeman/blob/master/docker/README.md).
+
 ## Installing an agent CLI
 
 Codeman drives CLIs, it does not bundle them. Install at least one:
@@ -113,6 +131,9 @@ Codeman drives CLIs, it does not bundle them. Install at least one:
 | **Antigravity** | See [antigravity.google](https://antigravity.google)               | Google's successor to the consumer Gemini CLI.                             |
 | **Gemini CLI**  | See [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli) | Enterprise only since Google's June 2026 consumer cutover.  |
 | **Pi**          | See [pi.dev](https://pi.dev)                                       | No permission prompts and no sandbox by design. Read [Agent CLIs](Agent-CLIs) before using it on a repo you care about. |
+| **Grok Build**  | `curl -fsSL https://x.ai/cli/install.sh \| bash`                   | xAI. Lands in `~/.grok/bin`; `grok login --device-auth` for headless hosts.  |
+| **DeepSeek Harness** | `npm i -g @deepseek-ai/dsh pnpm`, then a terminal profile      | The npm package is only a launcher. Codeman's Run menu installs the community terminal profile for you. See [Agent CLIs](Agent-CLIs). |
+| **OMP**         | `curl -fsSL https://omp.sh/install \| sh`                          | Oh My Pi. Run it once by hand to finish its own onboarding.                |
 
 Log each CLI in once, by hand, before pointing Codeman at it. Codeman never collects or
 stores your CLI credentials.
@@ -161,6 +182,7 @@ Full detail, including logs and the self-updater, is in
 | Installer     | Re-run the one-liner, or **App Settings → System → Updates** in the UI. |
 | npm           | `npm update -g aicodeman`                                          |
 | git clone     | `git pull && npm install && npm run build`, then restart.          |
+| Docker Compose | Re-run `Start-Codeman.sh`. The in-app updater works too, and refuses a release that changes the container definition until you re-run the script. |
 
 The in-app updater covers git-clone installs supervised by systemd or launchd. It restarts
 the process that is running it, so the actual work happens in a detached script and the

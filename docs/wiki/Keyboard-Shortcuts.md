@@ -30,6 +30,9 @@ Press `Ctrl+?` in the app for the same list in a floating overlay.
 | `Ctrl+Shift+R`          | Restore terminal size.                                           |
 | `Ctrl` `+` / `Ctrl` `-` | Font size.                                                       |
 | `Shift+Wheel`           | Scroll the local buffer, even where the wheel is forwarded to the CLI. |
+| `Shift+drag`            | Start a selection in a pane whose mouse events go to the CLI.    |
+| Right-click             | Copy the selection. With nothing selected the native menu is left alone. |
+| `Ctrl+Z`                | Swallowed in agent sessions so a running CLI cannot be suspended. Normal job control in a shell. |
 
 ## Everything else
 

@@ -27,9 +27,12 @@ keystroke echo. Idle now lands a few seconds after a turn genuinely ends.
 There are several layers stacked on that: a completion message from the CLI, an AI check,
 output silence, and token stability.
 
-**For every other CLI**, there are no hooks to lean on, so detection is output
-stabilization: the session is idle when output stops changing. Coarser, and it is why the
-features further down this page are Claude-only.
+**For the other CLIs** it depends on what the CLI tells Codeman. Codex declares its own
+prompt glyph and working line, so it gets the same screen check Claude does (before 1.26.1
+every Codex session reported idle for its whole life). DeepSeek Harness reports idle,
+working and blocked to Codeman itself, which is as precise as hooks. Everything else is
+output stabilization: the session is idle when output stops changing. Coarser, and it is
+why the features further down this page are Claude-only.
 
 ## The Respawn Controller
 
@@ -101,13 +104,18 @@ subscription plan.
 **Claude only.** A header chip showing live subscription usage, on by default on desktop and
 off on phones.
 
-It works by installing a status line exporter into Claude Code, which posts Claude's own
-rate limit data back to Codeman. The exporter is marker-identified, so it only ever touches
-a status line Codeman installed, never one you wrote yourself, and it prints your footer
-through so the in-terminal status line still works.
+It works through a status line exporter that Codeman hands to `claude` as an ephemeral
+setting when it spawns the session, never written to disk, which posts Claude's own rate
+limit data back to Codeman. Your own status line (project-local, project, then
+`~/.claude/settings.json`) is wrapped and printed through, and a `claude` you run by hand
+outside Codeman sees nothing of it. Workspaces an older Codeman wrote the exporter into are
+cleaned up the first time a session starts there. Codex limits come from a read-only poll of
+its own app-server. Known limit: sessions inside a Docker case do not feed the chip yet.
 
 The chip and the exporter are the same setting. Turning the chip on without the exporter
-would leave it showing a dash forever, so resolve it in one place: **App Settings**.
+would leave it showing a dash forever, so resolve it in one place: **App Settings**. A
+device writes the switch only when it flips the chip, so a phone (chip off by default)
+saving its font size cannot switch collection off for your desktop.
 
 ## Circuit breakers
 

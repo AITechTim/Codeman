@@ -46,6 +46,7 @@ supervised by systemd or launchd; npm installs report as non-updatable. See
 | Extended Keyboard Bar         | Per device           | Which accessory bar phones get. Shell sessions override it while they are active. |
 | Wheel Scrolls Local History   | Off                  | Keeps the wheel on the local buffer instead of forwarding it to the CLI. |
 | Auto Copy Selection           | Off                  | Copies highlighted terminal text to the clipboard the moment you finish selecting it. Ctrl+C still copies on demand. |
+| Normal / Bold font weight     | xterm defaults       | Per device, each slot from 100 to 900. The bundled JetBrains Mono renders every step, so a lighter normal weight makes Claude's bold headings stand out. Applies live to the terminal, both echo overlays and open team panes. |
 | WebGL Renderer                | On                   | With a GPU-stall watchdog that falls back to DOM rendering.            |
 | Gesture Control               | Off                  | Camera hand tracking. Also needs `CODEMAN_GESTURE=1` on the server.    |
 
@@ -72,10 +73,13 @@ every session or only the active tab.
 | Entrance Animations     | Per-surface animation styles for tabs, terminals, windows, and lineage lines. All default to the legacy no-animation behaviour. |
 | Display Name           | Your name in the UI. Cosmetic only; it never renames the package, CLI, API, or storage.    |
 | Interface Language     | English or Simplified Chinese. Per device.                                                 |
-| Session List Layout    | Header tab strip (default) or a collapsible left sidebar. See [The Dashboard](The-Dashboard#session-list-layout). |
+| Session List Layout    | Header tab strip (default), a collapsible left sidebar, or the sidebar with detailed rows. See [The Dashboard](The-Dashboard#session-list-layout). |
+| Tab Orientation        | Keeps the header list but turns the strip vertical beside the terminal, resizable, with detailed rows by default. Desktop and tablet only. |
+| Vertical Rail Order    | *By activity* (default) sorts the rail the way the home screens are sorted; *Manual* keeps your tab order and drag-reordering. |
 | Tall Tabs              | Taller tab strip.                                                                          |
 | Pop-out Button on Tabs | Adds the detach control to tabs, with a per-tab override.                                  |
 | Spawn Lineage Lines    | Arcs from a parent tab to sessions it spawned. Desktop only, on by default.                |
+| Auto-name Sessions     | Titles a new tab after its first prompt, keeping the case prefix (`w3-myapp: fix the login redirect`). Synced, off by default. See [The Dashboard](The-Dashboard#automatic-session-names). |
 | Overview Home Screen   | The phone home screen. On by default.                                                      |
 
 ### Models
@@ -155,6 +159,9 @@ Some things are configured before the server starts, not in the UI:
 | `CODEMAN_DOCKER_BRIDGE_HOOKS`       | Lets in-container hooks reach the host on a loopback bind.              |
 | `CODEMAN_FILE_PICKER_ROOTS`         | Extra roots for the path picker.                                        |
 | `CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK` | Acknowledges exposing the server with no password.                  |
+| `CODEMAN_BASE_URL`                  | Mounts Codeman under a sub-path behind a reverse proxy that forwards the prefix unchanged. See [Remote Access](Remote-Access). |
+| `CODEMAN_MAX_DOWNLOAD_BYTES`        | Cap on raw file bodies and downloads. 2 GB by default, `0` for none.    |
+| `CODEMAN_MAX_REMOTE_FILE_SSH`       | Concurrent ssh reads for files in remote cases. 4 by default.           |
 
 ## Gotchas
 

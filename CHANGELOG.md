@@ -1,5 +1,34 @@
 # aicodeman
 
+## 1.30.0
+
+### Minor Changes
+
+- da933d7: Offer to rebuild the sessions a host reboot destroyed. A reboot takes the tmux server down with it, so every pane dies and the board comes up empty. Codeman now works out what was running, and the board offers to restore it behind a click. The conversations come back; the terminal scrollback does not, and the banner says so.
+
+### Patch Changes
+
+- a1c35da: Stop a phone keyboard losing the last character of every message it sends. Android soft keyboards commit the last typed character and send the Enter key in one InputConnection transaction, so the `input` event and the Enter keydown are both processed before any zero-delay timer runs. The orphaned-input recovery from #388 only resolved its candidate on such a timer, and lost it both ways: xterm emits `\r` synchronously from the Enter keydown, so the local-echo composer submitted the prompt before the recovered character existed, and that `\r` bumped the "did xterm speak for this keystroke" counter, so the candidate then stood itself down and dropped the character outright. Pending candidates are now drained synchronously at the next keydown, from xterm's custom key handler, which runs before xterm processes that key, so the counter still holds the value it had while the candidate's own keystroke was current, and the recovered byte reaches the composer ahead of the Enter. Typing on a physical keyboard is unaffected: there, the timer has already resolved the candidate before the next key arrives.
+- 3f2928a: The installer's hint for a launcher-only CLI (DeepSeek today) now says why it is a docs link rather than a command you can run, and points at the thing that resolves it: the package installs a launcher that still needs a terminal profile, and Codeman's Run menu can add one in a click. Driven by a generated `CLI_LAUNCHER_ONLY` flag rather than an id check, so it covers any future entry of that shape. Also removes three dead lookup helpers and two never-read generated arrays from `install.sh`, skips a disabled entry's probe instead of filtering it afterwards, and corrects a comment that claimed the non-interactive default is always Claude Code (on a wget-only host its curl one-liner is filtered out first).
+- 0e1191b: Maintainer fixes applied while landing the above. A session restored after a reboot keeps the name you gave it (the rebuild dropped the field that records who named a session, so a hand-renamed session came back looking auto-named and the next prompt overwrote it), and no longer types `continue` into itself on its own: a pending auto-resume stamp from before the reboot is dropped rather than re-armed, since the pane is new and one click could otherwise arm several unattended prompts at once. Auto-resume itself stays on and re-arms on the next real usage-limit message. The restore offer is also hidden in a detached single-session window, which has no tab strip to put restored sessions in, and a conversation that goes live while an earlier session in the same batch is starting is no longer restored a second time.
+- 0e1191b: ### Thanks
+  - @irisitymichaelgrundberg for the reboot-restore banner (#442), and for the three real reboots behind it rather than a mocked one.
+  - @shenlvkang-collab for tracking down why Android keyboards lost the last character of every message (#441), including the half where the character was not late but gone.
+  - @opticon454 for going back and closing out the loose ends left as "worth knowing rather than fixing" after #380 (#429).
+
+- de864e7: Keep the terminal anchored where you are reading while an agent streams (#358). Scrolling up during a Codex response could still be dragged back to the live bottom by the next redraw: the flush captured the viewport before writing and restored it immediately after, but xterm parses asynchronously, so at that moment the buffer had not moved yet, the restore compared the anchor against itself and did nothing, and the redraw landed a tick later with nothing left to pull the view back. The restore now runs inside xterm's own write callback, which is the first point at which the redraw's effect exists, and it holds across consecutive and chunked redraws. It is dropped if you switch sessions or a history replay starts before the write parses, since the anchor indexes the buffer it was captured from.
+
+## 1.29.1
+
+### Patch Changes
+
+- 5b920cb: Auto-name sessions from the first prompt (#376, opt-in). With the new synced **Auto-name Sessions** setting on (App Settings → Appearance → Tabs, default off), a tab that still carries its generated name takes a title from the first real prompt you submit, keeping the case prefix: `w3-myapp` becomes `w3-myapp: fix the login redirect`. The strip shows the title with the prefix in the tooltip, and the next session in that case still counts up. It happens once per session, only for prompts you type or send through the input API (never a Ralph, respawn, cron or approval answer), never for shells, and a name you set yourself is never touched. Slash commands such as `/clear` do not become titles. The title is derived locally from the prompt's first sentence; no text leaves the machine. `nameSource` (`placeholder` / `auto` / `manual`) is a new additive field on session state.
+
+  Landed with the fixes the review of #376 asked for: first prompt only (not every prompt), a user-input gate so Ralph, respawn, cron and approval writes cannot name a tab, the prefix form so the case identity and `w<n>` counter survive, and a keystroke tracker that handles a bare Esc, bracketed pastes, wheel reports, Tab and history recall instead of mis-titling the tab.
+
+  ### Thanks
+  - @shenlvkang-collab for #376, the auto-naming idea and the ownership plumbing (`nameSource`, the listener wiring, the restore path) it shipped with.
+
 ## 1.29.0
 
 ### Minor Changes

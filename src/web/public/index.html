@@ -225,6 +225,24 @@
       <button class="offline-banner-retry" id="hostWakeBannerAction" onclick="app.hostWakeAction()">Wake</button>
     </div>
 
+    <!-- Reboot-restore offer: shown when the server found sessions a host reboot
+         killed and is asking whether to rebuild them. Populated by
+         reboot-restore-ui.js; nothing is created until the user clicks. -->
+    <div class="reboot-restore-banner" id="rebootRestoreBanner" role="status" hidden>
+      <span class="reboot-restore-banner-icon" aria-hidden="true">↺</span>
+      <span class="reboot-restore-banner-text" id="rebootRestoreBannerText"></span>
+      <span class="reboot-restore-banner-detail" id="rebootRestoreBannerDetail"></span>
+      <span class="reboot-restore-banner-note">Conversations return; terminal history does not.</span>
+      <button
+        class="reboot-restore-banner-accept"
+        id="rebootRestoreBannerAccept"
+        onclick="app.restoreRebootSessions()"
+      >
+        Restore
+      </button>
+      <button class="reboot-restore-banner-dismiss" onclick="app.dismissRebootRestore()">Dismiss</button>
+    </div>
+
     <!-- Timer Banner (shown when timed run is active) -->
     <div class="timer-banner" id="timerBanner" style="display: none;">
       <div class="timer-content">
@@ -2059,6 +2077,13 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsLineageLines" checked><span class="slider"></span></label>
                   </div>
+                  <div class="set-row" id="appSettingsAutoNameSessionsItem" data-search="auto name session title first prompt tab rename">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Auto-name Sessions <span class="set-tag">synced</span></span>
+                      <span class="set-row-desc">Title a new tab after its first prompt, keeping the case prefix. Renamed tabs are never touched.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsAutoNameSessions"><span class="slider"></span></label>
+                  </div>
                   <div class="set-row" id="appSettingsMobileOverviewItem" data-search="overview home screen phone logo">
                     <div class="set-row-text">
                       <span class="set-row-label">Overview Home Screen <span class="set-tag">phone</span></span>
@@ -3580,6 +3605,7 @@
   <script defer src="readmymind-ui.js"></script>
   <script defer src="ultracode-panel.js"></script>
   <script defer src="approvals-ui.js"></script>
+  <script defer src="reboot-restore-ui.js"></script>
   <script defer src="admin-ui.js"></script>
   <script defer src="session-ui.js"></script>
   <script defer src="host-wake-ui.js"></script>

@@ -96,6 +96,7 @@ import {
 } from '../route-helpers.js';
 import { buildAgentCaseMarker, writeAgentCaseMarker } from '../../agent-case-marker.js';
 import { canUsernameRunPrivilegedCommands, resolveClaudeModeForUsername } from '../../user-store.js';
+import { clampEnvOverridesForOwner } from '../../session-env-clamp.js';
 import { enabledClis, getCli } from '../../config/cli-registry/registry.js';
 import { resolveCliLaunchError } from '../../utils/cli-launcher.js';
 import { legacyConfigForMode } from '../../session-cli-registry-bridge.js';
@@ -448,72 +449,6 @@ export async function _clampExternalCliBypassForOwner(
     grokConfig: GrokConfig | undefined;
     deepSeekConfig: DeepSeekConfig | undefined;
   };
-}
-
-/**
- * Env-var keys a non-granted owner must not be able to set, because each one
- * hands back privilege the config clamp above just removed, or redirects a
- * credential-resolution endpoint.
- *
- * The DeepSeek three are reachable because `DSH_*` and `DEEPSEEK_*` are
- * allowlisted `envOverrides` prefixes (schemas.ts) — which they have to be, since
- * that is also how a user configures the harness's non-privileged knobs.
- *
- * - `DSH_PERMISSION_MODE` IS the harness's permission switch. Every other CLI's
- *   bypass is a command-line FLAG, reachable only through the per-CLI config the
- *   clamp already owns; this one is an env var, so the config clamp alone is
- *   half a gate.
- * - `DSH_HOME` points the launcher at a profile tree, and a profile's plugin code
- *   executes at BOOT, before any approval row can apply. A user who can write a
- *   workspace can put a profile in it, so this is the wider of the two.
- * - `DEEPSEEK_BASE_URL` aims the provider endpoint, and `_configureCliEnv()`
- *   forwards the SERVER's own `DEEPSEEK_API_KEY` into every dsh pane before
- *   `applyEnvOverrides()` runs — so a non-granted owner who could set the base
- *   URL would have the operator's API key sent as a bearer credential to a host
- *   of their choosing. (`DEEPSEEK_API_KEY` itself stays overridable: supplying
- *   your OWN key removes privilege rather than granting it.)
- * - `OMP_AUTH_BROKER_URL`/`OMP_AUTH_BROKER_TOKEN` are where omp resolves
- *   credentials from — the same shape as `DEEPSEEK_BASE_URL` above, reachable
- *   because `OMP_*` is an allowlisted prefix. Unlike DeepSeek, Codeman does not
- *   forward any operator-held key into an omp pane today (omp's provider
- *   credentials live in `~/.omp` config files, not env vars), so there is no
- *   known concrete exfiltration path yet — clamped defensively anyway, since a
- *   non-granted owner redirecting where a shared multi-tenant deployment
- *   resolves auth from is not something to allow silently (found in
- *   Ark0N/Codeman#353 review; omp's own knobs are otherwise mostly `PI_*`,
- *   already allowlisted for pi and not addressed here — see resolveOmpHome()).
- */
-function ownerClampedEnvKeys(): string[] {
-  return enabledClis().flatMap((entry) => entry.capabilities.privilegedEnvKeys);
-}
-
-/**
- * Env-var half of the multi-user bypass clamp.
- *
- * `clampExternalCliBypassForOwner()` clamps the per-CLI CONFIG, and for every CLI
- * but DeepSeek that is the whole story. Here it is not: `applyEnvOverrides()` runs
- * AFTER `_configureCliEnv()` in tmux-manager, so an override sent on the SAME
- * request lands last and wins, and a non-granted owner could restore
- * `danger-full-access` on the very request the config clamp downgraded.
- *
- * Keys are DROPPED rather than rewritten: dropping falls through to what
- * `_configureCliEnv()` exports, which is the clamped config and the server's own
- * `DSH_HOME`, i.e. exactly the intended state. No-op in single-user mode and for a
- * granted owner, like every other clamp here
- * (`canUsernameRunPrivilegedCommands()` returns true when `!isMultiUserMode()`),
- * and it returns the caller's own object untouched when there is nothing to strip.
- */
-async function clampEnvOverridesForOwner(
-  owner: string | undefined,
-  envOverrides: Record<string, string> | undefined
-): Promise<Record<string, string> | undefined> {
-  if (!envOverrides) return envOverrides;
-  const keys = ownerClampedEnvKeys();
-  if (!keys.some((key) => key in envOverrides)) return envOverrides;
-  if (await canUsernameRunPrivilegedCommands(owner)) return envOverrides;
-  const clamped = { ...envOverrides };
-  for (const key of keys) delete clamped[key];
-  return clamped;
 }
 
 /** Test hook: the env-var half of the same multi-user safety gate. */
@@ -1747,6 +1682,9 @@ export function registerSessionRoutes(
 
     // Write input to PTY. Direct write is synchronous; writeViaMux
     // (tmux send-keys) is fire-and-forget to avoid blocking the HTTP response.
+    // Every write here is `fromUser`: this route carries a person's prompt, or an
+    // agent's on their behalf, so it may name the tab (Ralph, respawn, cron and
+    // approvals write through the session directly and never say so).
     //
     // Because the response has already been sent by then, a failure there is the
     // one case the caller can never learn about — so the dedup bookkeeping is
@@ -1769,32 +1707,32 @@ export function registerSessionRoutes(
     } else if (useMux && waitPromise) {
       // The response is already staying open for the wait, so the tmux write can be
       // awaited here. This is the ONE path where a writeViaMux failure is observable.
-      const ok = await session.writeViaMux(inputStr).catch(() => false);
+      const ok = await session.writeViaMux(inputStr, { fromUser: true }).catch(() => false);
       if (ok) {
         delivered = true;
       } else {
         console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
-        delivered = session.write(inputStr);
+        delivered = session.write(inputStr, { fromUser: true });
         if (!delivered) undoOnFailure();
       }
     } else if (useMux) {
       // Fire-and-forget: don't block the HTTP response on a tmux child process.
       // Fallback to a direct write on failure. Unchanged from before send-and-wait.
       session
-        .writeViaMux(inputStr)
+        .writeViaMux(inputStr, { fromUser: true })
         .then((ok) => {
           if (ok) return;
           console.warn(`[Server] writeViaMux failed for session ${id}, falling back to direct write`);
-          if (!session.write(inputStr)) undoOnFailure();
+          if (!session.write(inputStr, { fromUser: true })) undoOnFailure();
         })
         .catch(() => {
-          if (!session.write(inputStr)) undoOnFailure();
+          if (!session.write(inputStr, { fromUser: true })) undoOnFailure();
         });
     } else {
       // Same rollback. NOT an error response, deliberately: a session can
       // legitimately have no PTY yet (created but not started), and callers have
       // always been able to write to one without a 4xx.
-      delivered = session.write(inputStr);
+      delivered = session.write(inputStr, { fromUser: true });
       if (!delivered && tagged) {
         session.forgetInputSeq(clientId as string, seq as number);
       }
@@ -2043,6 +1981,9 @@ export function registerSessionRoutes(
       console.error('[Server] send-key failed:', err);
       return createErrorResponse(ApiErrorCode.INTERNAL_ERROR, 'tmux send-keys failed');
     }
+    // The bytes bypassed the session's write path, so tell the auto-name
+    // tracker about them or the two lines of a prompt join with no separator.
+    session.trackUserInput(hex.map((byte) => String.fromCharCode(parseInt(byte, 16))).join(''));
     return {};
   });
 

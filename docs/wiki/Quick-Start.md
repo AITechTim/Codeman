@@ -67,6 +67,9 @@ one:
 | **Gemini**           | Enterprise only since Google's consumer cutover.                |
 | **Antigravity**      | Google's successor to the consumer Gemini CLI.                  |
 | **Pi**               | No permission prompts and no sandbox by design.                 |
+| **Grok Build**       | xAI's CLI.                                                      |
+| **DeepSeek Harness** | Needs a terminal profile; the menu offers to install one.       |
+| **OMP**              | Oh My Pi, configured entirely through its own `~/.omp`.          |
 | **Terminal / Shell** | A plain shell, no agent. Also the **Run Shell** button.          |
 
 The dropdown also lists any saved dashboard URLs ([Web Tabs](Web-Tabs)) and your recent

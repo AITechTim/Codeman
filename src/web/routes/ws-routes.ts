@@ -185,7 +185,8 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
               // Typed input from a claim-holding desktop keeps the claim "hot"
               // and re-asserts the desktop layout after a mobile override.
               if (holdsDesktopClaim) session.noteDesktopActivity();
-              delivered = session.write(msg.d);
+              // Browser keystrokes are the user's own, so they may name the tab.
+              delivered = session.write(msg.d, { fromUser: true });
               // A session whose PTY is gone swallows the write. ACKing anyway told
               // the client to drop the frame from its durable queue and left the seq
               // burnt, so the retry that reliable delivery exists for was rejected as

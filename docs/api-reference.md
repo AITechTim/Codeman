@@ -479,6 +479,48 @@ re-captured, or the item acknowledged), `approval:resolved` (`{ id, sessionId, k
 `resolution` one of `answered | resolved_in_terminal | superseded |
 session_ended | dismissed | expired`).
 
+## Reboot restore
+
+A host reboot takes the tmux server down with it, so every pane dies and the
+board comes up empty. At boot Codeman works out which sessions the reboot
+destroyed and holds that plan in memory, and these endpoints let a client offer
+it to the user. Nothing creates a pane until the user asks: the boot-time reboot
+heuristic decides whether to ASK, never whether to act.
+
+Claude-mode sessions only (others carry their conversation id in their own
+config object); remote and docker sessions are never offered, because both need
+another host or container to be up. The plan is in-memory, so a server restart
+drops it and the offer is gone; the conversations themselves are unaffected,
+since they live in the CLI's own transcript store and stay reachable from the
+Resume list. A plan nobody spends expires after 24 hours.
+
+- `GET /api/v1/reboot-restore` → `{ sessions: RestorableSession[],
+  scrollbackRestored: false }`, ownership-scoped in multi-user mode.
+  `RestorableSession`: `{ id, name?, workingDir, mode, owner? }`. The persisted
+  record itself is never sent. `scrollbackRestored` is always `false` and exists
+  so a client states it: a restored session is a NEW pane, so the conversation
+  continues and the terminal history does not.
+- `POST /api/v1/reboot-restore/restore` with `{ sessionIds?: string[] }` (omit
+  to restore everything the caller can see) → `{ restored: RestorableSession[],
+  skipped: { sessionId, reason }[] }`. `reason` is one of `workspace-missing`
+  (the directory is gone), `workspace-forbidden` (in multi-user mode it is
+  outside the workspace of the user the session belongs to, re-checked against
+  that owner's current grant rather than the caller's), `already-live` (the conversation is already
+  open, typically resumed by hand from the Resume list), `capacity-reached`
+  (the global or per-user session cap), or `rebuild-failed` (the agent would not
+  start, most often a CLI binary missing from the server's PATH).
+  `409 CONFLICT` when that caller already has a restore running. Entries are
+  removed from the plan before any pane is built, so a double-click cannot put
+  two panes on one conversation; anything that never became a pane goes back on
+  offer, except `already-live`, which cannot stop being true. A restored session
+  comes back attached, idle and disarmed: respawn controllers and Ralph loops
+  are never re-armed automatically.
+- `POST /api/v1/reboot-restore/dismiss` → `{ dismissed: n }`. Drops the offer
+  for everything the caller can see.
+
+Each rebuilt session also emits the ordinary `session:created` SSE event, so
+clients other than the one that clicked pick it up without refetching.
+
 ## Read My Mind intent profiles
 
 Per-case profiles of what the user is trying to accomplish: user/agent-stated

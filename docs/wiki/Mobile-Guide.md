@@ -30,8 +30,12 @@ require a secure context.
 | Toolbar              | Bottom: Run, Stop, **Enter**, case picker, voice, settings.             |
 | Keyboard bar         | Above the on-screen keyboard when it is open.                           |
 
-Layout respects notch and home-indicator safe areas, touch targets are 44px, and the case
-picker is a bottom sheet rather than a dropdown.
+The phone layout applies up to 599px of viewport width, so the Plus and Pro Max iPhones,
+the Pixel Pro and a folded Z Fold get it too; wider devices get the tablet layout. Layout
+respects notch and home-indicator safe areas, touch targets are 44px, and the case picker is
+a bottom sheet rather than a dropdown. On a folding phone (iPhone Duo) dialogs stay clear of
+the hinge, and opening or closing the device is treated as the device changing shape, never
+as the keyboard appearing.
 
 **Swipe left and right** on the terminal to switch sessions.
 
@@ -58,7 +62,9 @@ A row of keys above the virtual keyboard, and what it contains depends on the se
 
 **Agent sessions** get quick actions: `/init`, `/clear`, `/compact`, a clipboard key, `Esc`,
 a path picker, an image key, and 🧠 when Read My Mind is on. Destructive commands need a
-double press, so you cannot fire `/clear` with a stray thumb.
+double press, so you cannot fire `/clear` with a stray thumb. On Codex sessions the bar also
+shows `⇧←` and `⇧→`, the Shift-modified arrows Codex binds to editing the last queued
+message and walking the prompt stack.
 
 **Shell sessions** automatically swap it for terminal controls: `Ctrl`, `Esc`, `Tab`, four
 arrows, paste, and dismiss. Your normal preference is remembered and restored when you

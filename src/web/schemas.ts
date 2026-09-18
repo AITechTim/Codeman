@@ -1185,6 +1185,20 @@ const NotificationEventSchema = z
   })
   .optional();
 
+/**
+ * Body of `POST /api/reboot-restore/restore`.
+ *
+ * `sessionIds` restores a subset, and omitting it restores everything the caller
+ * can see. The ids are session ids from `GET /api/reboot-restore`, and an id the
+ * caller does not own is ignored rather than refused, matching how the session
+ * list scopes rather than 403s.
+ */
+export const RebootRestoreRequestSchema = z
+  .object({
+    sessionIds: z.array(z.string().max(128)).max(200).optional(),
+  })
+  .strict();
+
 export const SettingsUpdateSchema = z
   .object({
     // User-facing product branding. This changes browser/UI copy only; package,
@@ -1254,6 +1268,13 @@ export const SettingsUpdateSchema = z
      * already pending immediately.
      */
     approvalsInboxEnabled: z.boolean().optional(),
+    /**
+     * Auto-name sessions: a placeholder tab (`w3-case`) takes its first real
+     * prompt as a title (`w3-case: fix the login redirect`). Synced, default
+     * OFF: the prompt lands in mux-sessions.json, every session:updated
+     * broadcast and /api/search, which is the user's choice to make.
+     */
+    autoNameSessions: z.boolean().optional(),
     /**
      * Read My Mind (docs/readmymind-plan.md): capture the user's submitted
      * prompts into per-case intent profiles. SYNCED, default OFF (opt-in:

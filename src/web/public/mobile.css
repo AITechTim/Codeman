@@ -3241,6 +3241,43 @@ html:is([data-skin="paper-gray"], [data-skin="solarized-light"], [data-skin="cat
    other banners. The overlay is fixed and handles its own insets.
    ============================================================================ */
 @media (max-width: 599px) {
+  /* Reboot-restore banner: the same treatment as the offline banner below. Its
+     text and note are nowrap and the two buttons cannot shrink, so without this
+     the actions are pushed off a phone-width viewport and become unreachable. */
+  .reboot-restore-banner {
+    padding: 0.4rem 0.5rem;
+    padding-left: calc(0.5rem + var(--safe-area-left));
+    padding-right: calc(0.5rem + var(--safe-area-right));
+    font-size: 0.7rem;
+    gap: 0.4rem;
+  }
+
+  /* The session names and the scrollback note are the first things to go. The
+     count plus the two buttons carry the message on their own, and the note
+     survives as the accept button's title. */
+  .reboot-restore-banner-detail,
+  .reboot-restore-banner-note {
+    display: none;
+  }
+
+  /* A flex item will not shrink below its content width at the default
+     `min-width: auto`, so without this the nowrap text pushes the buttons off a
+     360px viewport and the ellipsis never engages. */
+  .reboot-restore-banner-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .reboot-restore-banner-accept,
+  .reboot-restore-banner-dismiss {
+    padding: 0.25rem 0.5rem;
+  }
+
+  .reboot-restore-banner-accept {
+    margin-left: auto;
+  }
+
   .offline-banner {
     padding: 0.4rem 0.5rem;
     padding-left: calc(0.5rem + var(--safe-area-left));

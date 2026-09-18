@@ -66,14 +66,14 @@ self-signed certificate, add `-k`.
 
 ## Endpoint map
 
-Roughly 200 handlers across 24 route modules. By domain:
+Roughly 235 handlers across 26 route modules. By domain:
 
 | Domain              | Handlers | Covers                                              |
 | ------------------- | -------- | --------------------------------------------------- |
-| System              | 45       | Status, settings, search, digest, updates.           |
-| Sessions            | 34       | Create, input, terminal, wait, kill.                 |
-| Cases               | 29       | Create, link, clone, remote and docker cases.        |
-| Files               | 16       | Preview, edit, raw, attachments, path picker.        |
+| System              | 56       | Status, settings, digest, updates, tunnel.           |
+| Sessions            | 34       | Create, input, terminal, wait, last response, kill.  |
+| Cases               | 34       | Create, link, clone, remote and docker cases.        |
+| Files               | 17       | Preview, edit, raw, attachments, path picker.        |
 | Orchestrator        | 10       | Plans and phases.                                     |
 | Ralph               | 9        | Loop control and configuration.                       |
 | Cron                | 9        | Jobs and run history.                                 |
@@ -82,10 +82,12 @@ Roughly 200 handlers across 24 route modules. By domain:
 | Respawn             | 7        | Respawn configuration and presets.                    |
 | Webviews            | 6        | Saved dashboards, plus the proxy.                     |
 | Mux                 | 5        | tmux operations.                                      |
+| Custom model endpoints | 5     | Saved OpenAI-compatible endpoints, and applying one to a session. |
 | Push                | 4        | Web push subscriptions.                               |
 | Read My Mind        | 4        | Intent profiles and prediction.                       |
 | Scheduled           | 4        | The legacy scheduled-run concept.                     |
-| Approvals           | 3        | The inbox and answering.                              |
+| Approvals           | 4        | The inbox, answering, acknowledging.                  |
+| Tab layout          | 2        | Named tab groups per owner.                           |
 | Teams, me, search, hooks, clipboard, telemetry, voice, ws | 1-2 each | |
 
 Each route module documents its own endpoints in its file header.
@@ -114,12 +116,13 @@ Three semantics that break callers who assume otherwise:
 `wait-output` matches a **literal substring, never a regex.** That is deliberate: no regex
 means no catastrophic backtracking on attacker-influenced output.
 
-Only `claude` sessions emit `stop` and `blocked`, because those come from Claude Code hooks.
-Shell and external CLI sessions accept `idle`, `working`, and `exit`.
+Only `claude` and `deepseek` sessions emit `stop` and `blocked`: Claude's come from Claude
+Code hooks, DeepSeek's from the harness reporting its state to Codeman. Shell and the other
+external CLI sessions accept `idle`, `working`, and `exit`.
 
 ## SSE
 
-`GET /api/events` is the live event stream. 156 event names, kept in sync between server and
+`GET /api/events` is the live event stream. 158 event names, kept in sync between server and
 client with a test that fails on drift.
 
 The heartbeat is a **named** `sse:heartbeat` event rather than an SSE comment, because
@@ -141,6 +144,12 @@ curl -s "$API/api/sessions" | jq '.data[].name'    # live sessions
 curl -s "$API/api/sessions/unified" | jq           # live + historical, deduped
 curl -s "$API/api/subagents" | jq                  # background agents
 curl -s "$API/api/search?q=deploy" | jq            # cross-session search
+
+# with ID set to a session id:
+curl -s "$API/api/sessions/$ID/last-response" | jq -r '.data.text'   # last answer, from the transcript (claude, codex, deepseek)
+curl -s "$API/api/model-endpoints" | jq                                # saved custom OpenAI-compatible endpoints
+curl -s -X POST "$API/api/sessions/$ID/custom-model" -H 'Content-Type: application/json' \
+  -d '{"endpointId":"local-llama","modelId":"qwen3-27b"}' | jq        # restart the CLI on that endpoint; {"clear":true} undoes it
 ```
 
 ## Limits
