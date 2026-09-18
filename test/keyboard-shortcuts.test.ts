@@ -63,9 +63,12 @@ describe('keyboard shortcuts', () => {
     // The xterm handler owns this decision, and the no-selection path must fall
     // through with NO preventDefault so xterm still evaluates Ctrl+C into 0x03.
     expect(terminalUiSource).toContain('this.shouldCopyTerminalSelectionFromShortcut?.(ev)');
-    expect(terminalUiSource).toMatch(
-      /const selection = this\.terminal\.hasSelection\?\.\(\) \? this\.terminal\.getSelection\(\) : '';/
-    );
+    // The CLEANED selection is what decides. A drag across the blank part of a row
+    // selects real padding spaces, so the raw text is truthy and testing it would
+    // spend the press on a copy of nothing — the same lost interrupt this test
+    // guards, reached by a different door.
+    expect(terminalUiSource).toMatch(/const selection = this\.cleanedTerminalSelection\(\);/);
+    expect(terminalUiSource).toMatch(/if \(selection\.trim\(\)\) \{/);
     expect(terminalUiSource).toContain('void this.copyTerminalSelection(selection);');
     expect(appSource).toContain("id: 'copy-selection'");
   });
