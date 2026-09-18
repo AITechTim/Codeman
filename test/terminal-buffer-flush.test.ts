@@ -339,6 +339,26 @@ describe('buffer-load flush (COD-144)', () => {
     }
   });
 
+  it('every path that fetches a terminal buffer and writes it asks the shared helper', () => {
+    // Drift guard. The first version of this fix covered one of the four paths,
+    // and a later pass found it still covering one of four. Nothing else in the
+    // gate stops a fifth path, or an inlined `{ flushQueued: true }`, from
+    // splitting the policy up again; the browser suite that would notice does
+    // not run in CI.
+    const source = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+
+    for (const method of [
+      'selectSession',
+      '_onSessionNeedsRefresh',
+      '_onSessionClearTerminal',
+      '_maybeRefetchFullHistory',
+    ]) {
+      expect(methodBody(source, method), `${method} decides the flush policy itself`).toContain(
+        'this._bufferLoadFinishOpts('
+      );
+    }
+  });
+
   it('empty queue + flushQueued is a no-op (no throw, no writes)', () => {
     const { app, writes } = makeApp();
     const owner = app._beginBufferLoad('load-empty');
