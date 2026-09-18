@@ -3159,6 +3159,38 @@ Object.assign(CodemanApp.prototype, {
     return buffer.viewportY >= buffer.baseY - 2;
   },
 
+  /**
+   * Re-take the sticky-scroll baseline from where the viewport now sits.
+   *
+   * `batchTerminalWrite` samples `_wasAtBottomBeforeWrite` before it queues
+   * data, and `flushPendingWrites` scrolls to the bottom off that sample. A
+   * buffer load that replays its queue samples at the worst possible moment:
+   * `_finishBufferLoad` runs inside `chunkedTerminalWrite`, before its promise
+   * resolves, with the terminal freshly reset and rewritten, so the sample is
+   * always true. A caller that then restores the reader's position would have
+   * that restore undone by the next flush.
+   *
+   * `_onSessionNeedsRefresh` and `_maybeRefetchFullHistory` restore a position
+   * and both call this, so their baseline describes the position they chose.
+   *
+   * The other two load paths do not call it, for different reasons.
+   * `_onSessionClearTerminal` resets and rewrites with no scroll afterwards,
+   * so the sampled true is already the truth there. `selectSession` does NOT
+   * end at the bottom, whatever its `scrollToBottom()` after the write
+   * suggests: it ends at `scrollToLastNonEmptyLine()`, which targets
+   * `lastNonEmptyLine - rows + 2` and therefore parks ABOVE `baseY` whenever
+   * the replayed frame keeps trailing blank rows, which a full capture does on
+   * purpose. Its baseline is a stale true. What decides whether that matters
+   * is the sticky snap in `flushPendingWrites`, and since de864e7d that snap
+   * fires only when the flush found the viewport already at the bottom
+   * (`preserveViewportY === null`), which a parked selectSession viewport is
+   * not. Do not read the absent call here as a claim that selectSession lands
+   * at the bottom.
+   */
+  _syncStickyScrollBaseline() {
+    this._wasAtBottomBeforeWrite = this.isTerminalAtBottom();
+  },
+
   // Record manual scroll gestures so sticky-scroll can give an upward scroll a
   // short grace window (see _hasRecentUserScrollUp). A downward scroll that
   // lands back at the bottom clears the suppression immediately.
@@ -3295,7 +3327,11 @@ Object.assign(CodemanApp.prototype, {
     // to prevent interleaving historical buffer data with live SSE data.
     // This is critical: interleaving causes cursor position chaos with Ink redraws.
     if (this._isLoadingBuffer) {
-      if (this._loadBufferQueue) this._loadBufferQueue.push(data);
+      // Each entry records when it arrived. A flush of a tmux-capture load
+      // replays only what arrived after the capture; without the timestamp it
+      // would have to replay the whole queue, duplicating the events the
+      // capture already contains. See _finishBufferLoad's `since`.
+      if (this._loadBufferQueue) this._loadBufferQueue.push({ at: performance.now(), data });
       return;
     }
 
@@ -3809,9 +3845,14 @@ Object.assign(CodemanApp.prototype, {
    * and a tick-Worker so progress continues on occluded / idle-throttled tabs.
    * @param {string} buffer - The full terminal buffer to write
    * @param {number} chunkSize - Size of each chunk (default 32KB)
+   * @param {string} [loadOwner] - Load token to finish under
+   * @param {{ flushQueued?: boolean, since?: number }} [finishOpts] - Passed to
+   *   `_finishBufferLoad`. This method ends the load for every non-empty buffer,
+   *   so a caller that wants the queue replayed has to say so HERE; the call in
+   *   `selectSession` only runs when the write was skipped entirely.
    * @returns {Promise<{parsedAt: number, bufferLength: number, completed: boolean}>} Parse marker snapshot
    */
-  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner) {
+  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner, finishOpts) {
     // Generation counter: if a newer chunkedTerminalWrite starts (tab switch),
     // older writes abort instead of continuing to push stale data into the terminal.
     const writeGen = ++this._chunkedWriteGen;
@@ -3824,7 +3865,7 @@ Object.assign(CodemanApp.prototype, {
         completed,
       });
       if (!buffer || buffer.length === 0) {
-        this._finishBufferLoad(bufferLoadOwner);
+        this._finishBufferLoad(bufferLoadOwner, finishOpts);
         resolve(parseSnapshot());
         return;
       }
@@ -3838,7 +3879,7 @@ Object.assign(CodemanApp.prototype, {
         this.terminal.write(cleanBuffer, () => resolve(parseSnapshot()));
         // The write is now ordered in xterm's queue. Release live output before
         // parsing completes; subsequent writes stay behind it without being lost.
-        this._finishBufferLoad(bufferLoadOwner);
+        this._finishBufferLoad(bufferLoadOwner, finishOpts);
         return;
       }
 
@@ -3869,7 +3910,7 @@ Object.assign(CodemanApp.prototype, {
             );
             resolve(result);
           });
-          this._finishBufferLoad(bufferLoadOwner);
+          this._finishBufferLoad(bufferLoadOwner, finishOpts);
           return;
         }
 
@@ -3888,10 +3929,20 @@ Object.assign(CodemanApp.prototype, {
    * Called when chunkedTerminalWrite finishes (or is skipped for empty buffers).
    *
    * By default queued SSE events are DISCARDED, not flushed. For an established
-   * session the loaded buffer from the API is the source of truth up to the
-   * response timestamp; SSE events queued during the fetch+write overlap already
-   * appear in that buffer, so flushing them writes duplicate data (especially Ink
-   * cursor-up redraws), corrupting the terminal display.
+   * session whose buffer came from the server's accumulated byte history, that
+   * history is the source of truth up to the response timestamp; SSE events
+   * queued during the fetch+write overlap already appear in it, so flushing
+   * them writes duplicate data (especially Ink cursor-up redraws), corrupting
+   * the terminal display.
+   *
+   * A tmux PANE CAPTURE is the exception, and the reason `since` exists. A
+   * capture is a point-in-time frame taken part-way through the fetch, so it is
+   * the source of truth only up to CAPTURE time — not up to the response. Every
+   * event that arrives between the capture and the end of the chunked write is
+   * queued and, under a plain discard, lost outright: nothing re-fetches, and
+   * the CLI's next partial redraw lands on a frame the terminal never received.
+   * The caller passes the response's own arrival time as `since` so exactly
+   * that tail is replayed and the pre-capture events stay dropped.
    *
    * COD-144: a brand-new session is the exception. Its terminal fetch can resolve
    * BEFORE the PTY emits its first prompt, so the fetched buffer is empty and the
@@ -3905,14 +3956,22 @@ Object.assign(CodemanApp.prototype, {
    * After unblocking, new SSE/WS events deliver subsequent output normally.
    *
    * @param {string} [owner] Load token from `_beginBufferLoad`; a stale owner is a no-op.
-   * @param {{ flushQueued?: boolean }} [opts] When `flushQueued` is true, replay any queued events.
+   * @param {{ flushQueued?: boolean, since?: number }} [opts] When `flushQueued`
+   *   is true, replay queued events whose arrival timestamp is at or after
+   *   `since` (default 0, meaning the whole queue).
    */
   _beginBufferLoad(owner) {
     if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
     const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    // `selectSession` opens the load before its fetch, and `chunkedTerminalWrite`
+    // opens it again under the SAME owner when it starts writing. Resetting the
+    // queue on that second call would throw away everything that arrived during
+    // the fetch, which on the capture path is output no buffer holds. Re-entering
+    // one load keeps its queue; a genuinely new load still starts empty.
+    const reentering = this._bufferLoadOwner === loadOwner && Array.isArray(this._loadBufferQueue);
     this._bufferLoadOwner = loadOwner;
     this._isLoadingBuffer = true;
-    this._loadBufferQueue = [];
+    if (!reentering) this._loadBufferQueue = [];
     return loadOwner;
   },
 
@@ -3926,9 +3985,13 @@ Object.assign(CodemanApp.prototype, {
     this._bufferLoadOwner = null;
     // COD-144: replay (rather than discard) queued live events when the load
     // painted nothing — the queued prompt is the only content a new session has.
+    // A tmux-capture load replays too, but only the tail: `since` cuts the queue
+    // at the moment the capture stopped being able to contain what arrived.
     if (opts?.flushQueued && queued && queued.length) {
-      for (const data of queued) {
-        this.batchTerminalWrite(data);
+      const since = typeof opts.since === 'number' ? opts.since : 0;
+      for (const entry of queued) {
+        if (entry.at < since) continue;
+        this.batchTerminalWrite(entry.data);
       }
     }
     return true;
