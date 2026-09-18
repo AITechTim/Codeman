@@ -151,7 +151,7 @@ export function renderInstallShBlock(entries: CliEntry[] = STOCK_CLIS): string {
     labels.push(shQuote(entry.label));
     enabled.push(entry.enabled ? '1' : '0');
     // Parallel to CLI_IDS: 1 when this entry's install command installs a launcher rather
-    // than something that can drive a pane on its own (see installCommandFor below). Purely
+    // than something that can drive a pane on its own (see installCommandFor above). Purely
     // derived from discovery.launcherProfile — install.sh's hint printer reads this to add a
     // caveat instead of hardcoding which id it means.
     launcherOnly.push(entry.discovery.launcherProfile ? '1' : '0');
