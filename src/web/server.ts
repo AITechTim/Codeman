@@ -2940,7 +2940,8 @@ export class WebServer extends EventEmitter {
   async reapplyPersistedSessionState(
     session: Session,
     saved: SessionState,
-    phase: 'before-spawn' | 'after-spawn'
+    phase: 'before-spawn' | 'after-spawn',
+    options?: { rearmAutoResumeSchedule?: boolean }
   ): Promise<void> {
     if (phase === 'before-spawn') {
       // The custom-model env has to be rebuilt from the endpoint store: the persist
@@ -2968,7 +2969,14 @@ export class WebServer extends EventEmitter {
       session.setAutoClear(saved.autoClearEnabled ?? false, saved.autoClearThreshold);
     }
     if (saved.autoResumeEnabled) {
-      session.restoreAutoResume(true, saved.autoResumeAt);
+      // The stamp is re-armed by default, because a Codeman restart leaves the
+      // limit footer un-reprinted and dropping it there would strand the pause.
+      // A reboot restore opts out: that stamp predates the reboot, the pane is
+      // new, and honouring it means every session the user restored types
+      // `continue` into itself about a minute later, unattended. The setting
+      // itself stays on either way, so it re-arms on the next limit message.
+      const rearm = options?.rearmAutoResumeSchedule !== false;
+      session.restoreAutoResume(true, rearm ? saved.autoResumeAt : undefined);
     }
     if (saved.inputTokens !== undefined || saved.outputTokens !== undefined || saved.totalCost !== undefined) {
       session.restoreTokens(saved.inputTokens ?? 0, saved.outputTokens ?? 0, saved.totalCost ?? 0);
@@ -3024,9 +3032,18 @@ export class WebServer extends EventEmitter {
     session.ralphTracker.stopWatchingFixPlan();
     const summaryTracker = this.runSummaryTrackers.get(sessionId);
     if (summaryTracker) {
+      // Closes the run's own record before the tracker goes, the way
+      // `_doCleanupSession()` does. Cosmetic rather than load-bearing, but a
+      // run left open reads as still going in the away digest.
+      summaryTracker.recordSessionStopped();
       summaryTracker.stop();
       this.runSummaryTrackers.delete(sessionId);
     }
+    // Also mirrors `_doCleanupSession()`. The PERSISTED Ralph state is left
+    // alone on purpose (that is one of the things separating this from
+    // cleanupSession); this only clears the in-memory tracker the failed
+    // construction built, which the retry reuses the id of.
+    session.ralphTracker.fullReset();
 
     // --- what anything else may have attached to this id in the meantime ---
     // A rebuild can fail AFTER startInteractive() resolved, and a restored

@@ -11,7 +11,10 @@
  * The routes read the process-wide `rebootRestoreRegistry` singleton, so every
  * test resets it; a leaked entry would bleed into the next one.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { registerRebootRestoreRoutes } from '../../src/web/routes/reboot-restore-routes.js';
@@ -183,6 +186,49 @@ describe('POST /api/reboot-restore/restore', () => {
     const res = await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
     expect(res.statusCode).toBe(409);
     rebootRestoreRegistry.endSpending(undefined);
+    await app.close();
+  });
+});
+
+describe('POST /api/reboot-restore/restore: multi-user workspace confinement', () => {
+  const saved: Record<string, string | undefined> = {};
+  let realDir: string;
+
+  beforeEach(() => {
+    saved.CODEMAN_MULTIUSER = process.env.CODEMAN_MULTIUSER;
+    process.env.CODEMAN_MULTIUSER = '1';
+    // This branch sits AFTER the existsSync check, so the workspace has to be
+    // real for the confinement rule to be the thing that rejects the entry.
+    realDir = mkdtempSync(join(tmpdir(), 'codeman-reboot-restore-real-'));
+  });
+
+  afterEach(() => {
+    if (saved.CODEMAN_MULTIUSER === undefined) delete process.env.CODEMAN_MULTIUSER;
+    else process.env.CODEMAN_MULTIUSER = saved.CODEMAN_MULTIUSER;
+    rmSync(realDir, { recursive: true, force: true });
+  });
+
+  it("refuses a workspace outside the OWNER's case space, and leaves it on offer", async () => {
+    const entry = offerEntry('a', 'alice');
+    entry.workingDir = realDir;
+    (entry.state as { workingDir: string }).workingDir = realDir;
+    rebootRestoreRegistry.set([entry]);
+
+    // An admin does the clicking. The confinement is still resolved against
+    // alice, the entry's OWNER: `isWorkingDirAllowed` waves an admin through, so
+    // reading the caller here would hand an admin the power to rebuild another
+    // user's session anywhere on the box.
+    const app = await createHarness({ username: 'root-user', role: 'admin' });
+    const res = await app.inject({ method: 'POST', url: '/api/reboot-restore/restore', payload: {} });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.restored).toEqual([]);
+    expect(res.json().data.skipped).toEqual([{ sessionId: 'a', reason: 'workspace-forbidden' }]);
+
+    // A withdrawn grant can be given back, so unlike `already-live` this is not
+    // the permanent kind of refusal and the entry stays claimable.
+    const left = (await app.inject({ method: 'GET', url: '/api/reboot-restore' })).json().data;
+    expect(left.sessions.map((s: { id: string }) => s.id)).toEqual(['a']);
     await app.close();
   });
 });

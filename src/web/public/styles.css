@@ -2548,6 +2548,10 @@ body.solo-mode .header-tokens,
 body.solo-mode .btn-notifications,
 body.solo-mode .btn-multimonitor,
 body.solo-mode .header-plan-usage,
+/* A solo window shows ONE session and has no tab strip to put restored ones in,
+   so offering to rebuild a list of them there is an offer it cannot show the
+   result of. The dashboard that spawned this window carries the banner. */
+body.solo-mode .reboot-restore-banner,
 body.solo-mode .btn-lifecycle-log {
   display: none !important;
 }

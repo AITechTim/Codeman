@@ -41,7 +41,7 @@ import { clampEnvOverridesForOwner } from '../../session-env-clamp.js';
 import { Session } from '../../session.js';
 import { resolveClaudeModeForUsername } from '../../user-store.js';
 import { getCli } from '../../config/cli-registry/registry.js';
-import { applyWorkspaceHooks } from '../../hooks-config.js';
+import { applyWorkspaceHooks, seedAgentSessionPreamble } from '../../hooks-config.js';
 import { getLifecycleLog } from '../../session-lifecycle-log.js';
 import { STATS_COLLECTION_INTERVAL_MS } from '../../config/server-timing.js';
 import { SseEvent } from '../sse-events.js';
@@ -105,11 +105,16 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
       // the user resumed by hand from the Resume list is already on screen, and a
       // second pane on it would fight the first for the same transcript. This one
       // is never re-offered: unlike a missing workspace, it cannot stop being true.
-      const liveSessionIds = new Set(ctx.sessions.keys());
-      const liveConversationIds = new Set(
-        [...ctx.sessions.values()].map((session) => session.claudeSessionId).filter((id): id is string => !!id)
-      );
-      const { restore, skipped } = rejectAlreadyLive(taken, liveSessionIds, liveConversationIds);
+      // Read fresh each time rather than snapshotted once: the loop below awaits a
+      // real `startInteractive()` per entry, so by the tenth entry a snapshot taken
+      // here is tens of seconds old, and a conversation the user resumed by hand in
+      // that window would be invisible to it.
+      const liveSessionIds = () => new Set(ctx.sessions.keys());
+      const liveConversationIds = () =>
+        new Set(
+          [...ctx.sessions.values()].map((session) => session.claudeSessionId).filter((id): id is string => !!id)
+        );
+      const { restore, skipped } = rejectAlreadyLive(taken, liveSessionIds(), liveConversationIds());
       for (const entry of taken) {
         if (skipped.some((s) => s.sessionId === entry.sessionId)) unspent.delete(entry);
       }
@@ -119,6 +124,18 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
       const workspaceHooksEnabled = await ctx.getWorkspaceHooksEnabled();
 
       for (const entry of restore) {
+        // The already-live check, re-run against the board as it is NOW. The pass
+        // above decided the batch; this catches a conversation that went live while
+        // an earlier entry in this same batch was starting. Spent rather than
+        // returned to the plan, for the same reason as the batch pass: unlike a
+        // missing workspace or a withdrawn grant, an open conversation is not a
+        // condition that stops being true.
+        const [lateLive] = rejectAlreadyLive([entry], liveSessionIds(), liveConversationIds()).skipped;
+        if (lateLive) {
+          failures.push(lateLive);
+          unspent.delete(entry);
+          continue;
+        }
         // Capacity is re-checked per iteration, because this loop is itself
         // creating the sessions it counts. The offer can be a day old, so the
         // board may be fuller now than the plan assumed.
@@ -157,6 +174,12 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
             workingDir: saved.workingDir,
             mode: saved.mode,
             name: saved.name,
+            // Without this the constructor re-infers ownership from the name, so a
+            // session the user renamed by hand to something shaped like `w<n>-<case>`
+            // comes back as `placeholder` and auto-naming overwrites their name on
+            // the next prompt. The route persists below, so the loss would go to
+            // disk. `restoreMuxSessions()` passes it for the same reason.
+            nameSource: saved.nameSource,
             createdAt: saved.createdAt,
             mux: ctx.mux,
             useMux: true,
@@ -197,7 +220,14 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           // the reduced one and drop the pin that keeps it from being pruned. A
           // listener-driven persist can still land inside the debounce window
           // while the pane starts; the write below repairs the record.
-          await ctx.reapplyPersistedSessionState(session, saved, 'after-spawn');
+          // `rearmAutoResumeSchedule: false`: the saved stamp predates the reboot and
+          // the pane is new, so honouring it would have every restored session type
+          // `continue` into itself about a minute after one click. Auto-resume stays
+          // enabled and re-arms on the next real limit message. This is also what the
+          // module header promises ("comes back attached, idle and disarmed").
+          await ctx.reapplyPersistedSessionState(session, saved, 'after-spawn', {
+            rearmAutoResumeSchedule: false,
+          });
           ctx.persistSessionState(session);
 
           // A session without its workspace hooks goes silently blind: no stop or
@@ -208,6 +238,16 @@ export function registerRebootRestoreRoutes(app: FastifyInstance, ctx: RebootRes
           if (workspaceHooksEnabled && getCli(session.mode)?.capabilities.hooks === 'always') {
             await applyWorkspaceHooks(session.workingDir, true).catch((err: unknown) =>
               console.warn(`[reboot-restore] hook install failed for ${session.workingDir}: ${getErrorMessage(err)}`)
+            );
+          }
+
+          // Both create paths seed this; without it a restored claude session's agent
+          // skill falls back to writing out the whole ~150-line §0 preamble. Remote and
+          // docker sessions never reach here (the plan rejects them as
+          // `remote-or-docker`), so the local-only condition is structural.
+          if (getCli(session.mode)?.capabilities.agentSkillInjection && (await ctx.getAgentSkillEnabled())) {
+            await seedAgentSessionPreamble(session.id).catch((err: unknown) =>
+              console.warn(`[agent-skill] preamble seed failed for ${session.id}: ${getErrorMessage(err)}`)
             );
           }
 

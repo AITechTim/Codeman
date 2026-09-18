@@ -72,11 +72,17 @@ export interface RebootEvidence {
  * This heuristic decides whether to ASK, never whether to act. A wrong yes costs
  * the user a banner they dismiss, because the restore itself waits for a click.
  *
- * ⚠️ `os.uptime()` reports the HOST's uptime, which a container shares. A Codeman
- * running in Docker therefore sees a long uptime after its own container restarts,
- * the boot test fails, and no banner appears. The feature is effectively off for
- * containerized installs. That is the safe direction to fail in, and fixing it
- * needs a boot signal the container actually owns rather than a wider heuristic.
+ * ⚠️ `os.uptime()` reports the HOST's uptime, which a container shares, and that
+ * cuts BOTH ways rather than simply switching the feature off in Docker. After a
+ * genuine host reboot a containerized Codeman sees the host's short uptime, so the
+ * banner DOES appear and the feature works. What it cannot see is a container-only
+ * restart: the host uptime is long, the boot test fails, and no banner appears
+ * although every in-container pane is gone (`docker/server.Dockerfile` installs
+ * tmux inside the Codeman container, and the self-updater restarts the Compose
+ * deployment by exiting the container, so that is the case where this would help
+ * most). Failing quiet is the safe direction, and closing the gap needs a boot
+ * signal the container owns (PID 1's start time, gated on the existing
+ * `isRunningInContainer()`) rather than a wider heuristic.
  */
 export function looksLikeHostReboot(evidence: RebootEvidence): boolean {
   if (evidence.deadSessionCount === 0) return false;

@@ -27,7 +27,19 @@ export interface SessionPort {
   reapplyPersistedSessionState(
     session: Session,
     saved: SessionState,
-    phase: 'before-spawn' | 'after-spawn'
+    phase: 'before-spawn' | 'after-spawn',
+    options?: {
+      /**
+       * Re-arm a PENDING auto-resume schedule from the record's `autoResumeAt`.
+       * Default true, which is what a Codeman restart wants: the limit footer
+       * will not reprint on its own, so dropping the stamp there strands the
+       * pause. A reboot restore passes false: the stamp predates the reboot,
+       * the pane is new, and re-arming means every restored session types
+       * `continue` into itself about a minute after one click. Auto-resume
+       * stays ENABLED either way, so it re-arms on fresh evidence.
+       */
+      rearmAutoResumeSchedule?: boolean;
+    }
   ): Promise<void>;
   /**
    * Undo a session that was registered but never got a working pane: the map

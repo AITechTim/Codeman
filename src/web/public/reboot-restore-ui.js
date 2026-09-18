@@ -26,7 +26,7 @@
  * @mixin Extends CodemanApp.prototype via Object.assign
  * @dependency app.js (CodemanApp class, showToast)
  * @dependency api-client.js at runtime (this._api / this._apiJson)
- * @loadorder 11.7 of 17, after approvals-ui.js
+ * @loadorder 11.65, after approvals-ui.js and before admin-ui.js (11.7)
  */
 
 /** Plain-language wording for one skip reason, for the toast after a restore. */
