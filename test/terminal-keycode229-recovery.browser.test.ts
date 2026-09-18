@@ -9,7 +9,10 @@
  *    (stopPropagation, not stopImmediatePropagation) does not silence it;
  *  - a `composed: true` insertText preceded by a keydown — the shape Chrome on
  *    Android delivers — is dropped by xterm and recovered by us, exactly once;
- *  - a keystroke xterm DOES handle is delivered exactly once, not twice.
+ *  - a keystroke xterm DOES handle is delivered exactly once, not twice;
+ *  - a character committed in the SAME page task as Enter reaches the send
+ *    path ahead of the `\r`, which is the ordering the zero-delay timer
+ *    alone cannot produce.
  *
  * Browser-driven, so it is excluded from `npm run test:ci` like the other
  * Playwright suites. Run locally:
@@ -144,6 +147,84 @@ describe('orphaned terminal input recovery wiring', () => {
     const second = await keystroke({ data: 'z', dispatchInput: true, keyCode: 65 });
     expect(first.sent.join('')).toBe('z');
     expect(second.sent.join('')).toBe('z');
+  });
+
+  /**
+   * The batched shape an Android soft keyboard actually delivers when the user
+   * taps the last character and then Enter: the character's keydown, its
+   * `composed: true` insertText, and Enter's keydown all land in ONE page task,
+   * before any zero-delay timer can run.
+   *
+   * This is the ordering half of the fix, and the half the unit harness cannot
+   * reach: the unit tests prove WHICH candidate is forwarded, this proves WHEN.
+   * Resolving the pending candidate only on its 0 ms timer loses the character
+   * outright here, because by the time that timer runs xterm has already
+   * emitted the `\r` and bumped the canonical counter past the candidate's
+   * snapshot, so it stands down. Draining at the next keydown, from xterm's
+   * custom key handler (which runs before xterm processes that key), puts the
+   * character on the wire ahead of the `\r`.
+   */
+  async function batchedCommitThenEnter(data: string) {
+    return page.evaluate(async (text) => {
+      const app = (window as any).app;
+      const textarea = document.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement;
+      const originalSessionId = app.activeSessionId;
+      const originalLocalEcho = app._localEchoEnabled;
+      const originalSendInput = app._sendInputAsync;
+      const originalPendingInput = app._pendingInput;
+      const originalLastKeystrokeTime = app._lastKeystrokeTime;
+      const sent: string[] = [];
+
+      try {
+        app.activeSessionId = 'cod388-browser-batched';
+        app._localEchoEnabled = false;
+        app._pendingInput = '';
+        app._lastKeystrokeTime = 0;
+        app._sendInputAsync = (_sessionId: string, chunk: string) => sent.push(chunk);
+        textarea.focus();
+
+        // One task, no awaits between the three dispatches.
+        const charDown = new KeyboardEvent('keydown', {
+          key: 'Unidentified',
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        Object.defineProperties(charDown, { keyCode: { value: 65 }, which: { value: 65 } });
+        textarea.dispatchEvent(charDown);
+
+        textarea.value = text;
+        textarea.dispatchEvent(
+          new InputEvent('input', { data: text, inputType: 'insertText', bubbles: true, composed: true })
+        );
+
+        const enterDown = new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        Object.defineProperties(enterDown, { keyCode: { value: 13 }, which: { value: 13 } });
+        textarea.dispatchEvent(enterDown);
+
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return { wire: sent.join('') };
+      } finally {
+        app.activeSessionId = originalSessionId;
+        app._localEchoEnabled = originalLocalEcho;
+        app._sendInputAsync = originalSendInput;
+        app._pendingInput = originalPendingInput;
+        app._lastKeystrokeTime = originalLastKeystrokeTime;
+        textarea.value = '';
+      }
+    }, data);
+  }
+
+  it('delivers a character committed in the same task as Enter BEFORE the carriage return', async () => {
+    const { wire } = await batchedCommitThenEnter('o');
+    // Not '\r' (character lost, the defect) and not '\ro' (recovered too late).
+    expect(wire).toBe('o\r');
   });
 
   it('sends nothing for a keydown that produces no input event', async () => {
