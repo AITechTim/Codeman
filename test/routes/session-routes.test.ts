@@ -831,6 +831,31 @@ describe('session-routes', () => {
       expect(body.data.captureRows).toBeUndefined();
     });
 
+    it('omits the geometry when the capture reported a size but returned nothing', async () => {
+      // A capture can report geometry and still hand back no frame. The
+      // full-history path writes `capturedGeometry` from the cursor query, then
+      // returns '' for a pane holding nothing visible, which drops the source
+      // to `history` with the geometry already recorded. Reporting it there
+      // would name a size for a body that is the byte stream.
+      harness.ctx._session.terminalBuffer = 'byte history only';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedGeometry?: { cols: number; rows: number } }) => {
+          if (opts) opts.capturedGeometry = { cols: 100, rows: 50 };
+          return '';
+        }
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('history');
+      expect(body.data.captureCols).toBeUndefined();
+      expect(body.data.captureRows).toBeUndefined();
+    });
+
     // ── COD-47: full tmux scrollback replay on full page reload ──
     it('full reload (?full=1) requests full tmux history and replays boundary markers', async () => {
       // A realistic scrollback-length capture: ~5000 lines, well past one screen.

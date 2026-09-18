@@ -6572,6 +6572,27 @@ class CodemanApp {
         framePositionsRowsAbsolutely &&
         Number.isFinite(data.captureCols) &&
         data.captureCols > (this.terminal?.cols || 0);
+      // The retry replays at `dimsAfterLoad`, so it can only change what is on
+      // screen if the pane was drawing at some OTHER size. When the reported
+      // geometry already IS that size, the second pass captures the identical
+      // frame and pays a full reload to do it: another fetch, another
+      // `_resetTerminalForReplay()` and chunked rewrite (a visible re-flash),
+      // and, because it goes through `forceReload`, a dropped and reopened
+      // WebSocket plus a deleted xterm snapshot.
+      //
+      // That equality is the signature of a CLAMP rather than a race.
+      // `getTerminalDimensions()` floors at 40x10 while `fitAddon.fit()` does
+      // not, so a terminal narrower than 40 columns or shorter than 10 rows
+      // reports a pane permanently bigger than itself, and every select would
+      // retry without ever converging. A race never produces this equality: its
+      // whole premise is that the pane was still at the size we asked it to
+      // leave. The other non-converging case, `Session.resize` declining a
+      // small viewport while a desktop claim is live, does not produce it
+      // either — that pane sits at the DESKTOP's size — so it still costs the
+      // one capped attempt, and stopping it needs the pane-ownership policy
+      // this does not touch.
+      const captureMatchesRequestedSize =
+        !!dimsAfterLoad && data.captureCols === dimsAfterLoad.cols && data.captureRows === dimsAfterLoad.rows;
 
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.
@@ -6680,6 +6701,7 @@ class CodemanApp {
       // trade replays forever.
       if (
         (sizeMovedUnderLoad || capturedTallerThanTerminal || capturedWiderThanTerminal) &&
+        !captureMatchesRequestedSize &&
         !options?.resizeRetry &&
         !this._isStaleSelect(selectGen)
       ) {
@@ -6693,6 +6715,14 @@ class CodemanApp {
         // that took the bounded tail must retry on the tail too: clearing the
         // flag unconditionally would UPGRADE a tab switch into a fresh
         // multi-megabyte scrollback capture it never asked for.
+        //
+        // UNREACHABLE as written, and kept for the invariant rather than the
+        // branch. A `useFullHistory` pass sends `full=1`, and the route answers
+        // `full=1` with `mux-full-history` or `history`, never `mux-visible`
+        // (see the source ladder in session-routes.ts), so the gate above
+        // already rules out every pass that consumed the flag. Do not read this
+        // line as evidence that a page load retries: it does not, and the test
+        // suite pins that it does not.
         if (useFullHistory) this._fullHistoryLoaded.delete(sessionId);
         await this.selectSession(sessionId, { auto: true, forceReload: true, resizeRetry: true });
       }

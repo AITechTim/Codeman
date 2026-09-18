@@ -58,9 +58,12 @@ function paneSnapshot(rows: number): string {
  * Serve every terminal fetch from a stub reporting `captureRows`, counting the
  * fetches. The real route needs live tmux to produce a mismatched frame.
  *
- * `source` and `captureCols` default to the visible-frame case, which is the
- * only response whose rows are addressed absolutely and therefore the only one
- * a replay can repair. A test that varies either says so.
+ * `source` is DERIVED from the request the way the real route derives it: a
+ * `full=1` request whose capture came back is `mux-full-history`, and every
+ * other one is `mux-visible`. The route cannot answer `full=1` with
+ * `mux-visible`, so a stub that did would stage a combination production never
+ * produces, and a test resting on it would prove nothing about production. A
+ * test that needs some other source passes it explicitly and says why.
  */
 async function stubTerminal(
   page: Page,
@@ -68,11 +71,12 @@ async function stubTerminal(
   counter: { n: number; urls: string[] },
   options: { source?: string; captureCols?: number } = {}
 ) {
-  const source = options.source ?? 'mux-visible';
   const captureCols = options.captureCols ?? 200;
   await page.route('**/api/sessions/*/terminal*', async (route) => {
+    const url = route.request().url();
     counter.n += 1;
-    counter.urls.push(route.request().url());
+    counter.urls.push(url);
+    const source = options.source ?? (url.includes('full=1') ? 'mux-full-history' : 'mux-visible');
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -88,6 +92,44 @@ async function stubTerminal(
           source,
           captureCols,
           captureRows,
+        },
+      }),
+    });
+  });
+}
+
+/**
+ * Answer every fetch with the geometry the client itself is asking for, read
+ * live from the page. That is the clamp signature: `getTerminalDimensions()`
+ * floors at 40x10 while `fitAddon.fit()` does not, so a small enough viewport
+ * makes the pane permanently bigger than the terminal at a size the client
+ * requested itself.
+ */
+async function stubTerminalAtRequestedSize(page: Page, counter: { n: number; urls: string[] }) {
+  await page.route('**/api/sessions/*/terminal*', async (route) => {
+    counter.n += 1;
+    counter.urls.push(route.request().url());
+    const dims = await page.evaluate(
+      () =>
+        (
+          window as unknown as { app: { getTerminalDimensions?: () => { cols: number; rows: number } | null } }
+        ).app.getTerminalDimensions?.() ?? null
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          terminalBuffer: paneSnapshot(dims?.rows ?? 10),
+          status: 'idle',
+          fullSize: 1024,
+          retainedBytes: 1024,
+          truncated: false,
+          truncationReason: null,
+          source: 'mux-visible',
+          captureCols: dims?.cols,
+          captureRows: dims?.rows,
         },
       }),
     });
@@ -138,6 +180,22 @@ async function select(page: Page, sessionId: string, options: object = {}): Prom
   await page.waitForTimeout(1500);
 }
 
+/**
+ * Spend the per-page full-history allowance and forget what it cost. Every
+ * geometry comparison below runs on a `mux-visible` response, and the route
+ * only produces one for a request sent WITHOUT `full=1`, so reaching that shape
+ * means not being the first select of the page — which is what a tab switch is.
+ */
+async function consumeFullHistory(
+  page: Page,
+  sessionId: string,
+  counter: { n: number; urls: string[] }
+): Promise<void> {
+  await select(page, sessionId);
+  counter.n = 0;
+  counter.urls.length = 0;
+}
+
 async function closeSession(page: Page, sessionId: string): Promise<void> {
   await page.evaluate(
     (sid: string) => fetch(`/api/sessions/${sid}`, { method: 'DELETE' }).then(() => undefined),
@@ -145,7 +203,7 @@ async function closeSession(page: Page, sessionId: string): Promise<void> {
   );
 }
 
-describe('a capture taller than the terminal', () => {
+describe('a capture bigger than the terminal', () => {
   let context: BrowserContext;
   let page: Page;
 
@@ -163,7 +221,11 @@ describe('a capture taller than the terminal', () => {
     // trigger is the captured height alone and not a size that moved.
     const fetches = { n: 0, urls: [] as string[] };
     await stubTerminal(page, 200, fetches);
-    await select(page, sessionId);
+    // A tab switch is where a visible-frame response arrives, so that is what
+    // this measures. The first select of the page takes the full-history path
+    // and is covered by its own case below.
+    await consumeFullHistory(page, sessionId, fetches);
+    await select(page, sessionId, { forceReload: true });
 
     // The terminal is sized by that select, so the premise is checkable now.
     expect(await terminalRows(page)).toBeLessThan(200);
@@ -188,18 +250,19 @@ describe('a capture taller than the terminal', () => {
     const fetches = { n: 0, urls: [] as string[] };
     await stubTerminal(page, 200, fetches);
 
-    // First select: a fresh session, so this one legitimately pulls full history
-    // and its retry may do the same.
+    // First select: a fresh session, so this one pulls full history. It does
+    // NOT retry, because the geometry comparison runs on a visible-frame
+    // response and a `full=1` request cannot produce one.
     await select(page, sessionId);
-    const afterFirst = fetches.n;
-    expect(afterFirst).toBe(2);
+    expect(fetches.n).toBe(1);
+    expect(fetches.urls.filter((u) => u.includes('full=1'))).toHaveLength(1);
 
     // Re-select the SAME session. `selectSession` early-returns on an already
     // active session unless forceReload is set, and forceReload is the shape a
     // tab switch back to this session takes: `_fullHistoryLoaded` still holds
-    // it, so neither this pass nor its retry should ask for full history again.
+    // it, so neither this pass nor its retry asks for full history again.
     await select(page, sessionId, { forceReload: true });
-    const tabSwitchUrls = fetches.urls.slice(afterFirst);
+    const tabSwitchUrls = fetches.urls.slice(1);
     expect(tabSwitchUrls.length).toBe(2);
     expect(tabSwitchUrls.filter((u) => u.includes('full=1'))).toHaveLength(0);
 
@@ -217,7 +280,8 @@ describe('a capture taller than the terminal', () => {
     // would double the work of every tab switch.
     const fetches = { n: 0, urls: [] as string[] };
     await stubTerminal(page, 5, fetches, { captureCols: 40 });
-    await select(page, sessionId);
+    await consumeFullHistory(page, sessionId, fetches);
+    await select(page, sessionId, { forceReload: true });
 
     expect(await terminalRows(page)).toBeGreaterThan(5);
     expect(fetches.n).toBe(1);
@@ -238,7 +302,8 @@ describe('a capture taller than the terminal', () => {
 
     const fetches = { n: 0, urls: [] as string[] };
     await stubTerminal(page, 5, fetches, { captureCols: WIDER_THAN_ANY_TERMINAL_COLS });
-    await select(page, sessionId);
+    await consumeFullHistory(page, sessionId, fetches);
+    await select(page, sessionId, { forceReload: true });
 
     expect(await terminalRows(page)).toBeGreaterThan(5);
     expect(await terminalCols(page)).toBeLessThan(WIDER_THAN_ANY_TERMINAL_COLS);
@@ -263,10 +328,7 @@ describe('a capture taller than the terminal', () => {
     const sessionId = await openSession(page);
 
     const fetches = { n: 0, urls: [] as string[] };
-    await stubTerminal(page, 200, fetches, {
-      source: 'mux-full-history',
-      captureCols: WIDER_THAN_ANY_TERMINAL_COLS,
-    });
+    await stubTerminal(page, 200, fetches, { captureCols: WIDER_THAN_ANY_TERMINAL_COLS });
     await select(page, sessionId);
 
     // Both dimensions are mismatched, so height alone is not what spares it.
@@ -274,6 +336,40 @@ describe('a capture taller than the terminal', () => {
     expect(await terminalCols(page)).toBeLessThan(WIDER_THAN_ANY_TERMINAL_COLS);
     expect(fetches.n).toBe(1);
     expect(fetches.urls.filter((u) => u.includes('full=1'))).toHaveLength(1);
+
+    await closeSession(page, sessionId);
+    await context.close();
+  }, 60_000);
+
+  it('does not replay a pane already at the size the client asked for', async () => {
+    // `getTerminalDimensions()` floors at 40x10 while `fitAddon.fit()` does
+    // not, so a viewport this small leaves the terminal shorter than the size
+    // the client itself requests, and the pane obligingly draws at the floored
+    // size. The captured height then exceeds the terminal's forever. A replay
+    // cannot converge, because it re-requests the same floored size and
+    // captures the same frame, so without the equality guard this retries on
+    // every tab switch for the life of the page.
+    context = await browser.newContext({ viewport: { width: 320, height: 200 } });
+    page = await context.newPage();
+    const sessionId = await openSession(page);
+
+    const fetches = { n: 0, urls: [] as string[] };
+    await stubTerminalAtRequestedSize(page, fetches);
+    await consumeFullHistory(page, sessionId, fetches);
+    await select(page, sessionId, { forceReload: true });
+
+    // The premise: the floor really does bind here. Without this the case
+    // would pass on any viewport, proving nothing.
+    const requested = await page.evaluate(
+      () =>
+        (
+          window as unknown as { app: { getTerminalDimensions?: () => { cols: number; rows: number } | null } }
+        ).app.getTerminalDimensions?.() ?? null
+    );
+    expect(requested).not.toBeNull();
+    expect(requested!.rows).toBeGreaterThan(await terminalRows(page));
+
+    expect(fetches.n).toBe(1);
 
     await closeSession(page, sessionId);
     await context.close();

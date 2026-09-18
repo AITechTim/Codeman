@@ -2793,15 +2793,20 @@ export function registerSessionRoutes(
       // rows than this overwrites its last line with the overflow and loses
       // the rows underneath. The client compares these against its own size.
       //
-      // BOTH FIELDS ARE ABSENT when the capture reported no geometry, and that
-      // is the honest answer rather than a gap to paper over: the cursor query
-      // is what produces the absolute addressing in the first place, so a
-      // capture that lost it returned a raw frame with no row positioning in
-      // it, and a byte-history response was never positioned at all. Reporting
-      // the session's own PTY size here would name a geometry no frame was
-      // built for and invite the client to repair damage that does not exist.
-      captureCols: captureOpts.capturedGeometry?.cols,
-      captureRows: captureOpts.capturedGeometry?.rows,
+      // BOTH FIELDS ARE ABSENT unless this response really carries a capture,
+      // and that is the honest answer rather than a gap to paper over. Two
+      // separate things can leave a frame unpositioned. The cursor query is
+      // what produces the absolute addressing in the first place, so a capture
+      // that lost it returned a raw frame with no row positioning in it. And a
+      // capture can report geometry and STILL hand back nothing: the
+      // full-history path returns '' for a pane holding nothing visible, which
+      // drops `source` to `history` while `capturedGeometry` is already
+      // written, so the geometry has to be suppressed HERE rather than trusted
+      // to be missing. Naming a size for a body that is the byte stream would
+      // describe a frame that was never drawn and invite the client to repair
+      // damage that does not exist.
+      captureCols: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.cols : undefined,
+      captureRows: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.rows : undefined,
     };
   });
 
