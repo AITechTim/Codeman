@@ -39,7 +39,9 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
-import { hostname as getHostname } from 'node:os';
+import { hostname as getHostname, uptime as osUptime } from 'node:os';
+import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
+import { rebootRestoreRegistry } from './reboot-restore-registry.js';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
 import { GLYPH, palette } from '../cli-style.js';
@@ -171,6 +173,7 @@ import {
   registerScheduledRoutes,
   registerHookEventRoutes,
   registerApprovalRoutes,
+  registerRebootRestoreRoutes,
   registerReadMyMindRoutes,
   registerStatusTelemetryRoutes,
   registerSystemRoutes,
@@ -695,6 +698,8 @@ export class WebServer extends EventEmitter {
       setupSessionListeners: this.setupSessionListeners.bind(this),
       persistSessionState: this.persistSessionState.bind(this),
       persistSessionStateNow: this._persistSessionStateNow.bind(this),
+      reapplyPersistedSessionState: this.reapplyPersistedSessionState.bind(this),
+      discardPartiallyBuiltSession: this.discardPartiallyBuiltSession.bind(this),
       getSessionStateWithRespawn: this.getSessionStateWithRespawn.bind(this),
       // EventPort
       broadcast: this.broadcast.bind(this),
@@ -1087,6 +1092,7 @@ export class WebServer extends EventEmitter {
     registerScheduledRoutes(this.app, ctx);
     registerHookEventRoutes(this.app, ctx);
     registerApprovalRoutes(this.app, ctx);
+    registerRebootRestoreRoutes(this.app, ctx);
     registerReadMyMindRoutes(this.app, ctx);
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
@@ -2970,6 +2976,229 @@ export class WebServer extends EventEmitter {
     return false;
   }
 
+  /**
+   * Work out what a host reboot destroyed, and leave it on offer for the board.
+   *
+   * Runs inside `restoreMuxSessions()`, in the window after `reconcileSessions()`
+   * has reported the dead sessions and before `finalizeRestoredState()` prunes
+   * their records, so `state.json` is still the full picture here. That window is
+   * the only place the plan can be built, which is why the boot pass builds it
+   * even though nothing is rebuilt until a user clicks.
+   *
+   * Nothing is created here. The plan goes to `rebootRestoreRegistry`, the board
+   * offers it as a banner, and `web/routes/reboot-restore-routes` rebuilds what
+   * the user asks for. A wrong reboot guess therefore costs a line of text the
+   * user dismisses, not N CLI processes nobody asked for.
+   *
+   * @returns how many sessions are on offer.
+   */
+  private planRebootRestoreOffer(dead: string[], livePaneCount: number): number {
+    if (dead.length === 0) return 0;
+
+    const persisted = this.store.getSessions();
+    if (
+      !looksLikeHostReboot({
+        livePaneCount,
+        deadSessionCount: dead.length,
+        uptimeSeconds: osUptime(),
+        newestPersistedActivityAt: newestPersistedActivity(persisted),
+        now: Date.now(),
+      })
+    ) {
+      return 0;
+    }
+
+    const { restore, skipped } = planRebootRestore(dead, persisted, (workingDir) => existsSync(workingDir));
+    if (skipped.length > 0) {
+      console.log(`[Server] Reboot restore is passing over ${skipped.length} dead session(s):`);
+      for (const rejection of skipped) {
+        console.log(`[Server]   ${rejection.sessionId}: ${rejection.reason}`);
+      }
+    }
+    rebootRestoreRegistry.set(restore);
+    if (restore.length > 0) {
+      console.log(`[Server] Host reboot detected; offering ${restore.length} session(s) for restore`);
+    }
+    return restore.length;
+  }
+
+  /**
+   * Re-apply the persisted state that a `Session` constructor does not take.
+   *
+   * The reboot-restore route builds a session from a record rather than
+   * attaching to a surviving pane, so everything the constructor has no
+   * parameter for starts at its default. Persisting such a session writes
+   * `toState()` wholesale, which would REPLACE the record with the reduced
+   * version — and for a pinned session that is worse than losing a setting,
+   * because `cleanupSessionsByIds()` keeps a record only while it is pinned, so
+   * dropping the pin hands the record to the next stale sweep.
+   *
+   * Split in two phases because the two halves have opposite timing needs:
+   *
+   * - `before-spawn` shapes the pane itself, so it has to land before the CLI
+   *   process starts, and before `setupSessionListeners()`, which reads the
+   *   image-watcher flag. The custom-model selection is an environment injection
+   *   and the nice priority is applied to the spawn.
+   * - `after-spawn` is the session's own accumulated history. It must NOT land
+   *   on a session whose pane failed to start: the totals would then belong to a
+   *   session that never ran, and any later cleanup would add them to the
+   *   lifetime figures a second time.
+   *
+   * Respawn and Ralph are deliberately NOT re-armed: a machine that just came up
+   * is the worst moment to turn an autonomous run loose, and the user re-arms
+   * what they want. Ralph's loop CONFIGURATION does not survive either, because
+   * `toState()` reads `ralphEnabled` and the completion phrase off a live
+   * tracker, and there is no way to hold them without arming the loop.
+   */
+  async reapplyPersistedSessionState(
+    session: Session,
+    saved: SessionState,
+    phase: 'before-spawn' | 'after-spawn',
+    options?: { rearmAutoResumeSchedule?: boolean }
+  ): Promise<void> {
+    if (phase === 'before-spawn') {
+      // The custom-model env has to be rebuilt from the endpoint store: the persist
+      // deliberately keeps the injected VALUES out of state.json, so only the
+      // bookkeeping survives a restart and the values are re-derived here.
+      const savedCustomModel = (saved as { __customModel?: CustomModelBookkeeping }).__customModel;
+      if (savedCustomModel) {
+        session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+      }
+      if (saved.niceEnabled !== undefined || saved.niceValue !== undefined) {
+        session.setNice({ enabled: saved.niceEnabled, niceValue: saved.niceValue });
+      }
+      // `setupSessionListeners()` READS this flag to decide whether to start the
+      // watcher, so setting it later would leave the session reporting the feature
+      // as on with nothing watching.
+      if (saved.imageWatcherEnabled !== undefined) session.imageWatcherEnabled = saved.imageWatcherEnabled;
+      return;
+    }
+
+    if (saved.pinned) session.restorePin(true, saved.pinnedAt);
+    if (saved.autoCompactEnabled !== undefined || saved.autoCompactThreshold !== undefined) {
+      session.setAutoCompact(saved.autoCompactEnabled ?? false, saved.autoCompactThreshold, saved.autoCompactPrompt);
+    }
+    if (saved.autoClearEnabled !== undefined || saved.autoClearThreshold !== undefined) {
+      session.setAutoClear(saved.autoClearEnabled ?? false, saved.autoClearThreshold);
+    }
+    if (saved.autoResumeEnabled) {
+      // The stamp is re-armed by default, because a Codeman restart leaves the
+      // limit footer un-reprinted and dropping it there would strand the pause.
+      // A reboot restore opts out: that stamp predates the reboot, the pane is
+      // new, and honouring it means every session the user restored types
+      // `continue` into itself about a minute later, unattended. The setting
+      // itself stays on either way, so it re-arms on the next limit message.
+      const rearm = options?.rearmAutoResumeSchedule !== false;
+      session.restoreAutoResume(true, rearm ? saved.autoResumeAt : undefined);
+    }
+    if (saved.inputTokens !== undefined || saved.outputTokens !== undefined || saved.totalCost !== undefined) {
+      session.restoreTokens(saved.inputTokens ?? 0, saved.outputTokens ?? 0, saved.totalCost ?? 0);
+      // Seed the daily-usage baseline, or the restored totals are counted again as new usage.
+      this.lastRecordedTokens.set(session.id, {
+        input: saved.inputTokens ?? 0,
+        output: saved.outputTokens ?? 0,
+      });
+    }
+    if (saved.color) session.setColor(saved.color);
+    if (saved.flickerFilterEnabled !== undefined) session.flickerFilterEnabled = saved.flickerFilterEnabled;
+  }
+
+  /**
+   * Undo a session that was registered but never got a working pane.
+   *
+   * Deliberately NOT `cleanupSession()`, which is the user-initiated delete: that
+   * path adds the session's token totals to the lifetime figures, demotes a
+   * pinned record to `stopped` (the durable marker of an intentional kill, which
+   * would make the session permanently ineligible for a reboot restore), drops
+   * the persisted Ralph state, and recursively removes `.claude-images` from the
+   * WORKING DIRECTORY, which belongs to the workspace rather than to this session
+   * and may hold another live session's pasted images.
+   *
+   * Everything else `_doCleanupSession()` does, this has to do as well. It is the
+   * inverse of `registerSessionWithLayout()` plus `setupSessionListeners()`, and
+   * every registration those two make has to come back out — above all
+   * `sessionListenerRefs`, whose presence makes `setupSessionListeners()` return
+   * early. Leaving that entry behind is worse than the leak this function exists
+   * to prevent: the retry reuses the same session id, wires no listeners at all,
+   * and the user gets a tab that never shows output.
+   *
+   * The persisted record, the lifetime totals, the stored Ralph state and the
+   * workspace's own files are left exactly as they were, so the session stays
+   * restorable on the next attempt.
+   */
+  async discardPartiallyBuiltSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+
+    // --- the inverse of setupSessionListeners(), in reverse order ---
+    // Listeners first: while they are attached, one of them can still reach a
+    // tracker this is about to stop.
+    const listeners = this.sessionListenerRefs.get(sessionId);
+    if (listeners) {
+      detachSessionListeners(session, listeners);
+      this.sessionListenerRefs.delete(sessionId);
+    }
+    // An FSWatcher on the workspace that nothing else closes.
+    imageWatcher.unwatchSession(sessionId);
+    // An fs.watch on the workspace (or on @fix_plan.md), likewise.
+    session.ralphTracker.stopWatchingFixPlan();
+    const summaryTracker = this.runSummaryTrackers.get(sessionId);
+    if (summaryTracker) {
+      // Closes the run's own record before the tracker goes, the way
+      // `_doCleanupSession()` does. Cosmetic rather than load-bearing, but a
+      // run left open reads as still going in the away digest.
+      summaryTracker.recordSessionStopped();
+      summaryTracker.stop();
+      this.runSummaryTrackers.delete(sessionId);
+    }
+    // Also mirrors `_doCleanupSession()`. The PERSISTED Ralph state is left
+    // alone on purpose (that is one of the things separating this from
+    // cleanupSession); this only clears the in-memory tracker the failed
+    // construction built, which the retry reuses the id of.
+    session.ralphTracker.fullReset();
+
+    // --- what anything else may have attached to this id in the meantime ---
+    // A rebuild can fail AFTER startInteractive() resolved, and a restored
+    // workspace still carries Codeman's hooks, so the CLI can post a hook event
+    // within milliseconds. Each of these outlives the listeners and would
+    // otherwise meet the retry, which reuses the same session id by design.
+    this.stopTranscriptWatcher(sessionId);
+    attachmentRegistry.clearSession(sessionId);
+    sessionWaits.notifySignal(sessionId, 'exit');
+    sessionWaits.cancelAll(sessionId);
+    approvalInbox.resolveForSession(sessionId, 'session_ended');
+
+    // --- the inverse of the construction itself ---
+    this.sse.cleanupSessionBatches(sessionId);
+    this.persistDeb.cancelKey(sessionId);
+    fileStreamManager.closeSessionStreams(sessionId);
+    // `lastRecordedTokens` is deliberately NOT deleted: the `after-spawn` phase
+    // seeds it as the daily-usage baseline for these restored totals, and the
+    // retry reuses the id, so dropping it would count them as new usage.
+    // The per-session custom-model config dir carries the endpoint's API key, and
+    // `before-spawn` may already have written it. Nothing else would ever remove
+    // it: the stale sweep only touches state.json. A retry rewrites it.
+    removeConfigDir(customModelConfigDir(sessionId));
+    try {
+      session.removeAllListeners();
+      await session.stop(true);
+    } catch (err) {
+      console.warn(`[Server] stopping a partially built session failed: ${getErrorMessage(err)}`);
+      // `stop()` kills the mux session in its last block, after destroying its
+      // trackers, so a throw on the way there leaves the pane running.
+      await this.mux.killSession(sessionId).catch(() => {});
+    }
+    try {
+      await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);
+    } catch (err) {
+      console.warn(`[Server] releasing the tab layout slot failed: ${getErrorMessage(err)}`);
+    }
+    // Any `session:updated` the half-built session emitted before it failed left a
+    // tab on every other open board, and the client's handler is an upsert.
+    this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
+  }
+
   private async restoreMuxSessions(): Promise<boolean> {
     try {
       // Reconcile mux sessions to find which ones are still alive (also discovers unknown ones)
@@ -2977,6 +3206,22 @@ export class WebServer extends EventEmitter {
 
       if (discovered.length > 0) {
         console.log(`[Server] Discovered ${discovered.length} unknown mux session(s)`);
+      }
+
+      // Build the reboot-restore offer HERE: `dead` is only known after
+      // reconciliation, and the records it reads are pruned by
+      // `cleanupStaleSessions()` as soon as `finalizeRestoredState()` runs.
+      //
+      // Guarded on its own, because this runs inside the try that decides whether
+      // RECOVERY succeeded. A throw here would otherwise be caught below, report
+      // restoration as failed, and block the stale cleanup and layout
+      // reconciliation that follow — turning an optional convenience into a
+      // failure of the thing it is supposed to help. An offer nobody gets is the
+      // correct way for this to fail.
+      try {
+        this.planRebootRestoreOffer(dead, alive.length);
+      } catch (err) {
+        console.error('[Server] Building the reboot-restore offer failed; continuing recovery:', err);
       }
 
       if (alive.length > 0 || discovered.length > 0) {

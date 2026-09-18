@@ -213,6 +213,24 @@
       <button class="offline-banner-retry" id="offlineBannerRetry" onclick="app.retryConnection()">Retry now</button>
     </div>
 
+    <!-- Reboot-restore offer: shown when the server found sessions a host reboot
+         killed and is asking whether to rebuild them. Populated by
+         reboot-restore-ui.js; nothing is created until the user clicks. -->
+    <div class="reboot-restore-banner" id="rebootRestoreBanner" role="status" hidden>
+      <span class="reboot-restore-banner-icon" aria-hidden="true">↺</span>
+      <span class="reboot-restore-banner-text" id="rebootRestoreBannerText"></span>
+      <span class="reboot-restore-banner-detail" id="rebootRestoreBannerDetail"></span>
+      <span class="reboot-restore-banner-note">Conversations return; terminal history does not.</span>
+      <button
+        class="reboot-restore-banner-accept"
+        id="rebootRestoreBannerAccept"
+        onclick="app.restoreRebootSessions()"
+      >
+        Restore
+      </button>
+      <button class="reboot-restore-banner-dismiss" onclick="app.dismissRebootRestore()">Dismiss</button>
+    </div>
+
     <!-- Timer Banner (shown when timed run is active) -->
     <div class="timer-banner" id="timerBanner" style="display: none;">
       <div class="timer-content">
@@ -3658,6 +3676,7 @@
   <script defer src="readmymind-ui.js"></script>
   <script defer src="ultracode-panel.js"></script>
   <script defer src="approvals-ui.js"></script>
+  <script defer src="reboot-restore-ui.js"></script>
   <script defer src="admin-ui.js"></script>
   <script defer src="session-ui.js"></script>
   <script defer src="webview-tabs.js"></script>
