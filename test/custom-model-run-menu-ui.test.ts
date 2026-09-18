@@ -16,7 +16,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const CONSTANTS_JS = readFileSync(new URL('../src/web/public/constants.js', import.meta.url), 'utf-8');
 const SESSION_UI_JS = readFileSync(new URL('../src/web/public/session-ui.js', import.meta.url), 'utf-8');
@@ -968,6 +968,29 @@ describe('Custom Model Endpoint Profiles: _showCenterStatus Cancel button (real 
 
     expect(win.document.querySelector('.center-status-close')).not.toBeNull();
     expect(win.document.querySelector('.center-status-cancel')).toBeNull();
+  });
+
+  it('reopening within the 200ms fade cancels the previous dismiss(), so the fresh banner is not hidden out from under it', () => {
+    // The real bug: dismiss() schedules el.hidden = true 200ms later with nothing
+    // to cancel it. _runCustomModelEntryViaRestart calls switchingToast.dismiss()
+    // then awaits one same-origin request (5-30ms locally) before reopening the
+    // banner for the model-load wait — well inside that 200ms window — so the
+    // stale timer fired against the shared DOM node and hid the fresh banner.
+    vi.useFakeTimers();
+    try {
+      const { win, app } = bootAppWithRealCenterStatus();
+      const first = app._showCenterStatus('Claude started — switching to llama-swap…');
+      first.dismiss();
+      vi.advanceTimersByTime(20);
+      app._showCenterStatus('Loading qwen3 on llama-box…');
+      vi.advanceTimersByTime(280);
+
+      const el = win.document.getElementById('customModelCenterStatus') as HTMLElement;
+      expect(el.hidden).toBe(false);
+      expect(el.textContent).toContain('Loading qwen3 on llama-box…');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('re-asserts [hidden] over the flex display, so dismiss() actually hides it', () => {

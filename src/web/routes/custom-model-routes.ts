@@ -447,7 +447,14 @@ async function pumpLlamaSwapLogTail(
   } catch {
     // connection dropped / aborted / endpoint unreachable — a future access starts fresh
   } finally {
-    llamaSwapLogTails.delete(host.id);
+    // Delete by IDENTITY, not just by key: an aborted pump can finish after a NEWER
+    // entry was already created for the same endpoint id (e.g. abort-then-immediately-
+    // re-request), and deleting unconditionally would remove that newer entry and orphan
+    // its connection — nothing would ever prune it, since pruneIdleLlamaSwapLogTails only
+    // walks entries still present in the map.
+    if (llamaSwapLogTails.get(host.id) === entry) {
+      llamaSwapLogTails.delete(host.id);
+    }
   }
 }
 

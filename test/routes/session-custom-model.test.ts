@@ -33,9 +33,9 @@ const CLAUDE_ENDPOINT: CustomModelHost = {
   apiKey: 'k',
 };
 
-async function setup() {
+async function setup(ctxOptions?: Parameters<typeof createRouteTestHarness>[1]) {
   await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT]);
-  return createRouteTestHarness(registerSessionRoutes);
+  return createRouteTestHarness(registerSessionRoutes, ctxOptions);
 }
 
 describe('POST /api/sessions/:id/custom-model', () => {
@@ -292,6 +292,68 @@ describe('POST /api/sessions/:id/custom-model', () => {
       // Nothing actually applied yet — this call only asked, it did not switch.
       expect(session.setCustomModel).not.toHaveBeenCalled();
       expect(session.restartCli).not.toHaveBeenCalled();
+    });
+
+    describe('multi-user: the confirm dialog must not name a session the caller cannot access', () => {
+      const saved: Record<string, string | undefined> = {};
+
+      beforeEach(() => {
+        saved.CODEMAN_MULTIUSER = process.env.CODEMAN_MULTIUSER;
+        process.env.CODEMAN_MULTIUSER = '1';
+      });
+
+      afterEach(() => {
+        if (saved.CODEMAN_MULTIUSER === undefined) delete process.env.CODEMAN_MULTIUSER;
+        else process.env.CODEMAN_MULTIUSER = saved.CODEMAN_MULTIUSER;
+      });
+
+      it("still blocks the swap pending confirmation, but omits a foreign owner's session from affectedSessions", async () => {
+        const { app, ctx } = await setup({ authUser: { username: 'bob', role: 'user' } });
+        const session = ctx.sessions.get('test-session-1')!;
+        session.mode = 'claude';
+        (session as unknown as { owner?: string }).owner = 'bob';
+        const other = createMockSession('other-session');
+        other.name = 'w2-otherbox';
+        other.customModel = { endpointId: 'ep1', modelId: 'llama3' };
+        (other as unknown as { owner?: string }).owner = 'alice';
+        ctx.sessions.set('other-session', other);
+        mockRunning([{ model: 'llama3', state: 'ready' }]);
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/test-session-1/custom-model',
+          payload: { endpointId: 'ep1', modelId: 'qwen3' },
+        });
+
+        const body = res.json();
+        // Still asks — a foreign session is just as real a disruption as an owned one.
+        expect(body.requiresConfirmation).toBe(true);
+        expect(body.currentlyLoadedModel).toBe('llama3');
+        // But bob never learns alice's session id or name.
+        expect(body.affectedSessions).toEqual([]);
+        expect(session.setCustomModel).not.toHaveBeenCalled();
+      });
+
+      it('names the affected session when the caller DOES own it', async () => {
+        const { app, ctx } = await setup({ authUser: { username: 'bob', role: 'user' } });
+        const session = ctx.sessions.get('test-session-1')!;
+        session.mode = 'claude';
+        (session as unknown as { owner?: string }).owner = 'bob';
+        const other = createMockSession('other-session');
+        other.name = 'w2-otherbox';
+        other.customModel = { endpointId: 'ep1', modelId: 'llama3' };
+        (other as unknown as { owner?: string }).owner = 'bob';
+        ctx.sessions.set('other-session', other);
+        mockRunning([{ model: 'llama3', state: 'ready' }]);
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/test-session-1/custom-model',
+          payload: { endpointId: 'ep1', modelId: 'qwen3' },
+        });
+
+        expect(res.json().affectedSessions).toEqual([{ id: 'other-session', name: 'w2-otherbox' }]);
+      });
     });
 
     it('applies once confirmed, skipping the conflict check the second time', async () => {

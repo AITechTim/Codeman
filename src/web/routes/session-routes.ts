@@ -1254,15 +1254,21 @@ export function registerSessionRoutes(
     // that is currently using it — never just because a swap is needed at all. `confirmed`
     // (set by the caller after showing that warning once) skips asking again.
     if (swapNeeded && !body.confirmed) {
-      const affectedSessions = [...ctx.sessions.values()]
-        .filter(
-          (s) =>
-            s.id !== session.id &&
-            s.customModel?.endpointId === endpoint.id &&
-            s.customModel?.modelId === currentlyLoaded
-        )
-        .map((s) => ({ id: s.id, name: s.name }));
-      if (affectedSessions.length > 0) {
+      const conflicting = [...ctx.sessions.values()].filter(
+        (s) =>
+          s.id !== session.id && s.customModel?.endpointId === endpoint.id && s.customModel?.modelId === currentlyLoaded
+      );
+      if (conflicting.length > 0) {
+        // Applying a custom model is ungated for any session owner, so in multi-user
+        // mode a non-admin pointing their own session at a shared endpoint must not
+        // learn another user's session names in the confirm dialog — with
+        // autoNameSessions on, those names are that user's own prompts. The swap is
+        // still blocked pending confirmation regardless of ownership (a foreign
+        // session is just as real a disruption); only which ones get NAMED is scoped.
+        const requestUser = getAuthUser(req);
+        const affectedSessions = conflicting
+          .filter((s) => canAccessOwned(requestUser, s.owner))
+          .map((s) => ({ id: s.id, name: s.name }));
         return { requiresConfirmation: true, currentlyLoadedModel: currentlyLoaded, affectedSessions };
       }
     }
@@ -3634,10 +3640,17 @@ export function registerSessionRoutes(
       const cmTargetReady = cmSwapStatus.running.some((r) => r.model === customModel.modelId && r.state === 'ready');
       qsCustomModelSwapInProgress = cmSwapStatus.isLlamaSwap && !cmTargetReady;
       if (cmSwapNeeded && !customModel.confirmed) {
-        const cmAffectedSessions = [...ctx.sessions.values()]
-          .filter((s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded)
-          .map((s) => ({ id: s.id, name: s.name }));
-        if (cmAffectedSessions.length > 0) {
+        const cmConflicting = [...ctx.sessions.values()].filter(
+          (s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded
+        );
+        if (cmConflicting.length > 0) {
+          // Same reasoning as the dedicated /custom-model route above: the swap is
+          // still blocked pending confirmation regardless of ownership, but a
+          // non-admin caller only learns the names of sessions they can access.
+          const cmRequestUser = getAuthUser(req);
+          const cmAffectedSessions = cmConflicting
+            .filter((s) => canAccessOwned(cmRequestUser, s.owner))
+            .map((s) => ({ id: s.id, name: s.name }));
           return {
             requiresConfirmation: true,
             currentlyLoadedModel: cmCurrentlyLoaded,

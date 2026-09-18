@@ -1233,7 +1233,13 @@ export class WebServer extends EventEmitter {
       return undefined;
     }
     try {
-      return applyCustomModelInjection(entry, endpoint, saved.modelId, session.id)?.envOverrides;
+      return applyCustomModelInjection(
+        entry,
+        endpoint,
+        saved.modelId,
+        session.id,
+        endpoint.modelContextLengths?.[saved.modelId]
+      )?.envOverrides;
     } catch (err) {
       console.warn('[WebServer] Failed to rebuild custom-model env on recovery:', err);
       return undefined;

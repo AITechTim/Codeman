@@ -5583,12 +5583,21 @@ Object.assign(CodemanApp.prototype, {
       el.id = 'customModelCenterStatus';
       document.body.appendChild(el);
     }
+    // A pending hide from a PREVIOUS dismiss() (e.g. switchingToast.dismiss() right
+    // before this same-origin call reopens the banner within its 200ms fade) must
+    // never fire against the node this call is about to show — clear it before
+    // reusing the shared DOM node, or the old timer hides the fresh banner ~200ms in.
+    if (el._hideTimer) {
+      clearTimeout(el._hideTimer);
+      el._hideTimer = null;
+    }
     el.className = `center-status-banner center-status-${type}`;
     el.innerHTML = '';
     const dismiss = () => {
       el.classList.remove('show');
-      setTimeout(() => {
+      el._hideTimer = setTimeout(() => {
         el.hidden = true;
+        el._hideTimer = null;
       }, 200);
     };
     if (type !== 'error') {

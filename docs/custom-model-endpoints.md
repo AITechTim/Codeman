@@ -444,6 +444,14 @@ id, model and injected key NAMES are persisted, the values are re-derived
 from the endpoint store on recovery, and the pane keeps running against the
 endpoint in between because tmux retains its environment.
 
+⚠️ Clearing removes injected keys **by name**, and `CLAUDE_CONFIG_DIR` is one
+of the names claude's selection injects — so a session that ALSO had
+`CLAUDE_CONFIG_DIR` set through the generic `envOverrides` field (the
+per-client-account case) loses that override on clear too, and silently
+falls back to the server's default Claude account. If you route a session
+to a specific account this way, re-apply the override after clearing a
+custom-model selection from it.
+
 **New sessions always default back to the harness's native backend.** A
 custom-endpoint selection is a per-session choice, never a sticky global
 default — starting a fresh session doesn't inherit whatever the last one was
