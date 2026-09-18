@@ -1499,6 +1499,19 @@ export class Session extends EventEmitter {
     this._pinnedAt = pinned ? Date.now() : null;
   }
 
+  /**
+   * Restore a pin from a persisted record, keeping the moment it was pinned.
+   *
+   * `setPinned()` stamps `pinnedAt` with now, which is right for a user pinning a
+   * session and wrong for a restore: the session-manager orders its pinned group
+   * by that stamp, so a restored session would jump to the front of a list it had
+   * been sitting further down.
+   */
+  restorePin(pinned: boolean, pinnedAt?: number): void {
+    this._pinned = pinned;
+    this._pinnedAt = pinned ? (pinnedAt ?? Date.now()) : null;
+  }
+
   get flickerFilterEnabled(): boolean {
     return this._flickerFilterEnabled;
   }
