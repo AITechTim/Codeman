@@ -370,6 +370,24 @@ describe('RemoteWakeRegistry', () => {
     expect(h.events).not.toContain('remote:sessionReconnected');
   });
 
+  it('reports an oversized chunk as dropped, and flushes as user input so the tab can be named', async () => {
+    const h = harness();
+    h.probe.mockResolvedValue(false);
+    let release: (() => void) | undefined;
+    h.waitUntilReady.mockImplementation(() => new Promise<boolean>((resolve) => (release = () => resolve(true))));
+    await expect(h.registry.handleInput(h.session, 'ok')).resolves.toBe('buffered');
+    // Over the cap: never enters the buffer, and the caller is told — a bare 200 could
+    // not distinguish delivered from buffered from gone.
+    await expect(h.registry.handleInput(h.session, 'x'.repeat(REMOTE_WAKE_PENDING_MAX_BYTES + 1))).resolves.toBe(
+      'dropped'
+    );
+    expect(h.registry.pendingBytes('sess-1')).toBe(2);
+    release?.();
+    await h.registry.wake(h.session);
+    // `fromUser`: a first prompt that was buffered through a wake may still name the tab.
+    expect(h.writeViaMux).toHaveBeenCalledWith('ok', { fromUser: true });
+  });
+
   it('drops the buffer when a flush write fails, so nothing is replayed by a later wake', async () => {
     // Retaining the chunk was the earlier behaviour, and it was worse: the wake still
     // resolves and marks the host reachable, so the next input takes the deliver path

@@ -888,6 +888,15 @@ export function registerSessionRoutes(
     // creation (owned durable sessions) is handled by the dedicated case-create
     // endpoint below, which #145 consolidated remote-host resolution into.
     if (body.attachRemoteSession) {
+      // Remote hosts are admin-only infrastructure everywhere else (the list answers
+      // `[]` to a non-admin; write and discovery routes are `adminOnly`), and the wake
+      // below spawns the host's `wakeCommand` or broadcasts a packet. So the gate comes
+      // FIRST — before the host is even looked up — or an unprivileged account could
+      // invoke that executable for any configured `hostId` and only then be told the
+      // workingDir was outside its workspace (reproduced upstream: wake spy fired, 403).
+      if (isMultiUserMode() && !isAdmin(req)) {
+        return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Remote hosts are admin-only in multi-user mode');
+      }
       const { hostId, remoteSessionName } = body.attachRemoteSession;
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
@@ -1645,12 +1654,26 @@ export function registerSessionRoutes(
       if (wantsWait) {
         // Send-and-wait keeps the response open anyway, so blocking on the wake is
         // simpler and more correct than buffering (buffering would break the wait).
-        await remoteWake.ensureAwake(session);
-      } else if ((await remoteWake.handleInput(session, inputStr)) === 'buffered') {
+        // A host that never comes back is an error here, as on the create/attach
+        // paths: writing into the stalled pane would answer `delivered:true` plus a
+        // timeout, which is the combination the API docs send callers to the wrong
+        // recovery for.
+        if (!(await remoteWake.ensureAwake(session))) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            `${session.remote?.label ?? 'the remote host'} did not come back after a wake-on-LAN request — nothing was sent`
+          );
+        }
+      } else {
+        const outcome = await remoteWake.handleInput(session, inputStr);
         // The registry holds the bytes and flushes them in order once the pane is
         // reattached. The client's ACK is this 200 — a tagged retry is deduped
         // (`shouldApplyInput` above already consumed the seq), so nothing is lost.
-        return {};
+        // `buffered` is additive to the historical bare `{}`; `dropped` says the chunk
+        // was over the wake buffer's cap and is GONE (a 200 with no field could not
+        // tell delivered from buffered from dropped).
+        if (outcome === 'buffered') return { buffered: true };
+        if (outcome === 'dropped') return { buffered: true, dropped: true };
       }
     }
 

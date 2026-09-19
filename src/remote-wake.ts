@@ -81,7 +81,7 @@ export type RemoteInputAction = 'deliver' | 'probe' | 'buffer';
  * The caller-facing outcome of {@link RemoteWakeRegistry.handleInput}: either the
  * caller writes the bytes as usual, or the registry took ownership of them.
  */
-export type RemoteInputOutcome = 'deliver' | 'buffered';
+export type RemoteInputOutcome = 'deliver' | 'buffered' | 'dropped';
 
 /**
  * Decide what to do with an input chunk on an input route. Mirrors
@@ -240,8 +240,8 @@ export interface WakeableSession {
   readonly remote: WakeableRemote | undefined;
   /** COD-108 reattach: respawns the local ssh pane, idempotently attaching the durable remote tmux. */
   reattachRemote(): Promise<boolean>;
-  /** Write bytes to the session's pane. */
-  writeViaMux(data: string): Promise<boolean>;
+  /** Write bytes to the session's pane. `fromUser` marks input a person typed (or an agent sent for them). */
+  writeViaMux(data: string, options?: { fromUser?: boolean }): Promise<boolean>;
 }
 
 /** Injected IO so the registry holds no direct dependency on ssh/net/child_process in tests. */
@@ -442,12 +442,12 @@ export class RemoteWakeRegistry {
 
     if (action === 'deliver') return 'deliver';
     if (action === 'buffer') {
-      this._enqueue(session.id, data);
+      const queued = this._enqueue(session.id, data);
       // A buffered verdict with no wake in flight still has to DRIVE a wake (the
       // previous one failed and reset the probe state, or the ladder landed here
       // directly) — otherwise the bytes would sit in the buffer forever.
       if (state.waking == null && target) void this.wake(session);
-      return 'buffered';
+      return queued;
     }
 
     // action === 'probe' — the throttle window elapsed, so one TCP connect is owed.
@@ -455,9 +455,9 @@ export class RemoteWakeRegistry {
     state.reachable = remote ? await this.deps.probe(remote) : true;
     if (state.reachable) return 'deliver';
 
-    this._enqueue(session.id, data);
+    const queued = this._enqueue(session.id, data);
     void this.wake(session);
-    return 'buffered';
+    return queued;
   }
 
   /**
@@ -749,17 +749,19 @@ export class RemoteWakeRegistry {
     return state.resolvedRemote ?? session.remote;
   }
 
-  private _enqueue(sessionId: string, data: string): void {
+  /** Queue a chunk; `'dropped'` when it was over the cap and never entered the buffer. */
+  private _enqueue(sessionId: string, data: string): 'buffered' | 'dropped' {
     const state = this._state(sessionId);
     const next = appendBoundedPending(state.pending, data);
     if (next === state.pending) {
       // Oversized chunk: dropped whole (see `appendBoundedPending`), so the buffer is
-      // untouched and nothing is delivered as a fragment. Logged because the user's
-      // paste is gone — the 200 the route returns cannot say so.
+      // untouched and nothing is delivered as a fragment. Logged, and reported to the
+      // route, which answers `dropped:true` — the user's paste is gone and a bare 200
+      // could not say so.
       this.deps.log?.(
         `[RemoteWake] dropped a ${Buffer.byteLength(data)}-byte input chunk for session ${sessionId} — over the ${REMOTE_WAKE_PENDING_MAX_BYTES}-byte wake buffer, and a truncated paste must not be delivered as a fragment`
       );
-      return;
+      return 'dropped';
     }
     const before = state.pending.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
     const after = next.reduce((sum, chunk) => sum + Buffer.byteLength(chunk), 0);
@@ -767,6 +769,7 @@ export class RemoteWakeRegistry {
       this.deps.log?.(`[RemoteWake] pending buffer cap reached for session ${sessionId} — oldest input dropped`);
     }
     state.pending = next;
+    return 'buffered';
   }
 
   private async _flush(state: WakeState, session: WakeableSession): Promise<void> {
@@ -779,7 +782,10 @@ export class RemoteWakeRegistry {
       // afterwards removed the NEXT chunk instead, so the drop-oldest bookkeeping lost a
       // chunk that was never written while the log line blamed the one that was.
       state.pending = state.pending.slice(1);
-      const ok = await session.writeViaMux(chunk).catch(() => false);
+      // `fromUser`: these bytes came through the input route as a person's prompt, so
+      // they may name the tab — without it a session whose FIRST prompt was buffered
+      // through a wake could never be auto-named.
+      const ok = await session.writeViaMux(chunk, { fromUser: true }).catch(() => false);
       if (!ok) {
         // Drop the rest, and say so. Retaining it looked safer but was worse: the wake
         // still resolves and marks the host reachable, so the NEXT input takes the

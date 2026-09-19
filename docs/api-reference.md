@@ -324,6 +324,16 @@ from the session's current state rather than requiring a new transition: the
 original turn may be long over. It comes back as
 `"delivered": false, "duplicate": true`.
 
+**Wake-on-LAN hosts** (`docs/remote-sessions.md` §Wake-on-LAN): when the session's
+remote host has a wake target and is asleep, the non-wait form answers `200` with
+`{"buffered": true}` — the bytes are held and flushed after the host is back — or
+`{"buffered": true, "dropped": true}` for a chunk over the 4 KB wake buffer, which
+is gone (never delivered as a fragment). Both fields are additive to the historical
+bare `{}`. With `wait`, the route blocks on the wake instead and answers
+`422 OPERATION_FAILED` ("did not come back after a wake-on-LAN request — nothing was
+sent") when the host never returns, rather than writing into the stalled pane and
+reporting `delivered:true` plus a timeout.
+
 ### Response
 
 All three nest the wait result under `data.wait`, so one client helper works against

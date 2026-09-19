@@ -430,6 +430,22 @@ command goes out and the response says only whether it did — no readiness poll
 
 The invariants worth keeping:
 
+- **Authorization comes before the wake.** In multi-user mode the attach path
+  (`POST /api/sessions` + `attachRemoteSession`) answers `403` to a non-admin BEFORE the
+  host is looked up or probed: remote hosts are admin-only infrastructure everywhere else
+  (the list is `[]` for a non-admin, write and discovery routes are `adminOnly`), and the
+  wake spawns the host's `wakeCommand` or broadcasts a packet — a gate that came after the
+  wake handed an unprivileged account a way to run that executable for any configured
+  `hostId`, hold the request for the wake budget, and only then be refused for the
+  workingDir. The quick-start path resolves its remote case through `canAccessOwned`
+  first. Pinned in `test/routes/session-remote-wake.test.ts` (wake spy stays empty).
+- **The caller is told what happened to its bytes.** The non-wait input route answers
+  `{buffered:true}` when the registry took the chunk and `{buffered:true, dropped:true}`
+  when it was over the cap and is gone; the send-and-wait route answers `OPERATION_FAILED`
+  when the host never comes back, like the create and attach paths, instead of writing
+  into the stalled pane and reporting `delivered:true` plus a timeout. Flushed chunks are
+  written with `fromUser`, so a first prompt that was buffered through a wake can still
+  name the tab.
 - **Only an EXPLICIT request may wake a host:** user input on an established session, the wake
   button, or the user's own session create/attach request (`ensureHostAwake`). Everything that
   runs on a TIMER must never wake one — the COD-108 watcher, the server's dropped-session
