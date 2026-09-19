@@ -775,7 +775,85 @@ describe('session-routes', () => {
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
       // No ?full=1 → visible-frame capture (no fullHistory opts).
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
+    });
+
+    // ── The geometry a capture was taken at ──
+    //
+    // A visible-frame capture repaints each row at an absolute position
+    // (`\x1b[<row>;1H`). A terminal with fewer rows than the pane clamps every
+    // address past its own height onto its last line, so the overflow rows
+    // overwrite each other and the rows they land on are lost. The client can
+    // only notice that if the response says what height the frame was built
+    // for, which is what captureRows/captureCols carry.
+
+    it('reports the geometry the capture was really taken at', async () => {
+      harness.ctx._session.terminalBuffer = '';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedGeometry?: { cols: number; rows: number } }) => {
+          // Stand in for TmuxManager, which fills this from the pane itself.
+          if (opts) opts.capturedGeometry = { cols: 100, rows: 50 };
+          return 'visible frame';
+        }
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('mux-visible');
+      expect(body.data.captureCols).toBe(100);
+      expect(body.data.captureRows).toBe(50);
+    });
+
+    it('omits the geometry when the capture reports none', async () => {
+      // The cursor query can fail, and a byte-history response never captures
+      // at all. Neither frame was positioned, so neither can be damaged by a
+      // terminal of the wrong size. Naming the session's own PTY size here
+      // would describe a geometry no frame was built for, and the client would
+      // read it as a mismatch worth replaying for.
+      harness.ctx._session.terminalBuffer = 'byte history only';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('history');
+      expect(body.data.captureCols).toBeUndefined();
+      expect(body.data.captureRows).toBeUndefined();
+    });
+
+    it('omits the geometry when the capture reported a size but returned nothing', async () => {
+      // A capture can report geometry and still hand back no frame. The
+      // full-history path writes `capturedGeometry` from the cursor query, then
+      // returns '' for a pane holding nothing visible, which drops the source
+      // to `history` with the geometry already recorded. Reporting it there
+      // would name a size for a body that is the byte stream.
+      harness.ctx._session.terminalBuffer = 'byte history only';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedGeometry?: { cols: number; rows: number } }) => {
+          if (opts) opts.capturedGeometry = { cols: 100, rows: 50 };
+          return '';
+        }
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('history');
+      expect(body.data.captureCols).toBeUndefined();
+      expect(body.data.captureRows).toBeUndefined();
     });
 
     // ── COD-47: full tmux scrollback replay on full page reload ──
@@ -985,7 +1063,10 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       // Tail/tab-switch must NOT request fullHistory (undefined opts).
-      expect(captureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(captureSpy).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
       expect(body.data.terminalBuffer).toContain('visible frame only');
       expect(body.data.terminalBuffer).not.toContain('FULL_HISTORY_SHOULD_NOT_APPEAR');
       expect(body.data.source).toBe('mux-visible');
@@ -1045,7 +1126,10 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('preserves one-time OAuth authorization URLs in Codex TUI replay history', async () => {
@@ -1119,7 +1203,10 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('uses live mux pane capture only when the accumulated buffer is empty', async () => {
@@ -1138,7 +1225,10 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain('visible restored tmux pane');
       expect(body.data.terminalBuffer).toContain('› current prompt');
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('returns error for unknown session', async () => {
@@ -1166,7 +1256,10 @@ describe('session-routes', () => {
       expect(buf).toContain('\x1b[H\x1b[2J');
       expect(buf).toContain('LIVE-PANE-FRAME');
       expect(buf.indexOf('history-bytes')).toBeLessThan(buf.indexOf('LIVE-PANE-FRAME'));
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('falls back to the byte history when no live pane buffer is available', async () => {

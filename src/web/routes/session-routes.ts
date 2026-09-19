@@ -30,6 +30,7 @@ import {
   type OmpConfig,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isExternalCliMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
+import type { PaneCaptureOptions } from '../../mux-interface.js';
 import { SseEvent } from '../sse-events.js';
 import { webviewCapabilities } from '../../webview-capabilities.js';
 import {
@@ -2632,14 +2633,16 @@ export function registerSessionRoutes(
     // returns null when unavailable, in which case we fall back to history.
     const muxName = session.muxName;
     const captureStartedAt = performance.now();
+    // The visible path used to pass no options at all. It passes one now for a
+    // single reason: `capturedGeometry` comes BACK on it, and the response has
+    // to tell the client what size the frame it is about to render was built
+    // for. See PaneCaptureOptions.capturedGeometry.
+    const captureOpts: PaneCaptureOptions = isFullReload
+      ? { fullHistory: true, historyLimitLines: tmuxHistoryLimit, maxCaptureBytes: terminalBufferMaxBytes }
+      : {};
     const liveMuxBuffer =
       muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
-        ? ctx.mux.captureActivePaneBuffer(
-            muxName,
-            isFullReload
-              ? { fullHistory: true, historyLimitLines: tmuxHistoryLimit, maxCaptureBytes: terminalBufferMaxBytes }
-              : undefined
-          )
+        ? ctx.mux.captureActivePaneBuffer(muxName, captureOpts)
         : null;
     const captureFinishedAt = performance.now();
     const hasLiveMuxBuffer = liveMuxBuffer !== null && liveMuxBuffer.length > 0;
@@ -2785,6 +2788,25 @@ export function registerSessionRoutes(
       // what existed before the cut. The gap is what the indicator reports.
       retainedBytes: cleanBuffer.length,
       source,
+      // The pane geometry this frame was drawn for. A visible-frame capture
+      // positions every row absolutely, so a client whose terminal has fewer
+      // rows than this overwrites its last line with the overflow and loses
+      // the rows underneath. The client compares these against its own size.
+      //
+      // BOTH FIELDS ARE ABSENT unless this response really carries a capture,
+      // and that is the honest answer rather than a gap to paper over. Two
+      // separate things can leave a frame unpositioned. The cursor query is
+      // what produces the absolute addressing in the first place, so a capture
+      // that lost it returned a raw frame with no row positioning in it. And a
+      // capture can report geometry and STILL hand back nothing: the
+      // full-history path returns '' for a pane holding nothing visible, which
+      // drops `source` to `history` while `capturedGeometry` is already
+      // written, so the geometry has to be suppressed HERE rather than trusted
+      // to be missing. Naming a size for a body that is the byte stream would
+      // describe a frame that was never drawn and invite the client to repair
+      // damage that does not exist.
+      captureCols: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.cols : undefined,
+      captureRows: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.rows : undefined,
     };
   });
 

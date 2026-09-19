@@ -549,6 +549,12 @@ class CodemanApp {
     // repaint-mode CLI pane, where tmux keeps no history of its own). The pull is
     // refused for those and retried far more slowly — see _maybeRefetchFullHistory.
     this._fullHistoryRepullUseless = new Set();
+    // Sessions where the geometry replay has already been tried and did NOT
+    // converge, so the pane is one this browser cannot size. Mirrors the Set
+    // above: `resizeRetry` caps the recursion inside one select, and this is
+    // what stops a fresh select from paying for the same answer again — see
+    // the geometry gate in selectSession.
+    this._geometryRetryUseless = new Set();
     this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
@@ -5783,28 +5789,7 @@ class CodemanApp {
         if (ta) ta.dispatchEvent(new CompositionEvent('compositionend', { data: '' }));
       }
     } catch {}
-    // Flush local echo text to PTY before switching tabs.
-    // Send as a single batch (no Enter) so it lands in the session's readline
-    // input buffer — avoids "old text resent on Enter" and overlay render bugs.
-    // Track flushed length so _render() offsets the overlay correctly even before
-    // the PTY echo arrives in the terminal buffer.
-    if (this.activeSessionId) {
-      const echoText = this._localEchoOverlay?.pendingText || '';
-      // Include buffer-detected flushed text (from Tab completion, etc.)
-      // so it's preserved across tab switches.
-      const existingFlushed = this._localEchoOverlay?.getFlushed()?.count || 0;
-      const existingFlushedText = this._localEchoOverlay?.getFlushed()?.text || '';
-      if (echoText) {
-        this._sendInputAsync(this.activeSessionId, echoText);
-      }
-      const totalOffset = existingFlushed + echoText.length;
-      if (totalOffset > 0) {
-        if (!this._flushedOffsets) this._flushedOffsets = new Map();
-        if (!this._flushedTexts) this._flushedTexts = new Map();
-        this._flushedOffsets.set(this.activeSessionId, totalOffset);
-        this._flushedTexts.set(this.activeSessionId, existingFlushedText + echoText);
-      }
-    }
+    this._flushLocalEchoTo(this.activeSessionId);
     this._localEchoOverlay?.clear();
     // Predictions are ephemeral + already sent: nothing to save/restore
     // across a tab switch (unlike the buffer overlay's setFlushed machinery)
@@ -5816,6 +5801,45 @@ class CodemanApp {
     // re-enabling detection for tab completion and other legitimate cases.
     if (this._localEchoOverlay && !this._flushedOffsets?.has(newSessionId)) {
       this._localEchoOverlay.suppressBufferDetection();
+    }
+  }
+
+  /**
+   * Hand the local-echo overlay's unsent text to `sessionId` before anything
+   * clears it, and record what has now been flushed so `_render()` offsets the
+   * overlay correctly even before the PTY echo comes back.
+   *
+   * On a touch device the characters the user has typed live ONLY here until
+   * Enter — they have never reached the PTY — so whoever clears the overlay
+   * owes them a flush first. It is sent as one batch with no Enter, so it lands
+   * in the session's readline buffer rather than submitting a line the user has
+   * not finished.
+   *
+   * ⚠️ The session is a PARAMETER because the two callers are looking at
+   * different ones. `_cleanupPreviousSession` flushes to the tab being left,
+   * which is still `activeSessionId` when it runs. The `forceReload` branch in
+   * `selectSession` flushes to the tab being RELOADED, and must do it before it
+   * nulls `activeSessionId`: reading the field after that null is what silently
+   * dropped the text, since the guard here then saw no session and the
+   * unconditional `clear()` that follows took the characters with it.
+   * @param {string|null} sessionId
+   */
+  _flushLocalEchoTo(sessionId) {
+    if (!sessionId) return;
+    const echoText = this._localEchoOverlay?.pendingText || '';
+    // Include buffer-detected flushed text (from Tab completion, etc.)
+    // so it's preserved across tab switches.
+    const existingFlushed = this._localEchoOverlay?.getFlushed()?.count || 0;
+    const existingFlushedText = this._localEchoOverlay?.getFlushed()?.text || '';
+    if (echoText) {
+      this._sendInputAsync(sessionId, echoText);
+    }
+    const totalOffset = existingFlushed + echoText.length;
+    if (totalOffset > 0) {
+      if (!this._flushedOffsets) this._flushedOffsets = new Map();
+      if (!this._flushedTexts) this._flushedTexts = new Map();
+      this._flushedOffsets.set(sessionId, totalOffset);
+      this._flushedTexts.set(sessionId, existingFlushedText + echoText);
     }
   }
 
@@ -6093,6 +6117,13 @@ class CodemanApp {
       this._loadBufferQueue = null;
       this._terminalRefreshOwner = null;
       this._chunkedWriteGen = (this._chunkedWriteGen || 0) + 1;
+      // Anything typed but not yet submitted lives in the local-echo overlay and
+      // has never reached the PTY. `_cleanupPreviousSession` below flushes it,
+      // but only for a session it can still see, and the null on the next line
+      // hides this one from it. Flush first or the characters are cleared
+      // unread. The geometry replay re-enters here with no gesture behind it,
+      // so on a touch device this fires while the user is still typing.
+      this._flushLocalEchoTo(sessionId);
       this.activeSessionId = null;
     }
     // Focus terminal SYNCHRONOUSLY before any await — iOS Safari only honors
@@ -6272,6 +6303,10 @@ class CodemanApp {
       // sendResize is a no-op on the server when dims haven't changed, so
       // calling it every tab switch is cheap.
       const dimsChanged = await this.sendResize(sessionId, { forceHttp: true }).catch(() => false);
+      // The size the capture below will be taken against. The debounced resize
+      // handler can move the terminal again while the load runs, so this is a
+      // recorded value rather than a later read of `_lastResizeDims`.
+      const dimsAtCapture = this.getTerminalDimensions?.();
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
         return;
@@ -6520,6 +6555,75 @@ class CodemanApp {
       // annoyance that disappear on the user's next keypress; data loss is not
       // acceptable. Do NOT re-introduce Ctrl+L here.
       this.sendResize(sessionId);
+      // sendResize fits synchronously before its first await, so this reads the
+      // size that survived the load rather than the one the capture was taken
+      // at. The two differ whenever the terminal was still settling.
+      const dimsAfterLoad = this.getTerminalDimensions?.();
+      // Only a visible-frame capture positions its rows absolutely, and only
+      // that frame can be damaged by a terminal of the wrong size. A `full=1`
+      // body is linear scrollback closed by a RELATIVE cursor move
+      // (`formatCursorRestore`), which is relative precisely so the browser's
+      // row count need not match the pane's, and a `history` body is the byte
+      // stream, which carries no row alignment to protect. Replaying either at
+      // a different size repairs nothing, and the full-history replay costs a
+      // second whole-scrollback capture to learn that. Since the first select
+      // of every non-shell session per page takes the full-history path, an
+      // ungated comparison fires most often on the one response it cannot help.
+      const framePositionsRowsAbsolutely = data.source === 'mux-visible';
+      const sizeMovedUnderLoad =
+        framePositionsRowsAbsolutely &&
+        !!dimsAtCapture &&
+        !!dimsAfterLoad &&
+        (dimsAfterLoad.cols !== dimsAtCapture.cols || dimsAfterLoad.rows !== dimsAtCapture.rows);
+      // A capture positions every row absolutely, so a pane taller than this
+      // terminal writes its overflow rows onto the last line and loses the rows
+      // it overwrote. A pane WIDER than this terminal damages the same frame a
+      // second way: `formatPaneSnapshot` paints each row out to the pane's own
+      // width, so a narrower browser wraps every painted row, and the wrap on
+      // the last one scrolls the whole frame up by a row. Both happen when the
+      // capture wins a race against the resize meant to precede it, which is
+      // what the retry below repairs.
+      //
+      // It also happens when `Session.resize` DECLINED the resize, which it does
+      // for a small viewport while a desktop viewport's size claim is live. The
+      // retry cannot repair that one: it re-sends the same declined resize and
+      // captures the same too-tall pane. `resizeRetry` stops it after the one
+      // extra attempt, and the frame is shown as-is. Repairing that case means
+      // changing who owns the pane size, which is a policy question this does
+      // not touch. What the flag does buy there is that the client can SEE the
+      // mismatch at all, which it previously could not.
+      //
+      // An ABSENT field is not a fit. It means the capture reported no geometry
+      // at all, so nothing was positioned and there is nothing to repair.
+      const capturedTallerThanTerminal =
+        framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureRows) &&
+        data.captureRows > (this.terminal?.rows || 0);
+      const capturedWiderThanTerminal =
+        framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureCols) &&
+        data.captureCols > (this.terminal?.cols || 0);
+      // The retry replays at `dimsAfterLoad`, so it can only change what is on
+      // screen if the pane was drawing at some OTHER size. When the reported
+      // geometry already IS that size, the second pass captures the identical
+      // frame and pays a full reload to do it: another fetch, another
+      // `_resetTerminalForReplay()` and chunked rewrite (a visible re-flash),
+      // and, because it goes through `forceReload`, a dropped and reopened
+      // WebSocket plus a deleted xterm snapshot.
+      //
+      // That equality is the signature of a CLAMP rather than a race.
+      // `getTerminalDimensions()` floors at 40x10 while `fitAddon.fit()` does
+      // not, so a terminal narrower than 40 columns or shorter than 10 rows
+      // reports a pane permanently bigger than itself, and every select would
+      // retry without ever converging. A race never produces this equality: its
+      // whole premise is that the pane was still at the size we asked it to
+      // leave. The other non-converging case, `Session.resize` declining a
+      // small viewport while a desktop claim is live, does not produce it
+      // either — that pane sits at the DESKTOP's size — so it still costs the
+      // one capped attempt, and stopping it needs the pane-ownership policy
+      // this does not touch.
+      const captureMatchesRequestedSize =
+        !!dimsAfterLoad && data.captureCols === dimsAfterLoad.cols && data.captureRows === dimsAfterLoad.rows;
 
       // Defer secondary panel updates so they don't block the main thread
       // after terminal content is already visible.
@@ -6620,6 +6724,67 @@ class CodemanApp {
       this._clearTerminalLoadState(sessionId, selectGen);
       _crashDiag.log(`SELECT_DONE: ${selectDoneMs.toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${selectDoneMs.toFixed(0)}ms`);
+      // Remember whether the replay was worth it, because `resizeRetry` only
+      // caps the recursion INSIDE one select and says nothing about the next
+      // one. A pane this browser cannot size — one whose resize `Session.resize`
+      // declines while a desktop claim is live, or one a second tmux client is
+      // also holding — reports the same mismatch on every select, so without a
+      // memo the diagnosis is paid for again on every tab switch, forever: two
+      // fetches per select rather than one. Each extra pass costs a second
+      // `capture-pane`, which is `execSync` and blocks the server's event loop,
+      // plus a reset and chunked rewrite, a discarded snapshot and cache entry,
+      // and a dropped and reopened WebSocket.
+      //
+      // A retry pass that STILL does not fit is the proof, since the retry ran
+      // at the size that stuck and the pane ignored it. Geometry that fits
+      // clears the memo, so a pane that becomes sizeable again (the desktop tab
+      // closes, the claim goes idle) is repaired on the next select. The race
+      // case is untouched: it converges on its first attempt, so it never
+      // reaches the branch that latches.
+      const capturedGeometryFits =
+        framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureRows) &&
+        !capturedTallerThanTerminal &&
+        !capturedWiderThanTerminal;
+      if (capturedGeometryFits) {
+        this._geometryRetryUseless?.delete(sessionId);
+      } else if (options?.resizeRetry && (capturedTallerThanTerminal || capturedWiderThanTerminal)) {
+        (this._geometryRetryUseless ||= new Set()).add(sessionId);
+      }
+      // What is on screen was drawn for a geometry this terminal does not have.
+      // Replaying once against the size that stuck is the only thing that
+      // repairs it: SIGWINCH reaches the CLI only on a real size change, and
+      // the pane is already at its final size, so no redraw is coming.
+      // `resizeRetry` caps this at one attempt, so two competing fits cannot
+      // trade replays forever.
+      if (
+        (sizeMovedUnderLoad || capturedTallerThanTerminal || capturedWiderThanTerminal) &&
+        !captureMatchesRequestedSize &&
+        !this._geometryRetryUseless?.has(sessionId) &&
+        !options?.resizeRetry &&
+        !this._isStaleSelect(selectGen)
+      ) {
+        _crashDiag.log(
+          `RESIZE_RETRY: capture ${data.captureCols}x${data.captureRows} vs terminal ` +
+            `${this.terminal?.cols}x${this.terminal?.rows}` +
+            (sizeMovedUnderLoad ? ' (size moved under load)' : '')
+        );
+        // Re-arm the full-history pull ONLY if this pass actually used one, so
+        // the retry replays the same content at the geometry that stuck. A pass
+        // that took the bounded tail must retry on the tail too: clearing the
+        // flag unconditionally would UPGRADE a tab switch into a fresh
+        // multi-megabyte scrollback capture it never asked for.
+        //
+        // UNREACHABLE as written, and kept for the invariant rather than the
+        // branch. A `useFullHistory` pass sends `full=1`, and the route answers
+        // `full=1` with `mux-full-history` or `history`, never `mux-visible`
+        // (see the source ladder in session-routes.ts), so the gate above
+        // already rules out every pass that consumed the flag. Do not read this
+        // line as evidence that a page load retries: it does not, and the test
+        // suite pins that it does not.
+        if (useFullHistory) this._fullHistoryLoaded.delete(sessionId);
+        await this.selectSession(sessionId, { auto: true, forceReload: true, resizeRetry: true });
+      }
     } catch (err) {
       if (this._isLoadingBuffer) this._finishBufferLoad(bufferLoadOwner);
       this._restoringFlushedState = false;
