@@ -549,6 +549,12 @@ class CodemanApp {
     // repaint-mode CLI pane, where tmux keeps no history of its own). The pull is
     // refused for those and retried far more slowly — see _maybeRefetchFullHistory.
     this._fullHistoryRepullUseless = new Set();
+    // Sessions where the geometry replay has already been tried and did NOT
+    // converge, so the pane is one this browser cannot size. Mirrors the Set
+    // above: `resizeRetry` caps the recursion inside one select, and this is
+    // what stops a fresh select from paying for the same answer again — see
+    // the geometry gate in selectSession.
+    this._geometryRetryUseless = new Set();
     this.terminalLoadStates = new Map(); // Map<sessionId, { generation, phase }>
     this.respawnStatus = {};
     this.respawnTimers = {}; // Track timed respawn timers
@@ -6718,6 +6724,33 @@ class CodemanApp {
       this._clearTerminalLoadState(sessionId, selectGen);
       _crashDiag.log(`SELECT_DONE: ${selectDoneMs.toFixed(0)}ms`);
       console.log(`[CRASH-DIAG] selectSession DONE: ${sessionId.slice(0,8)} in ${selectDoneMs.toFixed(0)}ms`);
+      // Remember whether the replay was worth it, because `resizeRetry` only
+      // caps the recursion INSIDE one select and says nothing about the next
+      // one. A pane this browser cannot size — one whose resize `Session.resize`
+      // declines while a desktop claim is live, or one a second tmux client is
+      // also holding — reports the same mismatch on every select, so without a
+      // memo the diagnosis is paid for again on every tab switch, forever: two
+      // fetches per select rather than one. Each extra pass costs a second
+      // `capture-pane`, which is `execSync` and blocks the server's event loop,
+      // plus a reset and chunked rewrite, a discarded snapshot and cache entry,
+      // and a dropped and reopened WebSocket.
+      //
+      // A retry pass that STILL does not fit is the proof, since the retry ran
+      // at the size that stuck and the pane ignored it. Geometry that fits
+      // clears the memo, so a pane that becomes sizeable again (the desktop tab
+      // closes, the claim goes idle) is repaired on the next select. The race
+      // case is untouched: it converges on its first attempt, so it never
+      // reaches the branch that latches.
+      const capturedGeometryFits =
+        framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureRows) &&
+        !capturedTallerThanTerminal &&
+        !capturedWiderThanTerminal;
+      if (capturedGeometryFits) {
+        this._geometryRetryUseless?.delete(sessionId);
+      } else if (options?.resizeRetry && (capturedTallerThanTerminal || capturedWiderThanTerminal)) {
+        (this._geometryRetryUseless ||= new Set()).add(sessionId);
+      }
       // What is on screen was drawn for a geometry this terminal does not have.
       // Replaying once against the size that stuck is the only thing that
       // repairs it: SIGWINCH reaches the CLI only on a real size change, and
@@ -6727,6 +6760,7 @@ class CodemanApp {
       if (
         (sizeMovedUnderLoad || capturedTallerThanTerminal || capturedWiderThanTerminal) &&
         !captureMatchesRequestedSize &&
+        !this._geometryRetryUseless?.has(sessionId) &&
         !options?.resizeRetry &&
         !this._isStaleSelect(selectGen)
       ) {

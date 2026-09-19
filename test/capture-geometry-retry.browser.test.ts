@@ -99,6 +99,41 @@ async function stubTerminal(
 }
 
 /**
+ * As `stubTerminal`, but reading its geometry from a holder the test can change
+ * between selects. That is what lets one case watch a pane stop fitting and
+ * start fitting again, which a stub fixed at construction cannot show.
+ */
+async function stubTerminalDynamic(
+  page: Page,
+  counter: { n: number; urls: string[] },
+  state: { captureRows: number; captureCols: number }
+) {
+  await page.route('**/api/sessions/*/terminal*', async (route) => {
+    const url = route.request().url();
+    counter.n += 1;
+    counter.urls.push(url);
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          terminalBuffer: paneSnapshot(state.captureRows),
+          status: 'idle',
+          fullSize: 1024,
+          retainedBytes: 1024,
+          truncated: false,
+          truncationReason: null,
+          source: url.includes('full=1') ? 'mux-full-history' : 'mux-visible',
+          captureCols: state.captureCols,
+          captureRows: state.captureRows,
+        },
+      }),
+    });
+  });
+}
+
+/**
  * Answer every fetch with the geometry the client itself is asking for, read
  * live from the page. That is the clamp signature: `getTerminalDimensions()`
  * floors at 40x10 while `fitAddon.fit()` does not, so a small enough viewport
@@ -336,6 +371,55 @@ describe('a capture bigger than the terminal', () => {
     expect(await terminalCols(page)).toBeLessThan(WIDER_THAN_ANY_TERMINAL_COLS);
     expect(fetches.n).toBe(1);
     expect(fetches.urls.filter((u) => u.includes('full=1'))).toHaveLength(1);
+
+    await closeSession(page, sessionId);
+    await context.close();
+  }, 60_000);
+
+  it('replays once per session, not once per tab switch, when it cannot converge', async () => {
+    // `resizeRetry` caps the recursion inside ONE select and says nothing about
+    // the next one, so a pane this browser cannot size reported the same
+    // mismatch on every select and bought the same failed repair every time:
+    // two fetches per tab switch for the life of the page. That is the case the
+    // description calls "every time rather than occasionally", a phone whose
+    // resize is declined while a desktop claim is live, and it is not the only
+    // one — any pane Codeman cannot size lands there, a second tmux client
+    // attached to it included. Each wasted pass costs another `capture-pane`,
+    // which is `execSync` on the server's event loop, plus a reset and rewrite,
+    // a discarded snapshot, and a dropped and reopened WebSocket.
+    context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    page = await context.newPage();
+    const sessionId = await openSession(page);
+
+    const fetches = { n: 0, urls: [] as string[] };
+    const pane = { captureRows: 200, captureCols: 200 };
+    await stubTerminalDynamic(page, fetches, pane);
+    await consumeFullHistory(page, sessionId, fetches);
+
+    // First tab switch: one load, one replay, and the replay does not fit
+    // either, which is the proof that this pane ignores the size it is given.
+    await select(page, sessionId, { forceReload: true });
+    expect(fetches.n).toBe(2);
+
+    // Every switch after it pays once. Unlatched this reads 4 then 6.
+    await select(page, sessionId, { forceReload: true });
+    expect(fetches.n).toBe(3);
+    await select(page, sessionId, { forceReload: true });
+    expect(fetches.n).toBe(4);
+
+    // The memo has to lift when the pane becomes sizeable again, or closing the
+    // desktop tab that was holding it would leave this session permanently
+    // unrepaired. A frame that fits clears it...
+    pane.captureRows = 5;
+    pane.captureCols = 40;
+    await select(page, sessionId, { forceReload: true });
+    expect(fetches.n).toBe(5);
+
+    // ...so the next genuine mismatch is diagnosed again.
+    pane.captureRows = 200;
+    pane.captureCols = 200;
+    await select(page, sessionId, { forceReload: true });
+    expect(fetches.n).toBe(7);
 
     await closeSession(page, sessionId);
     await context.close();
