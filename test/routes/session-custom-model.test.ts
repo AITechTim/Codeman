@@ -4,7 +4,7 @@
  * Port: N/A (app.inject, no real port needed)
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
+import { registerSessionRoutes, _clampEnvOverridesForOwner } from '../../src/web/routes/session-routes.js';
 import { createRouteTestHarness } from './_route-test-utils.js';
 import { createMockSession } from '../mocks/index.js';
 import { getDataDir } from '../../src/config/instance.js';
@@ -618,5 +618,41 @@ describe('POST /api/sessions/:id/custom-model', () => {
     expect(res.json().success).toBe(false);
     expect(res.json().errorCode).toBe('SESSION_BUSY');
     expect(session.setCustomModel).not.toHaveBeenCalled();
+  });
+});
+
+describe('Claude multi-user clamp: the env-var half', () => {
+  // CLAUDE_CODE_MAX_CONTEXT_TOKENS and CLAUDE_CONFIG_DIR were already reachable via
+  // plain envOverrides before claude's privilegedEnvKeys existed (the first already
+  // matches the CLAUDE_CODE_* allowedPrefix, the second is an allowed exact key), so
+  // listing them here is not what makes this route safe — no custom-model route reads
+  // privilegedEnvKeys at all. What it DOES do: ownerClampedEnvKeys() feeds the generic
+  // envOverrides clamp on create/quick-start/reboot-restore, so a non-granted owner can
+  // no longer set CLAUDE_CONFIG_DIR that way (the per-client-account feature, #255), and
+  // a PERSISTED one is now stripped on reboot-restore for such an owner too — see
+  // session-env-clamp.ts's own fileoverview for why that pass used to be a no-op for
+  // claude specifically.
+  const ORIGINAL = process.env.CODEMAN_MULTIUSER;
+  beforeEach(() => {
+    process.env.CODEMAN_MULTIUSER = '1';
+  });
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.CODEMAN_MULTIUSER;
+    else process.env.CODEMAN_MULTIUSER = ORIGINAL;
+  });
+
+  it('strips CLAUDE_CONFIG_DIR and CLAUDE_CODE_MAX_CONTEXT_TOKENS for a non-granted owner, leaving unrelated CLAUDE_CODE_* keys alone', async () => {
+    const out = await _clampEnvOverridesForOwner('nobody', {
+      CLAUDE_CONFIG_DIR: '/home/attacker/fake-claude-config',
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: '999999',
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    });
+    expect(out).toEqual({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' });
+  });
+
+  it('is a no-op in single-user mode', async () => {
+    delete process.env.CODEMAN_MULTIUSER;
+    const input = { CLAUDE_CONFIG_DIR: '/home/attacker/fake-claude-config' };
+    expect(await _clampEnvOverridesForOwner(undefined, input)).toBe(input);
   });
 });

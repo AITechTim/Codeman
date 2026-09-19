@@ -790,7 +790,15 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
   // can equally ask what it currently has loaded, before or while that apply is pending.
   app.get(
     '/api/model-endpoints/:id/running-status',
-    async (req): Promise<ApiResponse<LlamaSwapStatus & { logLine?: string }>> => {
+    async (
+      req
+    ): Promise<
+      ApiResponse<{
+        isLlamaSwap: boolean;
+        running: Array<Pick<LlamaSwapRunningModel, 'model' | 'state'>>;
+        logLine?: string;
+      }>
+    > => {
       const { id } = req.params as { id: string };
       const hosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
       const host = hosts.find((item) => item.id === id);
@@ -802,7 +810,12 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
       // Only worth tailing /logs once llama-swap is actually confirmed — a plain
       // llama.cpp/OpenAI-compatible server has no such endpoint at all.
       const logLine = status.isLlamaSwap ? getLatestLlamaSwapLogLine(host) : undefined;
-      return { success: true, data: { ...status, logLine } };
+      // `cmd` (the literal llama-server launch line, which can carry model paths and
+      // --api-key) exists only so parseCtxFromCmd() can read it server-side during
+      // discovery — this un-gated, polled-every-second route has no reason to hand it
+      // to the browser, which only ever reads `model`/`state`.
+      const running = status.running.map(({ model, state }) => ({ model, state }));
+      return { success: true, data: { isLlamaSwap: status.isLlamaSwap, running, logLine } };
     }
   );
 }

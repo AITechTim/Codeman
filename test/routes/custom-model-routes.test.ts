@@ -181,6 +181,34 @@ describe('custom model endpoint CRUD', () => {
     expect(res.json().error).toMatch(/refused.*169\.254\.169\.254/);
   });
 
+  it('running-status never hands the browser the raw llama-swap launch command (cmd)', async () => {
+    const { app } = await setup();
+    await app.inject({
+      method: 'POST',
+      url: '/api/model-endpoints',
+      payload: { id: 'ep-running', label: 'A', baseUrl: 'http://localhost:8080', apiKey: 'k' },
+    });
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/running') {
+        return new Response(
+          JSON.stringify({
+            running: [
+              { model: 'qwen3', state: 'ready', cmd: 'llama-server -m /models/qwen3.gguf --api-key sk-secret' },
+            ],
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`unexpected request in this test: ${url.href}`);
+    });
+
+    const res = await app.inject({ method: 'GET', url: '/api/model-endpoints/ep-running/running-status' });
+    const body = res.json();
+    expect(body.data.running).toEqual([{ model: 'qwen3', state: 'ready' }]);
+    expect(JSON.stringify(body)).not.toContain('sk-secret');
+    expect(JSON.stringify(body)).not.toContain('cmd');
+  });
+
   it('refuses a baseUrl with embedded credentials or a non-http scheme at save time', async () => {
     const { app } = await setup();
     for (const baseUrl of ['http://user:pw@host:8080', 'ftp://host/models', 'http://169.254.169.254']) {

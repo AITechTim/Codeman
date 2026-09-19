@@ -228,9 +228,11 @@ const CLAUDE: CliEntry = {
     privilegedParams: [],
     // ANTHROPIC_* is NOT in allowedPrefixes/allowedKeys above (deliberately — see the
     // allowedPrefixes comment nearby), so these are unreachable via plain envOverrides
-    // today; listed here only so the dedicated custom-model route (docs/custom-model-endpoints-plan.md
-    // chunk 5) clamps them for a non-granted multi-user owner the same way every other
-    // CLI's injection vars are clamped, the day that route widens who can set them.
+    // today. privilegedEnvKeys has exactly one consumer, ownerClampedEnvKeys() in
+    // session-env-clamp.ts, which feeds the generic envOverrides clamp on
+    // POST /api/sessions, POST /api/quick-start and reboot-restore — no custom-model
+    // route reads this field at all, and the values it injects are merged in AFTER
+    // that clamp runs regardless of what's listed here.
     privilegedEnvKeys: [
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_API_KEY',
@@ -239,8 +241,16 @@ const CLAUDE: CliEntry = {
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
       // CLAUDE_CODE_MAX_CONTEXT_TOKENS already matches the CLAUDE_CODE_* allowedPrefix, and
       // CLAUDE_CONFIG_DIR is already an allowed exact key (docs/wiki/Agent-CLIs.md), so both
-      // were already reachable via plain envOverrides before this pair existed — listed here
-      // only so the custom-model route clamps them the same way as every other injected var.
+      // were already reachable via plain envOverrides before this pair existed and this
+      // feature does not strictly need either listed. They stay listed anyway, because
+      // types.ts's rule ("every traffic-redirecting var this feature introduces MUST also
+      // appear in privilegedEnvKeys") is meant to hold literally, not with an exception
+      // carved out for the two vars that happen not to need it today. The real
+      // consequence lands on the GENERIC envOverrides clamp above, not on this feature:
+      // a non-granted multi-user owner can no longer set CLAUDE_CONFIG_DIR through
+      // envOverrides at all (the per-client-account override, #255), and a PERSISTED one
+      // is now stripped on reboot-restore for such an owner too — see
+      // session-env-clamp.ts's own fileoverview.
       'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
       'CLAUDE_CONFIG_DIR',
     ],
