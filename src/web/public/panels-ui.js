@@ -92,6 +92,9 @@ Object.assign(CodemanApp.prototype, {
   _onRemoteSessionReconnected(data) {
     const id = this.getShortId(data.sessionId);
     this.showToast(`Remote session ${id} reconnected`, 'success');
+    // A successful reattach (the wake flow's own, or the watcher's) means the host is
+    // back: drop the "unreachable" banner without waiting out the poll interval.
+    if (this.activeSessionId === data.sessionId) this._pollHostReachability?.(true);
   },
 
   _onRemoteReconnectExhausted(data) {
@@ -114,6 +117,16 @@ Object.assign(CodemanApp.prototype, {
       },
     });
   },
+
+
+  // Wake-on-LAN from user input on a sleeping remote host (see remote-wake.ts).
+  // ⚠️ The `remote:hostWaking` / `remote:hostWakeFailed` HANDLERS live in
+  // `host-wake-ui.js`, which owns the banner state. They are NOT redefined here:
+  // both files mix into `CodemanApp.prototype` and `host-wake-ui.js` is loaded
+  // later, so a second definition would silently shadow the banner update (and the
+  // toast would never fire — the exact silent no-op `sse-dispatch-table.test.ts`
+  // exists to prevent, which cannot see shadowing). The toasts are shown from the
+  // host-wake-ui handlers instead.
 
 
   // Bash tools
@@ -5484,12 +5497,25 @@ Object.assign(CodemanApp.prototype, {
     return this.showToast(message, type);
   },
 
+  /**
+   * `duration` defaults to 3000ms for every toast type. A message worth
+   * reading rather than glancing at (e.g. "Session started on the native
+   * backend — could not apply the custom endpoint: <the actual reason>")
+   * passes an explicit `opts.duration: 0` at its own call site instead of
+   * widening the default: this used to default every `error` toast to
+   * sticky, and with no cap on `.toast-container` and no eviction, a
+   * repeatedly failing path (a flapping SSE reconnect, a poll loop) stacked
+   * sticky toasts off the bottom of the viewport where they could not be
+   * read or dismissed. Every toast still gets an explicit close button
+   * regardless of duration.
+   */
   showToast(message, type = 'info', opts = {}) {
     const { duration = 3000, action } = opts;
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
 
     const msgSpan = document.createElement('span');
+    msgSpan.className = 'toast-message';
     msgSpan.textContent = message;
     toast.appendChild(msgSpan);
 
@@ -5500,6 +5526,20 @@ Object.assign(CodemanApp.prototype, {
       btn.onclick = (e) => { e.stopPropagation(); action.onClick(); toast.remove(); };
       toast.appendChild(btn);
     }
+
+    let dismissTimer = null;
+    const dismiss = () => {
+      if (dismissTimer) clearTimeout(dismissTimer);
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 200);
+    };
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.onclick = (e) => { e.stopPropagation(); dismiss(); };
+    toast.appendChild(closeBtn);
 
     // Cache toast container reference
     if (!this._toastContainer) {
@@ -5514,10 +5554,104 @@ Object.assign(CodemanApp.prototype, {
 
     requestAnimationFrame(() => toast.classList.add('show'));
 
-    setTimeout(() => {
-      toast.classList.remove('show');
-      setTimeout(() => toast.remove(), 200);
-    }, duration);
+    if (duration > 0) {
+      dismissTimer = setTimeout(dismiss, duration);
+    }
+
+    // Most callers ignore this — a handle exists for a long-running toast a caller needs
+    // to update or dismiss itself once its own condition resolves (e.g. a "loading model"
+    // toast a poll loop dismisses once the model reports ready).
+    return { dismiss, setMessage: (text) => { msgSpan.textContent = text; } };
+  },
+
+  /**
+   * A prominent, screen-centred status banner — for the small set of messages that are
+   * genuinely worth interrupting the eye for rather than living in the corner with every
+   * other toast (currently: a custom-model session's "switching backends" and "loading
+   * model" states, both of which can sit on screen for well over a minute and are easy to
+   * mistake for nothing happening). Non-blocking (`pointer-events: none` on the wrapper,
+   * restored only on the card) — an info banner is never a gate the user has to dismiss to
+   * keep working. Only one is ever shown at a time (the DOM node is created once and
+   * reused), which matches every current caller: each hands off to the next rather than
+   * stacking.
+   *
+   * `opts.type` — `'info'` (default, spinner, no close button — a caller ends it itself via
+   * `dismiss()`) or `'error'` (no spinner — nothing is in progress once this shows — with a
+   * close button, since a sticky error the user cannot dismiss would just sit there). The
+   * DOM is rebuilt fresh each call rather than patched, since which children exist differs
+   * by type; `setMessage` still only ever touches the text node afterwards.
+   *
+   * `opts.onCancel` — when given (any type, but in practice only 'info': an 'error' banner
+   * already has its own close button), renders a "Cancel" button that calls it on click.
+   * The callback owns everything that follows (dismissing the banner, stopping whatever
+   * loop this was showing progress for, closing a session it was for) — this helper only
+   * renders the button and wires the click, the same "caller decides what cancel means"
+   * split as `_confirmModelSwap`'s promise-resolving buttons.
+   */
+  _showCenterStatus(message, opts = {}) {
+    const { type = 'info', onCancel } = opts;
+    let el = document.getElementById('customModelCenterStatus');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'customModelCenterStatus';
+      document.body.appendChild(el);
+    }
+    // A pending hide from a PREVIOUS dismiss() (e.g. switchingToast.dismiss() right
+    // before this same-origin call reopens the banner within its 200ms fade) must
+    // never fire against the node this call is about to show — clear it before
+    // reusing the shared DOM node, or the old timer hides the fresh banner ~200ms in.
+    if (el._hideTimer) {
+      clearTimeout(el._hideTimer);
+      el._hideTimer = null;
+    }
+    el.className = `center-status-banner center-status-${type}`;
+    el.innerHTML = '';
+    const dismiss = () => {
+      el.classList.remove('show');
+      el._hideTimer = setTimeout(() => {
+        el.hidden = true;
+        el._hideTimer = null;
+      }, 200);
+    };
+    if (type !== 'error') {
+      const spinner = document.createElement('span');
+      spinner.className = 'center-status-spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+      el.appendChild(spinner);
+    }
+    const text = document.createElement('span');
+    text.className = 'center-status-text';
+    text.textContent = message;
+    el.appendChild(text);
+    if (type === 'error') {
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'center-status-close';
+      closeBtn.textContent = '×';
+      closeBtn.setAttribute('aria-label', 'Dismiss');
+      closeBtn.onclick = (e) => {
+        e.stopPropagation();
+        dismiss();
+      };
+      el.appendChild(closeBtn);
+    } else if (onCancel) {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'center-status-cancel';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.onclick = (e) => {
+        e.stopPropagation();
+        onCancel();
+      };
+      el.appendChild(cancelBtn);
+    }
+    el.hidden = false;
+    requestAnimationFrame(() => el.classList.add('show'));
+    return {
+      dismiss,
+      setMessage: (next) => {
+        const t = el.querySelector('.center-status-text');
+        if (t) t.textContent = next;
+      },
+    };
   },
 
 

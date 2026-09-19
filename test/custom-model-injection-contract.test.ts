@@ -142,17 +142,19 @@ describe('custom-model-injection contract (mock server)', () => {
     expect(mock.requests[0].headers.authorization).toBe('Bearer contract-test-key');
   });
 
-  // gemini/deepseek's `env` kind passes the base URL through UNCHANGED (unlike
-  // opencode/codex/pi/omp/grok, which build a structured config and explicitly append
-  // /v1) — matching Anthropic's own convention for claude's ANTHROPIC_BASE_URL, where the
-  // SDK appends the path itself. Whether each of these TWO CLIs' own OpenAI-compatible
-  // client expects the var to already include /v1 (the common OpenAI-SDK convention) or
-  // appends it itself is genuinely CLI-specific and UNVERIFIED (see the confidence table
-  // in docs/custom-model-endpoints-plan.md) — these tests model the common OpenAI-SDK convention (base_url
-  // ends in /v1) since that's the more likely behavior for an OpenAI-compatible client,
-  // but that assumption should be corrected here the moment it's checked against a real
-  // binary. (grok WAS in this group too, until live-testing showed the whole `env` recipe
-  // was wrong for it — see its own test below.)
+  // gemini's `env` kind still passes the base URL through UNCHANGED (matching
+  // Anthropic's own convention for claude's ANTHROPIC_BASE_URL, where the SDK appends
+  // the path itself) — whether gemini-cli's own OpenAI-compatible-ish client expects the
+  // var to already include /v1 or appends it itself remains genuinely UNVERIFIED (it
+  // fails for an unrelated auth reason before this would even matter — see the
+  // confidence table in docs/custom-model-endpoints-plan.md); this test models the
+  // common OpenAI-SDK convention as the best guess, to be corrected the moment it's
+  // checked against a real client. deepseek WAS in this "passes through unchanged"
+  // group too, until reading `@deepseek-ai/dsh-llm-deepseek`'s own bundled source
+  // confirmed it builds its request URL as `${DEEPSEEK_BASE_URL}/chat/completions` with
+  // no `/v1` of its own — `appendV1Suffix` now fixes that (see its own test below),
+  // the same way grok's whole `env` recipe turned out to be wrong before live-testing
+  // corrected it to a `configDir` one.
 
   it('gemini: GOOGLE_GEMINI_BASE_URL/GEMINI_API_KEY reach the mock', async () => {
     const injection = buildCustomModelInjection(entryOrThrow('gemini'), endpointFor(mock), 'qwen3');
@@ -186,16 +188,18 @@ describe('custom-model-injection contract (mock server)', () => {
     expect(mock.requests[0].headers.authorization).toBe('Bearer contract-test-key');
   });
 
-  it('deepseek: DEEPSEEK_BASE_URL/DEEPSEEK_API_KEY reach the mock (base URL/key only, no model var)', async () => {
+  it('deepseek: DEEPSEEK_BASE_URL already carries the /v1 suffix dsh itself never adds, reaching the mock at the real path dsh requests', async () => {
+    // Confirmed by reading dsh's own bundled source: it fetches
+    // `${DEEPSEEK_BASE_URL}/chat/completions` verbatim, no /v1 insertion of its own — so
+    // this call (unlike gemini's above) passes DEEPSEEK_BASE_URL to callOpenAiCompat
+    // UNMODIFIED, exactly mirroring what the real harness does, rather than the test
+    // helping it along.
     const injection = buildCustomModelInjection(entryOrThrow('deepseek'), endpointFor(mock), 'qwen3');
     if (injection.kind !== 'env') throw new Error('unreachable');
     expect(Object.keys(injection.envOverrides).sort()).toEqual(['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL']);
+    expect(injection.envOverrides.DEEPSEEK_BASE_URL).toBe(`${mock.baseUrl}/v1`);
 
-    await callOpenAiCompat(
-      `${injection.envOverrides.DEEPSEEK_BASE_URL}/v1`,
-      injection.envOverrides.DEEPSEEK_API_KEY,
-      'qwen3'
-    );
+    await callOpenAiCompat(injection.envOverrides.DEEPSEEK_BASE_URL, injection.envOverrides.DEEPSEEK_API_KEY, 'qwen3');
 
     expect(mock.requests[0].path).toBe('/v1/chat/completions');
     expect(mock.requests[0].headers.authorization).toBe('Bearer contract-test-key');

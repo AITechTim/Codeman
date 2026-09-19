@@ -352,6 +352,177 @@ path but the SESSION (`session.remote`): a remote session never falls back to lo
 `fs`, and a local session never opens an ssh connection — including for attachment
 records, which are keyed to the session that registered them.
 
+## Wake-on-LAN from user input
+
+A durable remote session survives an SSH drop (COD-104/108), but nothing brought the
+HOST back. When the remote machine suspended, the local pane's `ssh` child **stalled**
+rather than exited: `tmux send-keys` SUCCEEDS against a stalled pane, so typed input
+vanished with no error anywhere, and without a keepalive the pane could look alive for
+the OS TCP timeout. The only recovery was waiting for the reconnect watcher, which
+gave up after ~13 minutes and, once exhausted, never retried.
+
+An **optional** `wakeMac` (one or more MAC addresses, comma-separated) or `wakeCommand` on a
+remote host closes that: on user input, `POST /api/sessions/:id/input` probes the host, and if
+it is unreachable it wakes it, polls until the host answers, reattaches the pane
+(`Session.reattachRemote()`, which idempotently attaches the still-running remote tmux — the
+agent conversation is not restarted), and flushes the input that arrived meanwhile.
+Implementation: `src/remote-wake.ts`.
+
+The same wake path also serves **opening** a session, which is where a sleeping host used to
+be a dead end: pressing Run on a remote case (`POST /api/quick-start`) or Attach on a
+discovered remote tmux session (`POST /api/sessions` + `attachRemoteSession`) probes the host
+first, and on a sleeping one wakes it, waits for SSH and only then runs the tmux prereq probe.
+Without that the run failed with `could not verify tmux on remote host …` — an ssh error that
+blames tmux for a machine that is merely suspended. The wait is **blocking** (the caller gets
+the session or the error) but bounded by `REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS` (40 s) rather
+than the 90 s session default, because the dashboard sits behind a reverse proxy whose default
+`proxy_read_timeout` is 60 s: a longer wait would be cut off at the proxy while the session was
+still being created. The budget covers the whole request, not just the wait (40 s wake + 1.5 s
+probe + the tmux prereq probe's own 15 s timeout = 56.5 s worst case). A host with no wake target is not even probed on this path, so nothing
+changes for it, and `remote:hostWaking` is broadcast without a `sessionId` (the toast then reads
+"the session starts when it is back" — there is no session yet, and no input queued behind it).
+
+Two wake paths, `wakeCommand` first because it is the explicit override:
+
+- **`wakeMac`** — Codeman builds the magic packet itself (`buildMagicPacket`, six `0xFF`
+  bytes then the MAC repeated 16×; the shape is asserted byte-for-byte) and broadcasts it
+  over UDP port 9 (`sendWakePackets`). This is the normal case: no external script, and one
+  MAC list per host instead of one per consumer.
+- **`wakeCommand`** — a single executable path, run WITHOUT a shell. For hosts that need a
+  router/another machine to send the packet.
+
+**UI**: a banner (`#hostWakeBanner`, `host-wake-ui.js`) appears while the ACTIVE remote
+session's host is unreachable — amber, since the Codeman session is healthy and only the
+machine is asleep. With a wake target the action is **Wake** (`POST /api/sessions/:id/wake`);
+with none it is **Configure WoL** and opens `#wakeConfigModal`, a small form for that host's
+`wakeMac`/`wakeCommand` that saves with `PUT /api/remote-hosts/:id` (in multi-user mode that
+GET is admin-only, so a non-admin is told the setting is admin-only instead of "host not
+found"). Reachability for the banner comes from `GET /api/sessions/:id/reachability`: once
+when the remote tab is activated (a user action), and every 30 s while the tab is visible
+**only for a host with a wake target** — each poll is a TCP connect to the host, and a timer
+that connects to a host Codeman could not wake anyway is exactly the timer-driven traffic
+the keepalive rule below rejects (it cannot wake a host, but it can keep an activity-based
+suspend timer from firing). A host the probe cannot reach (see the next section) is never
+polled. ⚠️ The button is pressed from the SAME
+dashboard as Run/Attach, so it holds its request open under the same proxy and uses the same
+40 s budget — and it **queues nothing**: browser keystrokes travel over the WebSocket, which
+deliberately does not pass through the registry (that is the hot path this feature keeps its
+hands off), so the banner says "waiting for the host to come back" for the button and only
+claims "input is queued" when the HTTP input path actually buffered bytes
+(`queuedInput` on the two SSE events).
+
+**Hosts behind a jump host or SOCKS proxy are reachability-UNKNOWN.** The probe is a bare
+TCP connect to `host:port`, and a host reached through `jumpHost`, `socksProxy` or a
+`ProxyCommand`/`ProxyJump` in `extraSshOptions` does not answer that even while ssh works —
+the direct address may not route at all (the cloudflared case). Acting on the resulting
+"unreachable" verdict was wrong three times over: a permanent banner over a healthy session,
+a create-path error that replaced a genuine "needs tmux" with "not reachable", and — with a
+wake target configured — every HTTP input buffered for the life of the session, because the
+readiness poll could never succeed. `isProbeable()` (`remote-wake.ts`) decides from the
+proxy fields, which travel on `WakeableRemote`; for such a host the registry delivers input
+unchanged, `GET …/reachability` answers `reachable: null, probeable: false` (unknown is not
+`false`, and only a proven `false` raises the banner), the create/attach path is not gated
+(`ensureHostAwake` → `'unprobeable'`, handled like `'no-target'`), and the quick-start
+"not reachable" message is reserved for a **proven** unreachable host (`=== false`). A wake
+target can still be fired for it through `POST /api/sessions/:id/wake`, blind: the packet or
+command goes out and the response says only whether it did — no readiness poll, no reattach
+(the COD-108 watcher owns the pane once ssh works again), no "waking" toast.
+
+The invariants worth keeping:
+
+- **Authorization comes before the wake.** In multi-user mode the attach path
+  (`POST /api/sessions` + `attachRemoteSession`) answers `403` to a non-admin BEFORE the
+  host is looked up or probed: remote hosts are admin-only infrastructure everywhere else
+  (the list is `[]` for a non-admin, write and discovery routes are `adminOnly`), and the
+  wake spawns the host's `wakeCommand` or broadcasts a packet — a gate that came after the
+  wake handed an unprivileged account a way to run that executable for any configured
+  `hostId`, hold the request for the wake budget, and only then be refused for the
+  workingDir. The quick-start path resolves its remote case through `canAccessOwned`
+  first. Pinned in `test/routes/session-remote-wake.test.ts` (wake spy stays empty).
+- **The caller is told what happened to its bytes.** The non-wait input route answers
+  `{buffered:true}` when the registry took the chunk and `{buffered:true, dropped:true}`
+  when it was over the cap and is gone; the send-and-wait route answers `OPERATION_FAILED`
+  when the host never comes back, like the create and attach paths, instead of writing
+  into the stalled pane and reporting `delivered:true` plus a timeout. Flushed chunks are
+  written with `fromUser`, so a first prompt that was buffered through a wake can still
+  name the tab.
+- **Only an EXPLICIT request may wake a host:** user input on an established session, the wake
+  button, or the user's own session create/attach request (`ensureHostAwake`). Everything that
+  runs on a TIMER must never wake one — the COD-108 watcher, the server's dropped-session
+  handler, boot recovery and session discovery have no access to the wake registry, and neither
+  has the shared session service, because `cron-service.ts` builds sessions there with nobody
+  waiting on the answer; a wake on such a path would re-wake the host seconds after every
+  suspend, so it could never stay asleep (the same failure `hufflepuff-mcp-lazy` exists to
+  prevent for MCP keepalives). A reachability check, a discovery listing and the tmux prereq
+  probe never wake: they are questions, not actions. All of it is enforced by tests in
+  `test/remote-wake.test.ts` (two wiring guards: one pins the importers — the route module and
+  `server.ts`, which holds the registry for its LIFETIME only, `drop()` on session cleanup and
+  `stop()` on shutdown — and one asserts `server.ts` calls nothing but those two, while
+  `ensureHostAwake` has exactly one caller file) and `test/routes/session-remote-wake.test.ts`,
+  not by comments.
+- **Detection is a bare TCP connect** to the SSH port (then the configured `port`, else 22),
+  throttled per session, and only for wake-enabled hosts. No `ServerAliveInterval` is added to
+  the launch command: keepalives push bytes into an otherwise idle connection every interval,
+  which is exactly what a byte-threshold idle detector must not count as activity. A probe is
+  ~200 bytes per 30 s, orders of magnitude below any such threshold, and the SYN alone cannot
+  wake a host.
+- **Input is buffered while a wake is in flight** (`REMOTE_WAKE_PENDING_MAX_BYTES`,
+  oldest whole chunks dropped, bounded so user input cannot grow memory) and flushed in
+  order after the reattach, with a settle delay so bytes cannot land in a still-connecting
+  pane. ⚠️ A chunk LARGER than the cap (one big paste is one `input` value) is dropped
+  **outright**, never trimmed: it was never typed character by character, so its tail is not
+  "what the user just typed" but a fragment of a command they never sent — the drop is logged
+  instead. ⚠️ Only the HTTP input route reaches the registry; the **WebSocket keystroke path
+  is deliberately NOT wake-aware**, so typing into a sleeping host sends nothing and queues
+  nothing (the banner's Wake button is the recovery for that case, which is why it must not
+  promise queued input). The **send-and-wait** path blocks on the wake instead — its response
+  is open anyway, and buffering would break the wait contract. ⚠️ A flush write that FAILS
+  drops the whole remaining buffer (logged) rather than retaining it: the wake still resolves
+  and marks the host reachable, so the next input takes the deliver path while a retained
+  chunk would wait for the NEXT wake — replayed hours later, after everything typed since,
+  possibly ending in a carriage return. Same policy as the oversized paste.
+- **The command runs without a shell** (`spawn(path, [], { stdio: 'ignore' })` — `shell`
+  defaults to `false`), the schema
+  requires a single executable path (no arguments, no `$`/backtick), and `wakeMac` is a
+  structural hex-pair allowlist. A broken or missing wake target fails the wake, never the
+  input route.
+- **`wakeMac`/`wakeCommand` are host-level config, refreshed on recovery AND live**
+  (`rehydrateRemoteHostFields` in `src/remote-hosts.ts` plus `RemoteWakeDeps.resolveRemote`).
+  A session's `remote` block is persisted at launch time, so a field added to
+  `remote-hosts.json` later would otherwise never reach an already-running session — not even
+  across a Codeman restart, and certainly not right after saving the banner's config dialog.
+  Recovery rehydration covers restarts, the (throttled, cache-backed) resolver covers the live
+  session; the host config is authoritative for both (removing the field disables the feature
+  again). Other host-level fields deliberately stay as persisted, so neither path can
+  silently re-point an existing pane's SSH options.
+- **UI/SSE**: `remote:hostWaking` and `remote:hostWakeFailed` (plus the reused
+  `remote:sessionReconnected`) drive the banner and toasts, all from `host-wake-ui.js` —
+  its handlers are the ONLY definitions, since a second one in another mixin would be
+  silently shadowed by script order. Both carry `queuedInput`, which is true only when the
+  server actually holds bytes for that session — the wording keys off that, not off "a wake
+  is running", so the button path never claims input is queued. In multi-user mode the
+  whole `remote:` family is **session-scoped** (`deriveSseHint`, `server.ts`): an event with
+  a `sessionId` reaches that session's owner, and the create/attach wake — which has no
+  session yet — carries the requesting `username` instead (`ensureHostAwake({ requestedBy })`),
+  since its payload names a `hostId`/`label` that `GET /api/remote-hosts` withholds from
+  non-admins. With neither, it reaches admins only.
+- **No real IO under vitest.** `probeRemoteHostReachable`, `runRemoteWakeCommand` and the
+  default UDP socket of `sendWakePackets` throw under `VITEST` (as `remote-files.ts` does),
+  so a test that reaches the defaults fails loudly instead of connecting, spawning or
+  broadcasting from CI. Every consumer injects its IO (`RemoteWakeDeps`, the socket
+  factory); `createDefaultRemoteWakeDeps({ probe })` also polls readiness with THAT probe,
+  which is the leak the guard found.
+
+Tests: `test/remote-wake.test.ts` (decision/throttle table, single-flight registry,
+buffering + flush order, MAC parsing/magic packet, live host-config resolution, the proxied
+host, SSE payload routing, the vitest IO guard, and the wiring guard),
+`test/routes/session-remote-wake.test.ts` (the input route buffers instead of writing into a
+sleeping host — and writes straight into a proxied one —, the reachability route never wakes
+and reports a proxied host as unknown, and the wake route reports the no-target case the UI
+turns into "configure WoL"), `test/sse-routing-remote.test.ts` (multi-user routing of the
+`remote:` family) and `test/host-wake-banner.test.ts` (banner visibility and when the poller
+may connect).
+
 ## API
 
 Routes are registered in `src/web/routes/case-routes.ts`:
@@ -364,6 +535,10 @@ Routes are registered in `src/web/routes/case-routes.ts`:
 | `DELETE` | `/api/remote-hosts/:id` | Delete a host |
 | `GET` | `/api/remote-hosts/:hostId/sessions` | Discover `codeman-*` sessions on the host (COD-105; `listRemoteCodemanSessions`, never errors) |
 | `POST` | `/api/cases/remote-link` | Link a case to a remote host (creates the `RemoteCase`) |
+
+`RemoteHost` accepts the optional `wakeMac` (magic packet, sent by Codeman) and `wakeCommand`
+(single executable path, run without a shell, takes precedence) — see **Wake-on-LAN from user
+input** above.
 
 Attaching to a discovered session is a **session-create** path, not a host route:
 `POST /api/sessions` accepts `attachRemoteSession: { hostId, remoteSessionName }`

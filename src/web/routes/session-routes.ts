@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
   ApiErrorCode,
@@ -28,8 +28,10 @@ import {
   type GrokConfig,
   type DeepSeekConfig,
   type OmpConfig,
+  type RemoteHost,
 } from '../../types.js';
 import { Session, isAltScreenStripMode, isExternalCliMode, isMuxAltScreenOnlyStripMode } from '../../session.js';
+import type { PaneCaptureOptions } from '../../mux-interface.js';
 import { SseEvent } from '../sse-events.js';
 import { webviewCapabilities } from '../../webview-capabilities.js';
 import {
@@ -55,6 +57,12 @@ import {
 } from '../schemas.js';
 import { readCustomModelHosts } from '../../custom-model-hosts.js';
 import { applyCustomModelInjection, removeConfigDir } from '../../custom-model-injection-apply.js';
+import {
+  getLlamaSwapStatus,
+  triggerLlamaSwapLoad,
+  exceedsSafeContextFloor,
+  CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+} from './custom-model-routes.js';
 import { matchesPattern } from '../../config/cli-registry/patterns.js';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { TabLayoutValidationError } from '../../tab-layout.js';
@@ -67,6 +75,13 @@ import {
   type WaitSignal,
   type SignalWaitResult,
 } from '../session-wait-registry.js';
+import {
+  RemoteWakeRegistry,
+  REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+  createDefaultRemoteWakeDeps,
+  isProbeable,
+  type WakeableRemote,
+} from '../../remote-wake.js';
 import { clampWaitMs, MAX_BUFFER_SCAN_BYTES } from '../../config/agent-wait.js';
 import {
   autoConfigureRalph,
@@ -134,6 +149,7 @@ import {
   checkRemoteTmuxAvailable,
   readRemoteCases,
   readRemoteHosts,
+  rehydrateRemoteHostFields,
   toAttachedSessionRemote,
   toSessionRemote,
 } from '../../remote-hosts.js';
@@ -749,10 +765,65 @@ export function resolveOmpConfigForCreate(
   return resolvedId ? { ...ompConfig, resumeSessionId: resolvedId } : ompConfig;
 }
 
+/**
+ * `RemoteHost` → the wake registry's host shape. They differ in one field name only
+ * (`id` in host config vs `hostId` on a session's `remote`), but the rename is load-
+ * bearing: the registry keys its per-host wake state on `hostId`. The proxy fields
+ * travel too: they are what tells the registry its probe cannot reach this host.
+ */
+function wakeableHost(host: RemoteHost): WakeableRemote {
+  return {
+    hostId: host.id,
+    label: host.label,
+    host: host.host,
+    port: host.port,
+    wakeMac: host.wakeMac,
+    wakeCommand: host.wakeCommand,
+    jumpHost: host.jumpHost,
+    socksProxy: host.socksProxy,
+    extraSshOptions: host.extraSshOptions,
+  };
+}
+
 export function registerSessionRoutes(
   app: FastifyInstance,
-  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort
-): void {
+  ctx: SessionPort & EventPort & ConfigPort & InfraPort & AuthPort & TabLayoutPort,
+  /** Test seam: inject a registry with fake IO instead of the real TCP/WoL probes. */
+  options: { remoteWake?: RemoteWakeRegistry } = {}
+): RemoteWakeRegistry {
+  // Wake-on-LAN for sleeping remote hosts (see remote-wake.ts). One registry per
+  // route registration (= one web server) — the same shape as the process-wide
+  // `sessionWaits` singleton, but without the global.
+  //
+  // ⚠️ The ONLY caller that may wake a host is the input route below. The
+  // auto-reconnect watcher and boot recovery deliberately have no access to this
+  // registry: waking there would re-wake the host seconds after every suspend, so
+  // it could never stay asleep.
+  const remoteWake =
+    options.remoteWake ??
+    new RemoteWakeRegistry(
+      createDefaultRemoteWakeDeps({
+        noteReconnected: (sessionId, success) => {
+          // Duck-typed exactly like server.ts: TmuxManager owns the COD-108 backoff
+          // state, and the port interface does not expose it.
+          const mux = ctx.mux as unknown as { noteRemoteReconnect?: (id: string, ok: boolean) => void };
+          mux.noteRemoteReconnect?.(sessionId, success);
+        },
+        broadcast: (event, payload) => ctx.broadcast(event, payload),
+        log: (message) => console.log(message),
+        // The session's `remote` block is a launch-time snapshot, so a wake target
+        // configured later (banner's config dialog, or a hand-edited remote-hosts.json)
+        // is resolved here — throttled by the registry, and the host config is
+        // authoritative in BOTH directions (removing the field turns the feature off
+        // for a live session too).
+        resolveRemote: async (session) => {
+          const remote = session.remote;
+          if (!remote) return undefined;
+          const hosts = await readRemoteHosts(CODEMAN_CONFIG_DIR);
+          return rehydrateRemoteHostFields(remote, new Map(hosts.map((host) => [host.id, host])));
+        },
+      })
+    );
   // ═══════════════════════════════════════════════════════════════
   // Auth
   // ═══════════════════════════════════════════════════════════════
@@ -824,9 +895,33 @@ export function registerSessionRoutes(
     // creation (owned durable sessions) is handled by the dedicated case-create
     // endpoint below, which #145 consolidated remote-host resolution into.
     if (body.attachRemoteSession) {
+      // Remote hosts are admin-only infrastructure everywhere else (the list answers
+      // `[]` to a non-admin; write and discovery routes are `adminOnly`), and the wake
+      // below spawns the host's `wakeCommand` or broadcasts a packet. So the gate comes
+      // FIRST — before the host is even looked up — or an unprivileged account could
+      // invoke that executable for any configured `hostId` and only then be told the
+      // workingDir was outside its workspace (reproduced upstream: wake spy fired, 403).
+      if (isMultiUserMode() && !isAdmin(req)) {
+        return createErrorResponse(ApiErrorCode.FORBIDDEN, 'Remote hosts are admin-only in multi-user mode');
+      }
       const { hostId, remoteSessionName } = body.attachRemoteSession;
       const host = (await readRemoteHosts(CODEMAN_CONFIG_DIR)).find((item) => item.id === hostId);
       if (!host) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Remote host not found');
+      // An explicit wake request is the only thing that may wake a host, and the user
+      // pressing Attach IS one (see quick-start for the same gate, and
+      // `remote-wake.ts` for what must never call this). Without it a sleeping host
+      // answers with an ssh failure that blames anything but the machine being asleep.
+      const hostWake = await remoteWake.ensureHostAwake(wakeableHost(host), {
+        timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+        // No session yet, so the wake events name their requester (multi-user routing).
+        requestedBy: ownerFor(req),
+      });
+      if (hostWake === 'failed') {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `${host.label} did not come back after a wake-on-LAN request — nothing was attached`
+        );
+      }
       workingDir = `${host.username}@${host.host}:${remoteSessionName}`;
       remote = toAttachedSessionRemote(host, remoteSessionName, workingDir);
     }
@@ -1143,13 +1238,83 @@ export function registerSessionRoutes(
     if (!endpoint) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
     }
+    const contextLength = endpoint.modelContextLengths?.[body.modelId];
+
+    // Some CLIs (today: only claude) carry enough of their own fixed system-prompt/tool-
+    // schema overhead that a small enough real context guarantees a first-message failure
+    // no matter what CLAUDE_CODE_MAX_CONTEXT_TOKENS says — confirmed live at ~36.4K tokens
+    // against a model configured with a real 16384-token context. Warn before committing
+    // to a restart that's certain to fail, rather than letting the user discover it via a
+    // cryptic 400 from the CLI itself. Answered by `confirmedContext` (or the legacy
+    // `confirmed`, which still means both) — NOT by `confirmedSwap`: this warning is
+    // about the caller's own session, and the swap warning below is about someone
+    // else's, so an answer to one is not consent to the other.
+    if (!(body.confirmed || body.confirmedContext) && exceedsSafeContextFloor(entry, contextLength)) {
+      return {
+        requiresContextWarning: true,
+        modelId: body.modelId,
+        contextLength,
+        minSafeContextTokens: CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+      };
+    }
+
+    // llama.cpp runs exactly one model at a time; llama-swap unloads and reloads it on
+    // demand, which can take anywhere from a few seconds to over a minute — long enough
+    // that a session mid-swap looks indistinguishable from one that never left the native
+    // backend. Feature-detected via llama-swap's own `GET /running` (a plain llama.cpp
+    // server has no such endpoint and reads as `isLlamaSwap: false` — nothing to check).
+    const swapStatus = await getLlamaSwapStatus(endpoint);
+    const currentlyLoaded = swapStatus.running.find((r) => r.state === 'ready')?.model ?? swapStatus.running[0]?.model;
+    // Distinct from targetReady below: this is ONLY about whether proceeding would evict a
+    // model another session is actively using — true even if nothing is loaded at all yet
+    // would be wrong here (nothing to evict), so this stays narrowly "a DIFFERENT model is
+    // currently ready".
+    const swapNeeded = swapStatus.isLlamaSwap && !!currentlyLoaded && currentlyLoaded !== body.modelId;
+    // Whether the TARGET model itself is already the one loaded and ready — false whether
+    // nothing is loaded yet, a different model is loaded, or this one is loaded but still
+    // mid-load. Drives both the actual load trigger below and modelSwapInProgress in the
+    // response; deliberately broader than swapNeeded, which only gates the confirmation ask.
+    const targetReady = swapStatus.running.some((r) => r.model === body.modelId && r.state === 'ready');
+
+    // Only ask when switching would actually take the model away from another session
+    // that is currently using it — never just because a swap is needed at all. Answered
+    // by `confirmedSwap` (or the legacy `confirmed`). ⚠ It must NOT read
+    // `confirmedContext`: this check runs second, and while the two shared one flag a
+    // user who clicked past a too-small-context warning had already, silently, agreed to
+    // evict another session's model.
+    if (swapNeeded && !(body.confirmed || body.confirmedSwap)) {
+      const conflicting = [...ctx.sessions.values()].filter(
+        (s) =>
+          s.id !== session.id && s.customModel?.endpointId === endpoint.id && s.customModel?.modelId === currentlyLoaded
+      );
+      if (conflicting.length > 0) {
+        // Applying a custom model is ungated for any session owner, so in multi-user
+        // mode a non-admin pointing their own session at a shared endpoint must not
+        // learn another user's session names in the confirm dialog — with
+        // autoNameSessions on, those names are that user's own prompts. The swap is
+        // still blocked pending confirmation regardless of ownership (a foreign
+        // session is just as real a disruption); only which ones get NAMED is scoped.
+        const requestUser = getAuthUser(req);
+        const affectedSessions = conflicting
+          .filter((s) => canAccessOwned(requestUser, s.owner))
+          .map((s) => ({ id: s.id, name: s.name }));
+        return { requiresConfirmation: true, currentlyLoadedModel: currentlyLoaded, affectedSessions };
+      }
+    }
 
     // A CLI whose config alone cannot select the model also gets its `model` launch param
     // forced (pi/omp `custom/<id>`, grok's block name). The argv engine DROPS a token that
     // fails its pattern rather than quoting it, which would silently launch the CLI on its
     // own default provider again, so refuse an id the pattern cannot carry up front.
     const modelSpec = entry.launch.params.model;
-    const applied = applyCustomModelInjection(entry, endpoint, body.modelId, session.id);
+    const applied = applyCustomModelInjection(
+      entry,
+      endpoint,
+      body.modelId,
+      session.id,
+      contextLength,
+      session.workingDir
+    );
     if (!applied) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${session.mode} has no known custom-model mechanism`);
     }
@@ -1182,9 +1347,17 @@ export function registerSessionRoutes(
       removeConfigDir(previousConfigDir);
     }
 
+    // Actually kick off llama-swap's load now, rather than waiting on the restarted CLI's
+    // own first prompt to do it — confirmed live that applying a selection alone never
+    // reached the llama-swap server at all (nothing in its own logs), since llama-swap has
+    // no "switch model" admin call, only a real inference request naming the model.
+    if (swapStatus.isLlamaSwap && !targetReady) {
+      triggerLlamaSwapLoad(endpoint, body.modelId);
+    }
+
     const restarted = await session.restartCli();
     persistAndBroadcastSession(ctx, session);
-    return { customModel: session.customModel, restarted };
+    return { customModel: session.customModel, restarted, modelSwapInProgress: swapStatus.isLlamaSwap && !targetReady };
   });
 
   // ========== Delete Session ==========
@@ -1214,6 +1387,8 @@ export function registerSessionRoutes(
     }
 
     const session = findSessionOrFail(ctx, id, req);
+    // Wake state is dropped by `cleanupSession` itself (server.ts), on EVERY cleanup
+    // path — not here: the scheduled-run and admin paths clean up without this route.
     await ctx.cleanupSession(session.id, killMux, 'user_delete');
     return {};
   });
@@ -1449,6 +1624,67 @@ export function registerSessionRoutes(
   // Terminal I/O (input, resize, buffer)
   // ═══════════════════════════════════════════════════════════════
 
+  // ========== Wake-on-LAN: state + manual trigger ==========
+  //
+  // Both routes are session-scoped (not host-scoped) because the wake flow needs the
+  // SESSION: a woken host whose pane is not reattached is still a dead terminal, and an
+  // exhausted COD-108 backoff never retries on its own. The probe in `/reachability` is
+  // the same cheap TCP connect the input path uses and it NEVER wakes a host — the UI
+  // decides that, with the button.
+
+  app.get('/api/sessions/:id/reachability', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    const remote = session.remote;
+    if (!remote) {
+      return { success: true, data: { reachable: true, probeable: true, wakeConfigured: 'none' as const } };
+    }
+    const force = (req.query as { force?: string })?.force === '1';
+    // `reachable: null` + `probeable: false` for a host behind a jump host / SOCKS proxy:
+    // the probe cannot reach it, so the UI shows no banner and stops polling.
+    const reachable = await remoteWake.checkReachable(session, { force });
+    return {
+      success: true,
+      data: {
+        reachable,
+        probeable: isProbeable(remote),
+        wakeConfigured: await remoteWake.wakeConfigured(session),
+        host: remote.host,
+        label: remote.label,
+      },
+    };
+  });
+
+  app.post('/api/sessions/:id/wake', async (req) => {
+    const { id } = req.params as { id: string };
+    const session = findSessionOrFail(ctx, id, req);
+    if (!session.remote) {
+      return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Not a remote session');
+    }
+    // The UI uses this to route to the host config dialog instead of a dead button.
+    if (!(await remoteWake.hasWakeTarget(session))) {
+      return createErrorResponse(
+        ApiErrorCode.INVALID_INPUT,
+        'No wake-on-LAN target configured for this host (set a MAC address or a wake command)'
+      );
+    }
+    // The button is pressed from the SAME dashboard the create/attach paths are, under
+    // the same reverse proxy — so it holds the request open the same way and needs the
+    // same request budget, not the 90 s session default (see remote-wake.ts).
+    const woke = await remoteWake.ensureAwake(session, {
+      force: true,
+      timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+    });
+    return {
+      success: true,
+      data: {
+        woke,
+        reachable: await remoteWake.checkReachable(session),
+        wakeConfigured: await remoteWake.wakeConfigured(session),
+      },
+    };
+  });
+
   // ========== Send Input ==========
 
   app.post('/api/sessions/:id/input', async (req, reply) => {
@@ -1488,6 +1724,42 @@ export function registerSessionRoutes(
     const duplicate = tagged && !session.shouldApplyInput(clientId as string, seq as number);
     if (duplicate && !wantsWait) {
       return {};
+    }
+
+    // Wake-on-LAN (remote-wake.ts): a wake-enabled remote host that suspended leaves
+    // the local ssh pane STALLED, and `send-keys` succeeds against it — the bytes
+    // would vanish with no error anywhere. Give the registry the chance to probe the
+    // host, wake it, reattach, and own delivery before we write into nothing.
+    //
+    // Costs nothing for non-wake hosts (the `wakeCommand` guard) or while the host is
+    // known reachable inside the probe throttle window; the probe itself is a bare
+    // TCP connect on wake-enabled hosts only, at most once per
+    // REMOTE_WAKE_PROBE_MIN_INTERVAL_MS.
+    if (!duplicate && (await remoteWake.hasWakeTarget(session))) {
+      if (wantsWait) {
+        // Send-and-wait keeps the response open anyway, so blocking on the wake is
+        // simpler and more correct than buffering (buffering would break the wait).
+        // A host that never comes back is an error here, as on the create/attach
+        // paths: writing into the stalled pane would answer `delivered:true` plus a
+        // timeout, which is the combination the API docs send callers to the wrong
+        // recovery for.
+        if (!(await remoteWake.ensureAwake(session))) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            `${session.remote?.label ?? 'the remote host'} did not come back after a wake-on-LAN request — nothing was sent`
+          );
+        }
+      } else {
+        const outcome = await remoteWake.handleInput(session, inputStr);
+        // The registry holds the bytes and flushes them in order once the pane is
+        // reattached. The client's ACK is this 200 — a tagged retry is deduped
+        // (`shouldApplyInput` above already consumed the seq), so nothing is lost.
+        // `buffered` is additive to the historical bare `{}`; `dropped` says the chunk
+        // was over the wake buffer's cap and is GONE (a 200 with no field could not
+        // tell delivered from buffered from dropped).
+        if (outcome === 'buffered') return { buffered: true };
+        if (outcome === 'dropped') return { buffered: true, dropped: true };
+      }
     }
 
     // Only a waiting request pays for the tmux probe: the browser's plain input path
@@ -2632,14 +2904,16 @@ export function registerSessionRoutes(
     // returns null when unavailable, in which case we fall back to history.
     const muxName = session.muxName;
     const captureStartedAt = performance.now();
+    // The visible path used to pass no options at all. It passes one now for a
+    // single reason: `capturedGeometry` comes BACK on it, and the response has
+    // to tell the client what size the frame it is about to render was built
+    // for. See PaneCaptureOptions.capturedGeometry.
+    const captureOpts: PaneCaptureOptions = isFullReload
+      ? { fullHistory: true, historyLimitLines: tmuxHistoryLimit, maxCaptureBytes: terminalBufferMaxBytes }
+      : {};
     const liveMuxBuffer =
       muxName && typeof ctx.mux.captureActivePaneBuffer === 'function'
-        ? ctx.mux.captureActivePaneBuffer(
-            muxName,
-            isFullReload
-              ? { fullHistory: true, historyLimitLines: tmuxHistoryLimit, maxCaptureBytes: terminalBufferMaxBytes }
-              : undefined
-          )
+        ? ctx.mux.captureActivePaneBuffer(muxName, captureOpts)
         : null;
     const captureFinishedAt = performance.now();
     const hasLiveMuxBuffer = liveMuxBuffer !== null && liveMuxBuffer.length > 0;
@@ -2785,6 +3059,25 @@ export function registerSessionRoutes(
       // what existed before the cut. The gap is what the indicator reports.
       retainedBytes: cleanBuffer.length,
       source,
+      // The pane geometry this frame was drawn for. A visible-frame capture
+      // positions every row absolutely, so a client whose terminal has fewer
+      // rows than this overwrites its last line with the overflow and loses
+      // the rows underneath. The client compares these against its own size.
+      //
+      // BOTH FIELDS ARE ABSENT unless this response really carries a capture,
+      // and that is the honest answer rather than a gap to paper over. Two
+      // separate things can leave a frame unpositioned. The cursor query is
+      // what produces the absolute addressing in the first place, so a capture
+      // that lost it returned a raw frame with no row positioning in it. And a
+      // capture can report geometry and STILL hand back nothing: the
+      // full-history path returns '' for a pane holding nothing visible, which
+      // drops `source` to `history` while `capturedGeometry` is already
+      // written, so the geometry has to be suppressed HERE rather than trusted
+      // to be missing. Naming a size for a body that is the byte stream would
+      // describe a frame that was never drawn and invite the client to repair
+      // damage that does not exist.
+      captureCols: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.cols : undefined,
+      captureRows: hasLiveMuxBuffer ? captureOpts.capturedGeometry?.rows : undefined,
     };
   });
 
@@ -3043,6 +3336,7 @@ export function registerSessionRoutes(
       effort,
       parentSessionId,
       agentOrigin,
+      customModel,
     } = parseBody(QuickStartSchema, req.body);
 
     // Resolved ONCE here: the same value labels a case directory this request creates
@@ -3095,11 +3389,31 @@ export function registerSessionRoutes(
         grokConfig ||
         deepSeekConfig ||
         ompConfig ||
-        openCodeConfig
+        openCodeConfig ||
+        customModel
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, modelOverride, and per-CLI config are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
+          'envOverrides, effort, modelOverride, per-CLI config, and custom model endpoints are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
+        );
+      }
+
+      // The user pressing "Run" on a case whose host is asleep IS an explicit wake
+      // request (docs/remote-sessions.md §Wake-on-LAN), and the tmux probe below would
+      // otherwise fail with "could not verify tmux on remote host …" — an ssh failure
+      // that blames tmux for a machine that is merely suspended. Wired HERE, in the HTTP
+      // route, and deliberately NOT in the shared session service: `cron-service.ts`
+      // builds sessions through the service, and a wake down there would re-wake the
+      // host on every schedule (the failure invariant #1 exists to prevent).
+      const hostWake = await remoteWake.ensureHostAwake(wakeableHost(host), {
+        timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+        // No session yet, so the wake events name their requester (multi-user routing).
+        requestedBy: ownerFor(req),
+      });
+      if (hostWake === 'failed') {
+        return createErrorResponse(
+          ApiErrorCode.OPERATION_FAILED,
+          `${host.label} did not come back after a wake-on-LAN request — the session was not started`
         );
       }
 
@@ -3108,6 +3422,20 @@ export function registerSessionRoutes(
       // surfaces a clear, structured error instead of a dead "tmux: command not found" pane.
       const tmuxCheck = await checkRemoteTmuxAvailable(host);
       if (!tmuxCheck.ok) {
+        // An unreachable host and a host without tmux fail the same way over ssh, so the
+        // probe's own message would send the user hunting for a tmux install. Ask the
+        // registry (which just probed, when it woke the host) which of the two it is.
+        // `=== false` on purpose: a proxied host answers `null` (the probe cannot reach
+        // it), and an unknown verdict must not replace the real ssh error with
+        // "not reachable" over a host that is fine.
+        if ((await remoteWake.checkHostReachable(wakeableHost(host))) === false) {
+          return createErrorResponse(
+            ApiErrorCode.OPERATION_FAILED,
+            hostWake === 'no-target'
+              ? `${host.label} (${host.host}) is not reachable, and this host has no wake-on-LAN target — configure a MAC address or a wake command first`
+              : `${host.label} (${host.host}) is not reachable`
+          );
+        }
         return createErrorResponse(ApiErrorCode.OPERATION_FAILED, tmuxCheck.error || 'remote host is missing tmux');
       }
 
@@ -3130,11 +3458,12 @@ export function registerSessionRoutes(
         grokConfig ||
         deepSeekConfig ||
         ompConfig ||
-        openCodeConfig
+        openCodeConfig ||
+        customModel
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, and per-CLI config are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
+          'envOverrides, effort, per-CLI config, and custom model endpoints are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
         );
       }
 
@@ -3422,7 +3751,153 @@ export function registerSessionRoutes(
     );
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
-    const session = new Session({
+    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig);
+
+    // Custom Model Endpoint Profiles, applied AT CREATE TIME (docs/custom-model-endpoints-plan.md)
+    // rather than via the dedicated restart-in-place route (POST /api/sessions/:id/custom-
+    // model, still what an ALREADY-RUNNING session uses to switch later): computing the
+    // injection before the process exists and launching directly on it avoids the visible
+    // native-boot-then-restart the restart-after-launch design otherwise shows on every
+    // custom-model run — most jarring on a CLI like Codex whose TUI fully reinitializes.
+    // Mirrors the dedicated route's own checks (llama-swap conflict, unsupported CLI,
+    // unknown endpoint, a model id the CLI's argv pattern can't carry) rather than trusting
+    // a lighter version of them, since this is the same server-side authority reached a
+    // different way, not a separate, less-checked path.
+    let qsCustomModelEnvOverrides = qsGatedEnvOverrides;
+    // Only the INJECTED keys (never the caller's envOverrides merged in) — this is what
+    // setCustomModel() bookkeeping must be given below. The Session constructor already
+    // applies qsCustomModelEnvOverrides (the full merged set) directly; re-merging that
+    // full set into setCustomModel() would put CLAUDE_CODE_EFFORT_LEVEL back after the
+    // constructor stripped it (see setCustomModel()'s own doc comment in session.ts).
+    let qsCustomModelAppliedEnvOverrides: Record<string, string> | undefined;
+    let qsCustomModelLaunchModel: string | undefined;
+    let qsCustomModelSessionId: string | undefined;
+    let qsCustomModelSwapInProgress = false;
+    let qsCustomModelBookkeeping:
+      | {
+          endpointId: string;
+          modelId: string;
+          label?: string;
+          envKeys: string[];
+          configDir?: string;
+          launchModel?: string;
+        }
+      | undefined;
+    if (customModel) {
+      const cmEntry = getCli(mode);
+      if (!cmEntry) return createErrorResponse(ApiErrorCode.INVALID_INPUT, `No CLI registry entry for mode ${mode}`);
+      if (cmEntry.capabilities.customModelInjection.kind === 'unsupported') {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
+      }
+      const cmHosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
+      const cmEndpoint = cmHosts.find((h) => h.id === customModel.endpointId);
+      if (!cmEndpoint) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+      const cmContextLength = cmEndpoint.modelContextLengths?.[customModel.modelId];
+
+      // See the dedicated route's own comment for the full reasoning: some CLIs' own fixed
+      // overhead can exceed a small enough real context on the very first message,
+      // regardless of contextLengthVar. Warn before creating a session that's certain to
+      // fail immediately.
+      // See the dedicated route above for why this reads `confirmedContext` and never
+      // `confirmedSwap`.
+      if (
+        !(customModel.confirmed || customModel.confirmedContext) &&
+        exceedsSafeContextFloor(cmEntry, cmContextLength)
+      ) {
+        return {
+          requiresContextWarning: true,
+          modelId: customModel.modelId,
+          contextLength: cmContextLength,
+          minSafeContextTokens: CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+        };
+      }
+
+      // See the dedicated route's own comment for the full reasoning: llama.cpp runs one
+      // model at a time, llama-swap swaps on demand, and switching away from what another
+      // live session is actively using deserves a warning, not a silent switch. There is no
+      // "self" to exclude from the affected-sessions scan here — this session doesn't exist
+      // yet.
+      const cmSwapStatus = await getLlamaSwapStatus(cmEndpoint);
+      const cmCurrentlyLoaded =
+        cmSwapStatus.running.find((r) => r.state === 'ready')?.model ?? cmSwapStatus.running[0]?.model;
+      const cmSwapNeeded = cmSwapStatus.isLlamaSwap && !!cmCurrentlyLoaded && cmCurrentlyLoaded !== customModel.modelId;
+      // Broader than cmSwapNeeded (which only gates the confirmation ask above): true
+      // whenever the TARGET model isn't already loaded and ready, including when nothing
+      // is loaded at all yet. Drives the actual load trigger below.
+      const cmTargetReady = cmSwapStatus.running.some((r) => r.model === customModel.modelId && r.state === 'ready');
+      qsCustomModelSwapInProgress = cmSwapStatus.isLlamaSwap && !cmTargetReady;
+      if (cmSwapNeeded && !(customModel.confirmed || customModel.confirmedSwap)) {
+        const cmConflicting = [...ctx.sessions.values()].filter(
+          (s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded
+        );
+        if (cmConflicting.length > 0) {
+          // Same reasoning as the dedicated /custom-model route above: the swap is
+          // still blocked pending confirmation regardless of ownership, but a
+          // non-admin caller only learns the names of sessions they can access.
+          const cmRequestUser = getAuthUser(req);
+          const cmAffectedSessions = cmConflicting
+            .filter((s) => canAccessOwned(cmRequestUser, s.owner))
+            .map((s) => ({ id: s.id, name: s.name }));
+          return {
+            requiresConfirmation: true,
+            currentlyLoadedModel: cmCurrentlyLoaded,
+            affectedSessions: cmAffectedSessions,
+          };
+        }
+      }
+
+      // Minted ourselves (rather than left to Session's own default) so the injection
+      // below — and any configDir it writes — can target the REAL id the session launches
+      // with, not a placeholder: `new Session({ id: ... })` accepts an explicit id for
+      // exactly this reason.
+      qsCustomModelSessionId = randomUUID();
+      const cmApplied = applyCustomModelInjection(
+        cmEntry,
+        cmEndpoint,
+        customModel.modelId,
+        qsCustomModelSessionId,
+        cmContextLength,
+        resolvedCasePath
+      );
+      if (!cmApplied) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
+      }
+      const cmModelSpec = cmEntry.launch.params.model;
+      if (
+        cmApplied.launchModel !== undefined &&
+        cmModelSpec?.type === 'token' &&
+        !matchesPattern(cmModelSpec.pattern, cmApplied.launchModel)
+      ) {
+        removeConfigDir(cmApplied.configDir);
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `Model id ${JSON.stringify(customModel.modelId)} cannot be passed to ${mode} on its command line`
+        );
+      }
+
+      qsCustomModelEnvOverrides = { ...qsGatedEnvOverrides, ...cmApplied.envOverrides };
+      qsCustomModelAppliedEnvOverrides = cmApplied.envOverrides;
+      qsCustomModelLaunchModel = cmApplied.launchModel;
+      qsCustomModelBookkeeping = {
+        endpointId: cmEndpoint.id,
+        modelId: customModel.modelId,
+        label: cmEndpoint.label,
+        envKeys: cmApplied.envKeys,
+        configDir: cmApplied.configDir,
+        launchModel: cmApplied.launchModel,
+      };
+
+      // Actually kick off llama-swap's load now — see the dedicated apply route's own
+      // comment on triggerLlamaSwapLoad for why this can't just wait on the launched CLI's
+      // first prompt. Fired here, before the session is even created, so the load starts
+      // concurrently with Claude/Codex/etc. booting rather than after.
+      if (qsCustomModelSwapInProgress) {
+        triggerLlamaSwapLoad(cmEndpoint, customModel.modelId);
+      }
+    }
+
+    const qsSessionOptions: ConstructorParameters<typeof Session>[0] = {
+      id: qsCustomModelSessionId,
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
       mux: ctx.mux,
@@ -3440,15 +3915,42 @@ export function registerSessionRoutes(
       piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
-      ompConfig: resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig),
-      envOverrides: qsGatedEnvOverrides,
+      ompConfig: qsResolvedOmpConfig,
+      envOverrides: qsCustomModelEnvOverrides,
       effort,
       remote,
       docker,
       resumeSessionId: dockerResumeId,
       tmuxHistoryLimit: qsTerminalHistoryConfig.tmuxHistoryLimit,
       parentSessionId: qsParentSessionId,
-    });
+    };
+    // Force the custom-model selection's launchModel (pi/omp `custom/<id>`, grok's
+    // `[model.<name>]` block name) onto whichever config field the registry says the
+    // CLI's `model` launch param lives in — mirrors Session._withCustomModelLaunchModel,
+    // which the restart-in-place path already uses, rather than a hardcoded per-CLI
+    // branch here that a CLI landing its injection recipe later would silently miss.
+    if (qsCustomModelLaunchModel !== undefined) {
+      const qsCustomModelField = getCli(mode)?.launch.legacyConfigField;
+      if (qsCustomModelField) {
+        const qsSessionOptionsBag = qsSessionOptions as unknown as Record<string, unknown>;
+        qsSessionOptionsBag[qsCustomModelField] = {
+          ...((qsSessionOptionsBag[qsCustomModelField] as Record<string, unknown>) ?? {}),
+          model: qsCustomModelLaunchModel,
+        };
+      } else {
+        qsSessionOptions.model = qsCustomModelLaunchModel;
+      }
+    }
+    const session = new Session(qsSessionOptions);
+
+    // Records the selection for session.customModel/getCustomModelForPersist() and future
+    // clear/switch calls — the actual env vars and launch-model config are already part of
+    // the launch above (constructor envOverrides, piConfig/grokConfig/ompConfig.model), so
+    // this is bookkeeping only, never a restart: setCustomModel() is synchronous state, no
+    // tmux IO of its own (see its own doc comment in session.ts).
+    if (qsCustomModelBookkeeping) {
+      session.setCustomModel(qsCustomModelBookkeeping, qsCustomModelAppliedEnvOverrides);
+    }
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
@@ -3544,6 +4046,7 @@ export function registerSessionRoutes(
         sessionId: session.id,
         casePath: resolvedCasePath,
         caseName,
+        ...(customModel ? { modelSwapInProgress: qsCustomModelSwapInProgress } : {}),
       };
     } catch (err) {
       // Clean up session on error to prevent orphaned resources
@@ -4666,4 +5169,10 @@ export function registerSessionRoutes(
 
     return { path: filepath, filename };
   });
+
+  // Returned so the server can own the registry's LIFETIME (drop state when a session is
+  // cleaned up on any of its paths, resolve in-flight wakes on shutdown). The wake-CAPABLE
+  // code stays here: `test/remote-wake.test.ts` pins that `server.ts` calls nothing but
+  // `drop`/`stop` on this handle, so no timer path can reach a wake through it.
+  return remoteWake;
 }

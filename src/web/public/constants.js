@@ -806,6 +806,71 @@ function decideAutoCopy({ enabled, text, lastCopied, pending } = {}) {
   return 'copy';
 }
 
+// The text a copy should put on the clipboard, given xterm's raw selection.
+// Pure: the caller reads the selection and decides the mode, this transforms.
+//
+// xterm hands back whole screen ROWS, and its own trim only drops cells that
+// were never written to. A full-screen TUI writes real spaces across the part
+// of a row it is not using, so that padding counts as content and rides along
+// to the clipboard: measured against Claude Code in a 282-column pane, single
+// lines arrived carrying 138 trailing spaces. Native terminals trim it on copy
+// (Windows Terminal, iTerm2 and GNOME Terminal all do), decideAutoCopy above
+// already calls a wall of spaces "never what the gesture meant", and
+// _selectTouchSelectionLine already treats those cells as padding. This is that
+// same rule for the mouse and keyboard paths, which never had it.
+//
+// ⚠ Trailing padding ONLY. A shared LEADING indent is deliberately left alone,
+// and this note is here so the idea is not re-derived: it was built, measured
+// and dropped before merge. Removing the longest leading run every selected row
+// shares looks like the mirror image of the trailing trim and is not, because
+// no native terminal does it and the transform cannot tell a TUI's margin from
+// content that is genuinely indented. Measured over 401 445 three-row windows
+// across 1 010 tracked files in this repo, it fired on 73% of them: 92% inside
+// a YAML workflow, 76% over `git log` output, 48% in a TypeScript source file.
+// No width threshold separates the two, because they are the same widths: a
+// live Claude Code pane's own margins measure 2 and 5 columns while the most
+// common non-TUI shared run is 4, sitting between them.
+//
+// The asymmetry that settles it is in the failure modes. A wrong trailing trim
+// costs nothing. A wrong dedent silently deletes information that was on the
+// screen, with no signal to the user and nothing in the clipboard to hint at
+// it, and it is wrong on `git log` bodies, on indented code read out of `cat`
+// (semantic in Python), on `git diff` context rows where the leading space is
+// the marker, and on stack traces.
+//
+// ⚠ It also cannot be made consistent cheaply. Whether the first row joins the
+// measurement depended on the mousedown COLUMN, which the user never sees, so
+// one block of three rows produced three different clipboard results; and the
+// flag read `getSelectionPosition().start`, which is the mousedown anchor that
+// xterm never normalises, so dragging UP through a block read it off the bottom
+// row. If it is ever revisited, the one qualification that measured clean is
+// painted trailing padding (a full-screen TUI writes real spaces across every
+// row; a shell pane leaves those cells never-written, so xterm trims them):
+// zero false positives over all 401 445 windows. It still mangles a `git log`
+// body sitting inside an agent's own gutter, which is why it was not taken now.
+function cleanCopiedSelection(text) {
+  if (typeof text !== 'string' || !text) return '';
+  // Split on \n and leave any \r in place: xterm joins rows with \r\n on
+  // Windows, and the clipboard should keep the endings xterm chose.
+  // Scanned rather than matched. A selection can run to the 50 000-row
+  // scrollback ceiling, and `/[ \t]+(\r?)$/` is QUADRATIC on a line whose spaces
+  // are followed by any non-space character, which is what right-aligned or
+  // centred TUI content looks like: the engine retries the run from every
+  // whitespace position and backtracks over it. Measured over 50 000 rows with a
+  // 280-column run, that regex took 2.9s against 1.3ms for the scan below, and a
+  // 2 000-column run took 16s. It is also the faster of the two on an ordinary
+  // padded row. A length is returned rather than a trimmed string so a
+  // \r-terminated line costs no substring either.
+  const trimEnd = (line) => {
+    let end = line.length;
+    if (end > 0 && line[end - 1] === '\r') end--;
+    let cut = end;
+    while (cut > 0 && (line[cut - 1] === ' ' || line[cut - 1] === '\t')) cut--;
+    return cut === end ? line : line.slice(0, cut) + line.slice(end);
+  };
+  return text.split('\n').map(trimEnd).join('\n');
+}
+
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -853,6 +918,9 @@ if (typeof window !== 'undefined') {
   window.CodemanAutoCopy = {
     decide: decideAutoCopy,
     MAX_CHARS: AUTO_COPY_MAX_CHARS,
+  };
+  window.CodemanCopySelection = {
+    clean: cleanCopiedSelection,
   };
   window.CodemanTerminalFont = {
     DEFAULT_STACK: TERMINAL_FONT_DEFAULT_STACK,
@@ -1057,6 +1125,9 @@ const SSE_EVENTS = {
   REMOTE_SESSION_DROPPED: 'remote:sessionDropped',
   REMOTE_SESSION_RECONNECTED: 'remote:sessionReconnected',
   REMOTE_RECONNECT_EXHAUSTED: 'remote:reconnectExhausted',
+  // Wake-on-LAN from user input on a sleeping remote host
+  REMOTE_HOST_WAKING: 'remote:hostWaking',
+  REMOTE_HOST_WAKE_FAILED: 'remote:hostWakeFailed',
 
   // Ralph
   SESSION_RALPH_LOOP_UPDATE: 'session:ralphLoopUpdate',
@@ -1093,6 +1164,9 @@ const SSE_EVENTS = {
   APPROVAL_PENDING: 'approval:pending',
   APPROVAL_UPDATED: 'approval:updated',
   APPROVAL_RESOLVED: 'approval:resolved',
+
+  // Custom Model Endpoint Profiles
+  CUSTOM_MODEL_SWAPPED_OUT: 'custom-model:swapped-out',
 
   // Subagents (Claude Code background agents)
   SUBAGENT_DISCOVERED: 'subagent:discovered',

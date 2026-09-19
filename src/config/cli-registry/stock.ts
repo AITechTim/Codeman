@@ -228,15 +228,31 @@ const CLAUDE: CliEntry = {
     privilegedParams: [],
     // ANTHROPIC_* is NOT in allowedPrefixes/allowedKeys above (deliberately — see the
     // allowedPrefixes comment nearby), so these are unreachable via plain envOverrides
-    // today; listed here only so the dedicated custom-model route (docs/custom-model-endpoints-plan.md
-    // chunk 5) clamps them for a non-granted multi-user owner the same way every other
-    // CLI's injection vars are clamped, the day that route widens who can set them.
+    // today. privilegedEnvKeys has exactly one consumer, ownerClampedEnvKeys() in
+    // session-env-clamp.ts, which feeds the generic envOverrides clamp on
+    // POST /api/sessions, POST /api/quick-start and reboot-restore — no custom-model
+    // route reads this field at all, and the values it injects are merged in AFTER
+    // that clamp runs regardless of what's listed here.
     privilegedEnvKeys: [
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_API_KEY',
       'ANTHROPIC_DEFAULT_SONNET_MODEL',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
       'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      // CLAUDE_CODE_MAX_CONTEXT_TOKENS already matches the CLAUDE_CODE_* allowedPrefix, and
+      // CLAUDE_CONFIG_DIR is already an allowed exact key (docs/wiki/Agent-CLIs.md), so both
+      // were already reachable via plain envOverrides before this pair existed and this
+      // feature does not strictly need either listed. They stay listed anyway, because
+      // types.ts's rule ("every traffic-redirecting var this feature introduces MUST also
+      // appear in privilegedEnvKeys") is meant to hold literally, not with an exception
+      // carved out for the two vars that happen not to need it today. The real
+      // consequence lands on the GENERIC envOverrides clamp above, not on this feature:
+      // a non-granted multi-user owner can no longer set CLAUDE_CONFIG_DIR through
+      // envOverrides at all (the per-client-account override, #255), and a PERSISTED one
+      // is now stripped on reboot-restore for such an owner too — see
+      // session-env-clamp.ts's own fileoverview.
+      'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+      'CLAUDE_CONFIG_DIR',
     ],
     gates: { nameFlag: { minVersion: '2.1.224', failClosed: true } },
     // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — verified by hand against a real
@@ -247,6 +263,32 @@ const CLAUDE: CliEntry = {
       baseUrlVar: 'ANTHROPIC_BASE_URL',
       apiKeyVar: 'ANTHROPIC_API_KEY',
       modelVars: ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL'],
+      // Verified via Claude Code's own docs: CLAUDE_CODE_MAX_CONTEXT_TOKENS overrides the
+      // assumed context window and applies directly for a model name Claude Code doesn't
+      // recognize as one of its own — exactly the custom-model case. Without it, Claude Code
+      // assumes a large (200k) window for any unrecognized model id and never compacts,
+      // eventually overflowing a much smaller real local context (see plan doc reasoning
+      // above the interface for the confirmed failure).
+      contextLengthVar: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+      // Isolates this session's config/credential directory so an injected ANTHROPIC_API_KEY
+      // never shares a directory with a stored claude.ai OAuth login — see the doc comment on
+      // customModelInjection in cli-registry/types.ts for the traded-off side effect.
+      configDirVar: 'CLAUDE_CONFIG_DIR',
+      // ⚠️ Required alongside configDirVar, not optional in practice: verified live that an
+      // isolated, otherwise-empty config directory makes claude stop at an interactive
+      // "Detected a custom API key — use it?" prompt on EVERY launch, defaulting to "No" with
+      // no one at the TTY to answer — silently refusing the very key this feature injected.
+      // Pre-seeding this file's customApiKeyResponses.approved list (verified against a real
+      // ~/.claude.json after answering the prompt once by hand) answers it in advance instead.
+      apiKeyTrustFile: { relPath: '.claude.json', shape: 'claude-api-key-responses' },
+      // ⚠️ Same isolated-directory root cause, one step further: verified live that on top
+      // of the API-key prompt above, a fresh CLAUDE_CONFIG_DIR also replays claude's ENTIRE
+      // first-run sequence on every launch — the theme picker, the security-notes screen,
+      // the per-project "trust this folder?" dialog, and (running with
+      // --dangerously-skip-permissions) a one-time bypass-permissions warning — none of
+      // which a real, already-onboarded profile shows again. Pre-seeds that same
+      // already-onboarded state instead of leaving a human to click through it.
+      skipFirstRunPrompts: true,
     },
   },
   overlays: {
@@ -1071,15 +1113,28 @@ const DEEPSEEK: CliEntry = {
     // privilege rather than granting it, and clamping it here was a real regression
     // (test/deepseek-mode.test.ts) fixed before this shipped.
     privilegedEnvKeys: ['DSH_PERMISSION_MODE', 'DSH_HOME', 'DEEPSEEK_BASE_URL'],
-    // Web-researched, unverified, partial: reuses the already-existing DEEPSEEK_BASE_URL/
-    // DEEPSEEK_API_KEY keys above. No modelVars — dsh's model is a profile-composition
-    // entry (see `model: { source: 'none' }` above), not an env var, so forcing a specific
-    // model name may not fully work; verify against a real profile before shipping.
+    // Reuses the already-existing DEEPSEEK_BASE_URL/DEEPSEEK_API_KEY keys above. No
+    // modelVars — dsh's model is a profile-composition entry (see `model: { source: 'none'
+    // }` above), not an env var, so forcing a specific model name may not fully work;
+    // verify against a real profile before shipping.
+    //
+    // ⚠️ appendV1Suffix is REQUIRED, not optional-nice-to-have: without it every request
+    // 404s. Confirmed live and by reading dsh's own bundled source
+    // (@deepseek-ai/dsh-llm-deepseek): it builds the request URL as
+    // `${DEEPSEEK_BASE_URL}/chat/completions` with no "/v1" of its own (its real public
+    // API, https://api.deepseek.com, expects the caller's base URL to already carry any
+    // needed prefix), while llama-swap/llama.cpp only serves the OpenAI-conventional
+    // "/v1/chat/completions" — a bare POST to ".../chat/completions" 404s live, and the
+    // 404 reported here originally ("dsh: HTTP_404: DeepSeek API error (HTTP 404)")
+    // matches dsh's own error-message template for exactly this failure. See the
+    // customModelInjection doc comment in cli-registry/types.ts for the full reasoning,
+    // including why claude/gemini must NOT get this.
     customModelInjection: {
       kind: 'env',
       baseUrlVar: 'DEEPSEEK_BASE_URL',
       apiKeyVar: 'DEEPSEEK_API_KEY',
       modelVars: [],
+      appendV1Suffix: true,
     },
   },
   overlays: {

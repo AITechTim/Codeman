@@ -19,6 +19,7 @@ import {
 } from '../config/terminal-history.js';
 import { MAX_EDITABLE_BYTES } from '../config/file-editing.js';
 import { MIN_MATCH_LENGTH, MAX_MATCH_LENGTH } from '../config/agent-wait.js';
+import { MAX_WAKE_MACS } from '../config/remote-wake-limits.js';
 import { enabledCliIds, enabledClis } from '../config/cli-registry/registry.js';
 import type { SessionMode } from '../types.js';
 
@@ -737,6 +738,36 @@ export const RemoteHostSchema = z.object({
     .max(32)
     .optional(),
   commands: RemoteCommandOverridesSchema,
+  // Wake-on-LAN: a single executable path (no arguments, no shell) run to power a
+  // SLEEPING host back on, e.g. `/home/joe/bin/whuff`. Executed via spawn without
+  // a shell, so there is no shell layer to escape; the regexes are belt-and-braces
+  // (and the no-whitespace rule rejects an argument list before it can fail as a
+  // confusing ENOENT at wake time). See docs/remote-sessions.md §Wake-on-LAN.
+  wakeCommand: z
+    .string()
+    .min(1)
+    .max(4096)
+    .regex(/^\S+$/, 'Wake command must be a single executable path (no arguments)')
+    .regex(NO_SHELL_META, 'Invalid characters in wake command')
+    .optional(),
+  // Wake-on-LAN MAC address(es), comma-separated. Structural: only hex pairs with
+  // `:`/`-` separators, so nothing here can be a shell token even by accident (the
+  // value never reaches a shell — Codeman builds the magic packet itself).
+  wakeMac: z
+    .string()
+    .min(11)
+    .max(128)
+    .regex(
+      /^[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5}(\s*,\s*[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5})*$/,
+      'Wake MAC must be one or more MAC addresses, comma-separated'
+    )
+    // ⚠ The character cap admits seven MACs while parseMacList takes at most
+    // MAX_WAKE_MACS, all-or-nothing. Without this the extra ones validated, persisted,
+    // and then resolved to NO wake target, so the host read as unconfigured.
+    .refine((value) => value.split(',').length <= MAX_WAKE_MACS, {
+      message: `Wake MAC accepts at most ${MAX_WAKE_MACS} comma-separated addresses`,
+    })
+    .optional(),
 });
 
 export const RemoteCaseLinkSchema = z.object({
@@ -1033,6 +1064,27 @@ export const QuickStartSchema = z.object({
    * because it takes an existing `workingDir` and so never creates a directory to label.
    */
   agentOrigin: z.string().max(64).optional(),
+  /**
+   * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): launches directly
+   * on this saved endpoint/model instead of the mode's native backend, computed server-side
+   * from the admin-configured endpoint store the same way `POST /api/sessions/:id/custom-
+   * model` does — never trusting raw env values from the client. One-shot, launch-time
+   * equivalent of that route: no restart, so no visible relaunch (that route's restart-in-
+   * place is still what an ALREADY-RUNNING session uses to switch later). Rejected for
+   * remote/docker cases, same reasoning as `envOverrides` above. The three confirmation
+   * flags mirror that route's fields; see `SessionCustomModelSchema` for why there are
+   * two specific ones rather than the single legacy `confirmed`.
+   */
+  customModel: z
+    .object({
+      endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+      modelId: z.string().min(1).max(200),
+      confirmed: z.boolean().optional(),
+      confirmedContext: z.boolean().optional(),
+      confirmedSwap: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
 });
 
 // ========== Hook Events ==========
@@ -1932,6 +1984,17 @@ export const CustomModelHostSchema = z.object({
   authStyle: z.enum(['bearer', 'api-key']).optional(),
   models: z.array(z.string().max(200)).max(200).optional(),
   lastDiscoveredAt: z.string().max(64).optional(),
+  // The Run-menu picker's per-endpoint default; validated against `models` at the
+  // route layer (schema-level cross-field checks can't see the array narrowed the
+  // same way a `.refine()` closure could, and the route already re-reads the stored
+  // host to apply it, so the check belongs there once, not duplicated into a refine
+  // that would run on every unrelated field edit too).
+  defaultModelId: z.string().max(200).optional(),
+  // Server-populated by discovery (custom-model-routes.ts); accepted here only so a client
+  // round-tripping the GET response back through PUT (edit-save) doesn't drop it.
+  modelContextLengths: z.record(z.string().max(200), z.number().int().positive().max(100_000_000)).optional(),
+  // Same reasoning as modelContextLengths above.
+  modelSizesGB: z.record(z.string().max(200), z.number().positive().max(100_000)).optional(),
 });
 
 /** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */
@@ -1939,6 +2002,22 @@ export const CustomModelSelectionSchema = z.union([
   z.object({
     endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
     modelId: z.string().min(1).max(200),
+    /**
+     * Two DIFFERENT questions can block a launch, and answering one is not consent to
+     * the other: `confirmedContext` answers "this model's context window is below the
+     * floor for this CLI", which affects only the caller, while `confirmedSwap` answers
+     * "loading this will unload the model another session is using", which affects
+     * someone else. They were one flag until the context check (which runs first)
+     * silently spent the swap answer too, so a user clicking "launch anyway" past a
+     * too-small context evicted another session's model without ever being asked.
+     *
+     * `confirmed` is the original single flag and still means BOTH, because it shipped
+     * in the HTTP-API-only cut of this feature and an existing caller must keep working.
+     * New callers should send the specific one they actually asked about.
+     */
+    confirmed: z.boolean().optional(),
+    confirmedContext: z.boolean().optional(),
+    confirmedSwap: z.boolean().optional(),
   }),
   z.object({ clear: z.literal(true) }),
 ]);

@@ -3482,6 +3482,14 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
           { encoding: 'utf-8', timeout: EXEC_TIMEOUT_MS }
         )
       );
+      // Report the size the pane was really drawing at. The visible-frame path
+      // below addresses every row absolutely, so a consumer whose terminal is
+      // shorter than this piles the overflow rows onto its last line and loses
+      // the rows it overwrote. The full-history path instead ends in a RELATIVE
+      // cursor move, which costs it nothing when the two sizes disagree, so the
+      // geometry is reported there for diagnosis rather than for repair. Only
+      // the caller can see both sizes, so hand it this one.
+      if (opts && geometry) opts.capturedGeometry = { cols: geometry.cols, rows: geometry.rows };
 
       if (fullHistory) {
         // Without geometry there is no cursor move, so fall back to the old trim.

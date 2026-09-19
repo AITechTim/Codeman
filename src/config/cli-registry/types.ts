@@ -496,9 +496,74 @@ export interface CliCapabilities {
    * declares). Absent = the config alone selects the model (claude's env vars,
    * opencode's blob, codex's top-level `model` key). Applied by the session's
    * respawn options through the entry's `legacyConfigField`, never by id.
+   *
+   * `contextLengthVar` (env kind only): the env var a discovered per-model context-window
+   * size is written to when known (claude's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`) — without it,
+   * a CLI that assumes a large default window for an unrecognized model name keeps sending
+   * full-size prompts against a much smaller local server and eventually overflows its real
+   * context (verified: a 33.7K-token system prompt against a 16384-token llama-swap model).
+   * Absent when the CLI has no such override, or the value is unknown for this model.
+   *
+   * `configDirVar` (env kind only): the env var that redirects this session's config/
+   * credential directory to an isolated, per-session one (claude's `CLAUDE_CONFIG_DIR`), so
+   * an injected API key never coexists with a stored claude.ai OAuth session in the same
+   * directory — the CLI still warns "both claude.ai and ANTHROPIC_API_KEY set" when they
+   * share a directory even though the API key wins for actual requests. Isolating it trades
+   * that cosmetic warning for a documented side effect: a relocated config directory writes
+   * transcripts outside `~/.claude/projects`, blinding the response viewer, subagent
+   * windows, and Read My Mind for that session (see docs/wiki/Agent-CLIs.md).
+   *
+   * `apiKeyTrustFile` (env kind only, alongside configDirVar): an isolated config directory
+   * has none of a real profile's prior "detected a custom API key, use it?" approvals, so
+   * without this the CLI stops and asks interactively on every single launch — with no one
+   * at a TTY to answer, that's a hang, not a warning (confirmed live: claude's own default
+   * answer, "No", would silently refuse to use the very key this feature just injected).
+   * `relPath`/`shape` name the file (claude's `.claude.json`) and its
+   * `customApiKeyResponses.approved` field this pre-seeds — the exact field a real answered
+   * prompt itself writes to, so this isn't bypassing the check, just answering it the same
+   * way a one-off prior approval on a shared profile already would.
+   *
+   * `skipFirstRunPrompts` (env kind only, alongside apiKeyTrustFile): an isolated config
+   * directory is not just missing API-key approvals — it is a brand-new profile as far as
+   * the CLI is concerned, so it also replays its ENTIRE first-run sequence on every launch:
+   * the theme picker, the security-notes screen, the per-project "trust this folder?"
+   * dialog, and (running with a bypass-permissions flag) a one-time warning about it —
+   * confirmed live, none of which a real, long-used profile ever shows again. `true`
+   * pre-seeds the same state a real profile accumulates from having answered all of that
+   * once: `hasCompletedOnboarding` and the launching session's own project entry in the
+   * `apiKeyTrustFile` (claude's `.claude.json`), plus `skipDangerousModePermissionPrompt`
+   * in claude's `settings.json` — see `seedFirstRunState`/`seedSkipBypassPermissionsPrompt`
+   * in custom-model-injection-apply.ts. Requires `apiKeyTrustFile` to be set too, since it
+   * reuses that file.
+   *
+   * `appendV1Suffix` (env kind only): the raw `endpoint.baseUrl` gets `withV1Suffix()`
+   * applied before being written to `baseUrlVar`, instead of being used verbatim.
+   * DeepSeek needs this and claude/gemini must NOT get it — a per-CLI asymmetry confirmed
+   * by reading each SDK's own request-building source, not assumed: DeepSeek Harness's
+   * bundled `@deepseek-ai/dsh-llm-deepseek` concatenates `${connection.baseURL}/chat/
+   * completions` with no `/v1` insertion of its own (its real public API base,
+   * `https://api.deepseek.com`, expects the caller's base URL to already carry any
+   * needed prefix), while llama-swap/llama.cpp only ever serves the OpenAI-conventional
+   * `/v1/chat/completions` — confirmed live: a bare `POST <baseUrl>/chat/completions`
+   * 404s, `POST <baseUrl>/v1/chat/completions` succeeds, and the harness's own error
+   * message template (`DeepSeek API error (HTTP ${status})`) reproduces the exact
+   * `HTTP_404` this feature originally shipped with unexplained. Claude Code's own SDK,
+   * by contrast, was already confirmed working end-to-end against the RAW `baseUrl` with
+   * no suffix — appending one there would be wrong, not just redundant.
    */
   customModelInjection:
-    | { kind: 'env'; baseUrlVar: string; apiKeyVar: string; modelVars: string[]; launchModel?: string }
+    | {
+        kind: 'env';
+        baseUrlVar: string;
+        apiKeyVar: string;
+        modelVars: string[];
+        launchModel?: string;
+        contextLengthVar?: string;
+        apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
+        configDirVar?: string;
+        skipFirstRunPrompts?: boolean;
+        appendV1Suffix?: boolean;
+      }
     | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json'; launchModel?: string }
     | {
         kind: 'configDir';

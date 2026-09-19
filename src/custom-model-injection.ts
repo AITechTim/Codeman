@@ -16,14 +16,21 @@
  * shape was rejected by a real codex binary with "invalid type: map,
  * expected a string" — caught by `scripts/test-local-llm-harnesses.ts`),
  * but `wire_api = "responses"` is the only value codex still accepts
- * (support for `"chat"` was dropped in Feb 2026), and a plain OpenAI
- * Chat-Completions server (llama.cpp, llama-swap, most local setups) does
- * NOT implement the Responses API — so codex may still fail at the
- * PROTOCOL level even with a correctly-shaped config file. That gap is
- * real and current, not a stale warning; see docs/custom-model-endpoints-plan.md. The rest
- * (gemini/pi/grok/deepseek/omp) have their ONE-SHOT INVOCATION flags
- * confirmed against real installed binaries' own `--help` output, but
- * their custom-endpoint env/config conventions remain web-researched,
+ * (support for `"chat"` was dropped in Feb 2026). ⚠️ Re-verified live
+ * against a llama-swap deployment that DOES answer `/v1/responses`: a
+ * plain, no-tool-call turn gets a real reply, but a real tool-call attempt
+ * comes back as `agent_message` TEXT (the tool-call JSON printed as the
+ * answer) rather than a `function_call` item codex would execute —
+ * confirmed via `codex exec --json`'s raw event stream. Tool execution is
+ * what makes codex a coding agent, so this remains not usable for real
+ * work even where plain chat succeeds; see docs/custom-model-endpoints-plan.md
+ * for the full picture (including the harmless `Model metadata ... not
+ * found` warning every custom-endpoint codex session prints — sourced from
+ * a local cache of OpenAI's OWN hosted model catalog that a custom model
+ * can never appear in, confirmed to have no effect on the outcome above).
+ * The rest (gemini/pi/grok/deepseek/omp) have their ONE-SHOT INVOCATION
+ * flags confirmed against real installed binaries' own `--help` output,
+ * but their custom-endpoint env/config conventions remain web-researched,
  * unverified.
  */
 
@@ -44,6 +51,20 @@ export interface EnvInjection {
   envOverrides: Record<string, string>;
   /** See {@link ConfigDirInjection.launchModel}. */
   launchModel?: string;
+  /**
+   * Name of the env var the caller should point at an isolated, credential-free config
+   * directory for this session (claude's `CLAUDE_CONFIG_DIR`), from the registry entry's
+   * `customModelInjection.configDirVar`. The actual directory value isn't computed here —
+   * this module is pure and has no sessionId to derive one from — the IO wrapper
+   * (`custom-model-injection-apply.ts`) creates it and adds it to `envOverrides`.
+   */
+  configDirVar?: string;
+  /** See `customModelInjection.apiKeyTrustFile` — carried through so the IO wrapper can seed it. */
+  apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
+  /** The literal API key value this injection used, for `apiKeyTrustFile` to pre-approve. */
+  apiKey?: string;
+  /** See `customModelInjection.skipFirstRunPrompts` — carried through so the IO wrapper can seed it. */
+  skipFirstRunPrompts?: boolean;
 }
 
 export interface ConfigDirInjection {
@@ -90,7 +111,9 @@ function quoted(value: string): string {
 export function buildCustomModelInjection(
   entry: Pick<CliEntry, 'capabilities'>,
   endpoint: CustomModelEndpoint,
-  modelId: string
+  modelId: string,
+  /** Discovered context-window size for `modelId`, if known — see `contextLengthVar`. */
+  contextLength?: number
 ): CustomModelInjectionResult {
   const cap = entry.capabilities.customModelInjection;
   const apiKey = endpoint.apiKey?.trim() || DEFAULT_API_KEY;
@@ -98,11 +121,18 @@ export function buildCustomModelInjection(
   switch (cap.kind) {
     case 'env': {
       const envOverrides: Record<string, string> = {
-        [cap.baseUrlVar]: endpoint.baseUrl,
+        [cap.baseUrlVar]: cap.appendV1Suffix ? withV1Suffix(endpoint.baseUrl) : endpoint.baseUrl,
         [cap.apiKeyVar]: apiKey,
       };
       for (const modelVar of cap.modelVars) envOverrides[modelVar] = modelId;
-      return withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
+      if (cap.contextLengthVar && contextLength !== undefined && Number.isFinite(contextLength)) {
+        envOverrides[cap.contextLengthVar] = String(Math.trunc(contextLength));
+      }
+      let result: EnvInjection = withLaunchModel({ kind: 'env', envOverrides }, cap.launchModel, modelId);
+      if (cap.configDirVar) result = { ...result, configDirVar: cap.configDirVar };
+      if (cap.apiKeyTrustFile) result = { ...result, apiKeyTrustFile: cap.apiKeyTrustFile, apiKey };
+      if (cap.skipFirstRunPrompts) result = { ...result, skipFirstRunPrompts: true };
+      return result;
     }
 
     case 'configContentEnv': {
@@ -177,11 +207,13 @@ function renderConfigFile(
       // `env_key`, the NAME of an env var it reads the credential from at runtime, so the
       // actual value must ride along as an extra env var, never embedded in the file.
       // ⚠️ `wire_api = "responses"` is the only value codex still accepts (it dropped
-      // `"chat"` support in Feb 2026) — a plain OpenAI Chat-Completions server (llama.cpp,
-      // llama-swap, most local setups) does NOT implement the Responses API, so this
-      // recipe may still fail at the PROTOCOL level even though the file now parses
-      // correctly. That is a real, currently-unresolved compatibility gap, not a syntax
-      // bug — track it before calling codex support done.
+      // `"chat"` support in Feb 2026). Even against a llama-swap deployment that DOES
+      // answer `/v1/responses`, a real tool-call attempt came back as plain TEXT (the
+      // tool-call JSON printed as the model's answer) rather than an executable
+      // `function_call` item — confirmed live via `codex exec --json`. Tool execution is
+      // what makes codex a coding agent, so this remains not usable for real work even
+      // where plain chat succeeds — see the confidence table in
+      // docs/custom-model-endpoints-plan.md, not a syntax bug in this file.
       const content = [
         `model = ${quoted(modelId)}`,
         `model_provider = "custom"`,

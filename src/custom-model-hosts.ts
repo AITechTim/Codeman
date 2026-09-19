@@ -40,6 +40,38 @@ export interface CustomModelHost {
   authStyle?: CustomModelAuthStyle;
   models?: string[];
   lastDiscoveredAt?: string;
+  /**
+   * The model the Run-menu picker (docs/custom-model-endpoints-plan.md) applies when
+   * this endpoint is picked with no further choice — one generated menu entry per
+   * (CLI, endpoint) pair, not per (CLI, endpoint, model), so it needs a single answer.
+   * Must be a member of `models` when set; the picker falls back to `models[0]` when
+   * this is unset, and disables the entry entirely when `models` is empty (nothing to
+   * default to). Never auto-set on discovery — the previous default staying valid
+   * after a re-discover is a property worth keeping even if the model list changes.
+   */
+  defaultModelId?: string;
+  /**
+   * Discovered context-window size (tokens) per model id, keyed by the same strings as
+   * `models`. Populated opportunistically during discovery (`custom-model-routes.ts`) from
+   * llama.cpp/llama-swap's `GET /props?model=<id>` — the plain OpenAI-shaped `/v1/models`
+   * response has no such field. Only ever probed for a model the server already reports as
+   * loaded (llama-swap's `status.value === 'loaded'`); an unloaded one is deliberately never
+   * probed, since llama-swap treats `/props?model=` as a routing hint that can trigger an
+   * actual (slow, GPU-swapping) model load as a side effect of merely asking. A model this
+   * has no entry for simply gets no context-length env override applied — never a guess.
+   */
+  modelContextLengths?: Record<string, number>;
+  /**
+   * Discovered file size (GB) per model id, keyed by the same strings as `models`.
+   * Populated during discovery by parsing llama-swap's own `description` field for an
+   * auto-discovered model ("Auto-discovered 16.35 GB - parameters auto-fitted by
+   * llama.cpp") — a hand-configured profile's own description has no such figure and
+   * correctly gets no entry, never a guess. Used only to label the Run-menu picker's
+   * "loading model" banner with a rough, unmeasured expected-time estimate
+   * (the Run-menu picker's loading banner in session-ui.js) — never a guarantee, and never anything a
+   * server-side check relies on.
+   */
+  modelSizesGB?: Record<string, number>;
 }
 
 export function customModelHostsPath(configDir: string): string {

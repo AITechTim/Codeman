@@ -6807,6 +6807,67 @@ body.touch-device .terminal-container .xterm .xterm-helper-textarea {
   min-height: 0;
 }
 
+/* Custom Model Endpoint Profiles' "which model" picker: same bounded-height +
+   scrollable-body shape as .modal-lg above, scoped by id rather than added to
+   .modal-sm itself (three other modals share that class for short, fixed
+   content and do not need a height cap). Without this the modal had no
+   max-height at all, so an endpoint with many discovered models grew the
+   dialog past the viewport with nothing to scroll — "the whole page" and
+   "the list is truncated" turned out to be one and the same bug. `min(70vh,
+   520px)` scales with the monitor (a phone gets 70% of its height, a 4K
+   display never gets a needlessly tall dialog) rather than a fixed value
+   that would be wrong at one end or the other. */
+#customModelPickModal .modal-content {
+  max-height: min(70vh, 520px);
+  display: flex;
+  flex-direction: column;
+}
+
+#customModelPickModal .modal-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Custom Model Endpoint Profiles: llama-swap model-swap confirmation — replaces a native
+   confirm() popup (docs/custom-model-endpoints-plan.md) so it looks and feels like the
+   rest of the app instead of a browser chrome dialog. Shares the context-window-too-small
+   modal's fixes below since both can appear mid-launch, in the same spot, for the same
+   reason — including this rule itself: there is no bare `.modal-footer` base style
+   anywhere in this file, and `.btn-toolbar` is `display: flex` (a block-level flex
+   container with no explicit `inline-flex`), so with no row layout of its own each
+   button took its own full-width line and the two stacked instead of sitting side by
+   side. Centred rather than flex-end per feedback — a two-button Cancel/confirm footer
+   reads better centred than pinned to one edge. */
+#customModelSwapConfirmModal .modal-footer,
+#customModelContextWarningModal .modal-footer {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+/* Both dialogs can appear while the centred llama-swap status banner (10001, see
+   .center-status-banner) is still on screen — right after "Claude started — switching
+   to llama-swap…" — and .modal's own z-index (1000) sat well under it, so the dialog
+   rendered fully hidden behind the banner (confirmed live, reported against the
+   context-window one but structurally identical for the swap-confirm modal too). */
+#customModelSwapConfirmModal,
+#customModelContextWarningModal {
+  z-index: 10010;
+}
+
+/* Both messages ARE the modal's whole explanatory content, not a one-line caption under
+   a form field, so .form-hint's 0.65rem caption size (right for what it was designed for)
+   read as illegibly small here, worst on the multi-sentence context-window explanation. */
+#customModelSwapConfirmMessage,
+#customModelContextWarningMessage {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
 
 /* Mobile Case Picker - Base Styles */
 .mobile-case-picker-sheet {
@@ -8445,6 +8506,9 @@ kbd {
 }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -8456,11 +8520,155 @@ kbd {
   opacity: 0;
   transition: all 0.2s ease;
   pointer-events: auto;
+  max-width: 420px;
 }
 
 .toast.show {
   transform: translateX(0);
   opacity: 1;
+}
+
+.toast-message {
+  flex: 1;
+  /* A sticky toast (showToast's opts.duration: 0) can carry a longer, specific
+     message — let it wrap instead of clipping. */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Every toast gets one, sticky or not: a sticky toast with no way to close it
+   would just accumulate on screen across repeated failures. */
+.toast-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+  cursor: pointer;
+}
+
+.toast-close:hover {
+  opacity: 1;
+}
+
+/* Custom Model Endpoint Profiles: the "switching backends" / "loading model" states
+   (docs/custom-model-endpoints-plan.md) — a small set of messages prominent and
+   screen-centred rather than corner toasts, since they can sit on screen for well
+   over a minute (a real llama-swap model load) and are easy to mistake for nothing
+   happening. Non-blocking: `pointer-events: none` on the wrapper (no backdrop, no
+   click-catcher) with `auto` restored only on the card itself, purely so the text
+   inside remains selectable — there is nothing to click to dismiss it early. */
+.center-status-banner {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.96);
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.5rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text);
+  max-width: min(90vw, 460px);
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
+}
+
+.center-status-banner.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+/* `hidden` has to be re-asserted over the `display: flex` above, or `dismiss()`
+   setting `el.hidden = true` does nothing (same trap as `.home-sessions[hidden]`
+   below): the card stays laid out at `opacity: 0` with its text/cancel/close
+   children still `pointer-events: auto`, an invisible click-blocker dead centre
+   over the terminal until the page reloads. */
+.center-status-banner[hidden] {
+  display: none;
+}
+
+.center-status-spinner {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent, var(--text));
+  animation: center-status-spin 0.8s linear infinite;
+}
+
+@keyframes center-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.center-status-text {
+  flex: 1;
+  pointer-events: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Error variant: the load didn't finish in time — nothing is "in progress" anymore (no
+   spinner), and since this one doesn't dismiss itself, it needs a close button the user
+   can actually click, so pointer-events is restored here too (see the wrapper's own
+   comment on why that's `none` by default). */
+.center-status-error {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.center-status-close {
+  flex-shrink: 0;
+  pointer-events: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+  cursor: pointer;
+}
+
+.center-status-close:hover {
+  opacity: 1;
+}
+
+/* The Cancel button on an 'info' banner (e.g. the model-loading banner) — a real button
+   rather than the bare "×" close glyph above, since "Cancel" is an action with a
+   consequence (the caller's onCancel closes a session), not a plain dismiss. */
+.center-status-cancel {
+  flex-shrink: 0;
+  pointer-events: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: inherit;
+  opacity: 0.75;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: 0.25rem 0.6rem;
+  cursor: pointer;
+}
+
+.center-status-cancel:hover {
+  opacity: 1;
+  border-color: var(--text-muted, var(--border));
 }
 
 .toast-success { border-color: rgba(34, 197, 94, 0.4); }
@@ -15138,6 +15346,12 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 
 .run-mode-dot.web { background: #38bdf8; }
 .run-mode-webviews { max-height: 180px; overflow-y: auto; }
+/* Custom Model Endpoint Profiles' generated entries: `.run-mode-menu.active`'s
+   own `gap: 2px` only spaces its DIRECT children, and this container (like
+   `.run-mode-webviews` above) is one such child holding several buttons of
+   its own, so it needs the same gap repeated one level down or its rows sit
+   flush against each other. */
+.run-mode-custom-models { display: flex; flex-direction: column; gap: 2px; }
 
 /* A saved URL is a ROW: open on the left, edit + delete on the right, so a URL can
    be changed or removed without first opening it as a tab. The side buttons stay
@@ -15387,6 +15601,18 @@ html[data-skin="daylight-blue"] .welcome-btn-tunnel.active:hover {
 
 .offline-banner-retry:hover {
   background: rgba(255, 255, 255, 0.24);
+}
+
+/* Remote-host unreachable (host asleep, can be woken). Reuses the offline-banner
+   layout and children; amber instead of red because the Codeman session itself is
+   perfectly healthy — only the machine is asleep. */
+.host-wake-banner {
+  background: linear-gradient(90deg, #b45309, #92400e);
+}
+
+.host-wake-banner .offline-banner-retry:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* Above the mobile fixed header (1200) and modals (1300): this is a blocking
@@ -16288,6 +16514,29 @@ html[data-tab-orientation='vertical'] .home-sessions {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+/* Custom Model Endpoint Profiles' inline add/edit form: a nested panel rather
+   than a modal, so it needs its own border to read as a distinct sub-section
+   inside .set-group-body's flat row stack. `--control-bg` rather than a
+   hardcoded black alpha — CLAUDE.md records that literal fill turning the
+   settings live preview into a grey slab on the light skins, and this panel
+   sits in the very same modal. */
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-inline-form {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--control-bg);
+}
+
+:is(#appSettingsModal, #sessionOptionsModal, #createCaseModal) .set-inline-form h5 {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
 }
 
 /* ── rows ─────────────────────────────────────────────────────────────── */

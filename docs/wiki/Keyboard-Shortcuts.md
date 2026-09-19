@@ -34,6 +34,8 @@ Press `Ctrl+?` in the app for the same list in a floating overlay.
 | Right-click             | Copy the selection. With nothing selected the native menu is left alone. |
 | `Ctrl+Z`                | Swallowed in agent sessions so a running CLI cannot be suspended. Normal job control in a shell. |
 
+Anything you copy is cleaned on the way to the clipboard: each line loses the padding spaces a full-screen program paints across the rest of the row. Leading indentation is left exactly as it is, so indented code, a `git log` message body and `git diff` context lines paste back the way they looked on screen. An `Alt+drag` rectangular selection is copied exactly as it looks, so its columns stay lined up.
+
 ## Everything else
 
 | Shortcut       | Action                          |

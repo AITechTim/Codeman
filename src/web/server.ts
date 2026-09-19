@@ -43,6 +43,8 @@ import { hostname as getHostname, uptime as osUptime } from 'node:os';
 import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
 import { rebootRestoreRegistry } from './reboot-restore-registry.js';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
+import { readRemoteHosts, rehydrateRemoteHostFields } from '../remote-hosts.js';
+import type { RemoteWakeRegistry } from '../remote-wake.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
 import { GLYPH, palette } from '../cli-style.js';
 import { getHookSecret } from '../config/hook-secret.js';
@@ -69,7 +71,7 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
-import { getCli } from '../config/cli-registry/registry.js';
+import { getCli, enabledClis } from '../config/cli-registry/registry.js';
 import { readCustomModelHosts } from '../custom-model-hosts.js';
 import { applyCustomModelInjection, customModelConfigDir, removeConfigDir } from '../custom-model-injection-apply.js';
 import type { CustomModelBookkeeping } from '../types/session.js';
@@ -193,6 +195,11 @@ import {
   registerWebviewRoutes,
   registerTabLayoutRoutes,
   registerCustomModelRoutes,
+  refreshAllCustomModelHosts,
+  readCustomModelEndpointsEnabled,
+  closeAllLlamaSwapLogTails,
+  detectCustomModelSwapDisplacements,
+  pruneIdleLlamaSwapLogTails,
   tryWebviewRefererFallback,
 } from './routes/index.js';
 import { isLostWebviewFrameNavigation } from './webview-proxy.js';
@@ -205,9 +212,30 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // while capping growth of `sseClientsById` and blocking pathological inputs.
 const SSE_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const CODEX_USAGE_POLL_INTERVAL_MS = 5 * 60_000;
+const CUSTOM_MODEL_REDISCOVER_INTERVAL_MS = 5 * 60_000;
+// Much shorter than the model-LIST refresh above on purpose: this catches an actual
+// eviction (a session's model no longer loaded, silently swapped out by another
+// session's use), which the user wants to know about promptly, not once every 5
+// minutes. Cheap either way — one /running GET per distinct endpoint with at least
+// one live custom-model session, not per session.
+const CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS = 20_000;
 
 function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/**
+ * Escapes a JSON string for safe embedding as the body of an inline `<script>`
+ * tag: `<` becomes the six-character sequence `<`, which both a JSON
+ * parser and a plain JS string literal decode back to `<` (both treat
+ * `\uXXXX` identically), but which can never itself form the two literal
+ * characters `<` `/` a browser's HTML tokenizer looks for to end the tag. A
+ * value containing a literal `</script>` would otherwise close the tag early
+ * and turn the rest of the document into inert script-body text. Exported so
+ * it unit-tests without constructing a WebServer (which needs a real tmux).
+ */
+export function escapeScriptJson(json: string): string {
+  return json.replace(/</g, '\\u003c');
 }
 
 import {
@@ -268,8 +296,18 @@ export class WebServer extends EventEmitter {
   // Store session listener references for explicit cleanup (prevents memory leaks)
   private sessionListenerRefs: Map<string, SessionListenerRefs> = new Map();
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
+  /** De-dupe state for the swap-displacement sweep — see detectCustomModelSwapDisplacements. */
+  private _customModelDisplacedNotified: Set<string> = new Set();
   /** Cron service (assigned in setupRoutes). */
   private cronService!: CronService;
+  /**
+   * Wake-on-LAN registry, returned by `registerSessionRoutes`. Held for its LIFETIME
+   * only — `drop()` on session cleanup, `stop()` on shutdown. Waking from here would
+   * re-wake a host on every timer tick (the invariant `remote-wake.ts` documents), so
+   * the wiring guard in `test/remote-wake.test.ts` pins that this file calls nothing
+   * but `drop`/`stop` on it.
+   */
+  private remoteWake: RemoteWakeRegistry | null = null;
   private sse: SseStreamManager;
   private store = getStore();
   private tabLayouts!: TabLayoutService;
@@ -1070,7 +1108,9 @@ export class WebServer extends EventEmitter {
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
-    registerSessionRoutes(this.app, ctx);
+    // The registry's lifetime is the server's: it drops per-session wake state on every
+    // cleanup path and resolves in-flight wakes on shutdown.
+    this.remoteWake = registerSessionRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);
     registerPlanRoutes(this.app, ctx);
@@ -1212,7 +1252,13 @@ export class WebServer extends EventEmitter {
       return undefined;
     }
     try {
-      return applyCustomModelInjection(entry, endpoint, saved.modelId, session.id)?.envOverrides;
+      return applyCustomModelInjection(
+        entry,
+        endpoint,
+        saved.modelId,
+        session.id,
+        endpoint.modelContextLengths?.[saved.modelId]
+      )?.envOverrides;
     } catch (err) {
       console.warn('[WebServer] Failed to rebuild custom-model env on recovery:', err);
       return undefined;
@@ -1306,6 +1352,10 @@ export class WebServer extends EventEmitter {
     if (session) {
       session.ralphTracker.stopWatchingFixPlan();
     }
+
+    // Custom Model Endpoint Profiles: drop this session's swap-displacement notify flag
+    // (see _checkCustomModelSwapDisplacements below) so it can't linger in that Set forever.
+    this._customModelDisplacedNotified.delete(sessionId);
 
     // Kill all subagents spawned by this session (scoped to sessionId to avoid cross-session kills)
     if (session && killMux) {
@@ -1461,6 +1511,11 @@ export class WebServer extends EventEmitter {
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
+    // Wake state goes with the session on EVERY cleanup path (delete routes, the cron
+    // and admin paths, scheduled-run teardown, error paths) — that is why it lives here
+    // rather than in the two delete routes, where it left an entry behind, including up
+    // to 4 KB of the user's buffered keystrokes.
+    this.remoteWake?.drop(sessionId);
 
     this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
   }
@@ -1601,6 +1656,23 @@ export class WebServer extends EventEmitter {
       html = html.replace(
         '</head>',
         `<script>window.__codemanCliAvailable=${JSON.stringify(available)};</script>\n</head>`
+      );
+      // Which run modes the Run-menu picker (docs/custom-model-endpoints-plan.md) may
+      // generate an entry for: read generically off the registry's `capabilities`
+      // (never an id list here) so a CLI whose customModelInjection lands later shows
+      // up in the picker with no frontend change, and one that ships `unsupported`
+      // (antigravity, and `shell`'s `kind !== 'agent'`) never does.
+      const customModelClis = enabledClis()
+        .filter((entry) => entry.kind === 'agent' && entry.capabilities.customModelInjection.kind !== 'unsupported')
+        .map((entry) => ({ id: entry.id, label: entry.label }));
+      // Unlike the boolean-only __codemanCliAvailable above, this payload carries
+      // `label`, a string a user's own clis.json can set (CliEntry.label, up to 60
+      // chars) — see escapeScriptJson's own doc comment for why that needs escaping
+      // and __codemanCliAvailable's booleans never did.
+      const customModelClisJson = escapeScriptJson(JSON.stringify(customModelClis));
+      html = html.replace(
+        '</head>',
+        `<script>window.__codemanCustomModelClis=${customModelClisJson};</script>\n</head>`
       );
     }
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
@@ -2332,11 +2404,20 @@ export class WebServer extends EventEmitter {
       'scheduled:',
       'team:',
       'case:',
+      'remote:',
+      'custom-model:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
-      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string } };
+      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string }; username?: string };
       const sessionId = d.sessionId ?? d.id ?? d.session?.id;
       const owner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
+      // `remote:hostWaking` / `remote:hostWakeFailed` for a create/attach wake have no
+      // session yet (nothing exists until the host is up), so the registry names the
+      // requesting user instead; the payload carries `hostId`/`label`, which non-admins
+      // are not shown elsewhere. No session and no requester: admins only (fail closed).
+      if (!sessionId && event.startsWith('remote:') && d.username) {
+        return { username: d.username, sessionScoped: true };
+      }
       return { owner, sessionScoped: true };
     }
     // #20/#38: clipboard:write writes into the receiver's OS clipboard — route it to
@@ -2707,6 +2788,64 @@ export class WebServer extends EventEmitter {
       this.cleanup.setInterval(() => void this.refreshCodexPlanUsage(), CODEX_USAGE_POLL_INTERVAL_MS, {
         description: 'Codex plan-usage refresh',
       });
+    }
+
+    // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): keeps
+    // each saved endpoint's discovered model list current with no manual
+    // "Discover" click, so a model added on the server side (or one that drops
+    // off) shows up in the Run-menu picker within one cycle. Best-effort per
+    // endpoint (refreshAllCustomModelHosts skips one that's unreachable rather
+    // than failing the sweep) and off in tests for the same reason the Codex
+    // poll above is — no real network to hit, no server instance to keep alive.
+    if (!this.testMode) {
+      this.cleanup.setInterval(
+        () => {
+          // Reads the setting fresh on every tick, same reasoning as
+          // readPlanUsageTelemetryEnabled() beside it: a live toggle takes effect
+          // on the very next cycle, not just at server boot, and turning the
+          // feature off actually stops the polling instead of only hiding the UI.
+          void readCustomModelEndpointsEnabled()
+            .then((enabled) => {
+              if (!enabled) return;
+              return refreshAllCustomModelHosts();
+            })
+            .catch((err) => {
+              console.error('[custom-model] periodic re-discovery failed:', getErrorMessage(err));
+            });
+        },
+        CUSTOM_MODEL_REDISCOVER_INTERVAL_MS,
+        { description: 'custom model endpoint re-discovery' }
+      );
+    }
+
+    // Custom Model Endpoint Profiles: the swap-conflict check on the apply/create routes
+    // only ever runs at THAT session's own launch/apply moment — it cannot catch a LATER
+    // eviction triggered by a different session's normal use, since llama-swap has no push
+    // notification of its own and only swaps in response to a real inference request
+    // (confirmed live: a session created while nothing else conflicted at that instant can
+    // still get silently displaced afterward). This periodic sweep is what catches that
+    // case after the fact and tells the displaced session's user, rather than leaving them
+    // to discover it only when their next prompt behaves unexpectedly.
+    if (!this.testMode) {
+      this.cleanup.setInterval(
+        () => {
+          detectCustomModelSwapDisplacements(this.sessions.values(), this._customModelDisplacedNotified)
+            .then((displacements) => {
+              for (const displacement of displacements) {
+                this.broadcast(SseEvent.CustomModelSwappedOut, displacement);
+              }
+            })
+            .catch((err) => {
+              console.error('[custom-model] swap-displacement check failed:', getErrorMessage(err));
+            });
+          // Same cadence, unrelated concern: close any /api/events tail (see
+          // getLatestLlamaSwapLogLine) nothing has polled in a while, so a loading banner
+          // that finished (or was abandoned) doesn't leave a connection open forever.
+          pruneIdleLlamaSwapLogTails();
+        },
+        CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS,
+        { description: 'custom model swap-displacement check' }
+      );
     }
 
     // Start scheduled runs cleanup timer
@@ -3116,6 +3255,9 @@ export class WebServer extends EventEmitter {
 
         // For each alive mux session, create a Session object if it doesn't exist
         const muxSessions = this.mux.getSessions();
+        // Host-level config lives in remote-hosts.json, not in the persisted session
+        // snapshot, so refresh the fields that only exist there (see the helper).
+        const remoteHostsById = new Map((await readRemoteHosts(getDataDir())).map((host) => [host.id, host]));
         for (const muxSession of muxSessions) {
           if (!this.sessions.has(muxSession.sessionId)) {
             // Restore session settings from state.json (single source of truth)
@@ -3193,7 +3335,9 @@ export class WebServer extends EventEmitter {
               // respawn rebuilds a LOCAL command, breaking the pane and silently
               // erasing `remote` from state.json on the next persist. mux-sessions.json
               // round-trips MuxSession.remote; state.json carries SessionState.remote.
-              remote: muxSession.remote ?? savedState?.remote,
+              // Host-level fields are refreshed from remote-hosts.json on top, or a
+              // field added to the host config after launch would never arrive.
+              remote: rehydrateRemoteHostFields(muxSession.remote ?? savedState?.remote, remoteHostsById),
               // Docker metadata round-trips the same way (mux-sessions.json carries
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
@@ -3576,6 +3720,10 @@ export class WebServer extends EventEmitter {
     // got wrong once.
     void stopDeepSeekWeb();
 
+    // Same teardown rule: the per-endpoint llama-swap log tails are otherwise closed
+    // only by the periodic idle sweep, whose interval is disposed just below.
+    closeAllLlamaSwapLogTails();
+
     // Dispose all managed timers (intervals + resettable timeouts)
     this.cleanup.dispose();
 
@@ -3587,6 +3735,10 @@ export class WebServer extends EventEmitter {
     // response), so without this a 10-minute wait holds shutdown open.
     sessionWaits.cancelEverything();
     approvalInbox.stop();
+    // Same reason as `cancelEverything` above: an in-flight wake is awaited by a request,
+    // and `app.close()` (the last line of this method) does not abort in-flight requests —
+    // so without this a restart during a wake waits out the readiness poll.
+    this.remoteWake?.stop();
 
     this.lastRecordedTokens.clear();
 
