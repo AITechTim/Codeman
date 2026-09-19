@@ -68,7 +68,7 @@ export interface CustomModelHost {
    * llama.cpp") — a hand-configured profile's own description has no such figure and
    * correctly gets no entry, never a guess. Used only to label the Run-menu picker's
    * "loading model" banner with a rough, unmeasured expected-time estimate
-   * (`estimateModelLoad()` in session-ui.js) — never a guarantee, and never anything a
+   * (the Run-menu picker's loading banner in session-ui.js) — never a guarantee, and never anything a
    * server-side check relies on.
    */
   modelSizesGB?: Record<string, number>;

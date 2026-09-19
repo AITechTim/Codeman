@@ -2837,7 +2837,7 @@ export class WebServer extends EventEmitter {
             .catch((err) => {
               console.error('[custom-model] swap-displacement check failed:', getErrorMessage(err));
             });
-          // Same cadence, unrelated concern: close any /logs tail (see
+          // Same cadence, unrelated concern: close any /api/events tail (see
           // getLatestLlamaSwapLogLine) nothing has polled in a while, so a loading banner
           // that finished (or was abandoned) doesn't leave a connection open forever.
           pruneIdleLlamaSwapLogTails();

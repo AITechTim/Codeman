@@ -416,6 +416,14 @@ function parseBackendLogDataEvent(dataLine: string): string | undefined {
  * line (`\n\n`), buffered the same way `/running`'s NDJSON-shaped siblings buffer partial
  * chunks — a frame split across two `reader.read()` calls must not be parsed early.
  */
+/**
+ * Cap on the unparsed remainder held between reads of the backend log stream. One
+ * SSE frame is a status line, so this is orders of magnitude more than a real frame
+ * needs; it exists so a server that never emits a frame boundary cannot grow the
+ * buffer without bound for the life of the connection.
+ */
+const MAX_LOG_TAIL_BUFFER_CHARS = 64 * 1024;
+
 async function pumpLlamaSwapLogTail(
   host: Pick<CustomModelHost, 'id' | 'baseUrl' | 'apiKey' | 'authStyle'>,
   entry: LlamaSwapLogTail
@@ -435,6 +443,12 @@ async function pumpLlamaSwapLogTail(
       buffer += decoder.decode(value, { stream: true });
       const frames = buffer.split('\n\n');
       buffer = frames.pop() ?? '';
+      // The remainder only shrinks at a frame boundary, so a server that streams
+      // without `\n\n` (or one very long frame) would grow it for as long as the
+      // connection is held, which is indefinitely by design. Past the cap the
+      // partial frame cannot become a useful log line anyway, so drop it and
+      // resynchronise on the next boundary rather than buffering forever.
+      if (buffer.length > MAX_LOG_TAIL_BUFFER_CHARS) buffer = '';
       for (const frame of frames) {
         const dataLine = frame.split('\n').find((l) => l.startsWith('data:'));
         if (!dataLine) continue;
@@ -807,7 +821,7 @@ export function registerCustomModelRoutes(app: FastifyInstance): void {
         return createErrorResponse(ApiErrorCode.INVALID_INPUT, 'Endpoint base URL is not allowed');
       }
       const status = await getLlamaSwapStatus(host);
-      // Only worth tailing /logs once llama-swap is actually confirmed — a plain
+      // Only worth tailing /api/events once llama-swap is actually confirmed — a plain
       // llama.cpp/OpenAI-compatible server has no such endpoint at all.
       const logLine = status.isLlamaSwap ? getLatestLlamaSwapLogLine(host) : undefined;
       // `cmd` (the literal llama-server launch line, which can carry model paths and

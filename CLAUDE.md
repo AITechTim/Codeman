@@ -383,11 +383,11 @@ Frontend JS modules have `@fileoverview` with `@dependency`/`@loadorder` tags. L
 
 ### SSE Event Registry
 
-160 event constants in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). **Both must be kept in sync**, and `test/sse-registry-parity.test.ts` is the guard that pins it (currently exactly in sync, 160 = 160, no drift either direction). ⚠️ `hook:agent_working` is the one hook event with no Claude Code hook behind it — the DeepSeek status bridge reports it (see External CLI modes). The backend file's `@fileoverview` carries the per-category breakdown, including the two Web tab events.
+161 event constants in `src/web/sse-events.ts` (backend) and `SSE_EVENTS` in `constants.js` (frontend). **Both must be kept in sync**, and `test/sse-registry-parity.test.ts` is the guard that pins it (currently exactly in sync, 161 = 161, no drift either direction). ⚠️ `hook:agent_working` is the one hook event with no Claude Code hook behind it — the DeepSeek status bridge reports it (see External CLI modes). The backend file's `@fileoverview` carries the per-category breakdown, including the two Web tab events.
 
 ### API Routes
 
-~235 handlers across 27 route files in `src/web/routes/`: system (56), sessions (37), cases (34), files (17), orchestrator (10), ralph (9), cron (9), admin (8), plan (8), respawn (7), webviews (6 + the `/webview/:cap/*` proxy), mux (5), push (4), scheduled (4, legacy `ScheduledRun`), approvals (4), readmymind (4), custom-model (5), reboot-restore (3), me (2), teams (2), tab-layout (2), search (1), hooks (1), clipboard (1), status-telemetry (1), voice (1 + the `/ws/voice/stream` relay), ws (1 WebSocket). Each file has `@fileoverview` with endpoint details.
+~236 handlers across 27 route files in `src/web/routes/`: system (56), sessions (37), cases (34), files (17), orchestrator (10), ralph (9), cron (9), admin (8), plan (8), respawn (7), webviews (6 + the `/webview/:cap/*` proxy), mux (5), push (4), scheduled (4, legacy `ScheduledRun`), approvals (4), readmymind (4), custom-model (6), reboot-restore (3), me (2), teams (2), tab-layout (2), search (1), hooks (1), clipboard (1), status-telemetry (1), voice (1 + the `/ws/voice/stream` relay), ws (1 WebSocket). Each file has `@fileoverview` with endpoint details.
 
 **HTTP contract** (stable since 0.9.x, see `docs/versioning-policy.md`; full envelope/status/error-code/SSE spec in `docs/api-reference.md`): responses use the `ApiResponse<T>` envelope — `{ success: true, data? }` or `{ success: false, error, errorCode }` (`src/types/api.ts`). `/api/v1/*` is a versioned alias of `/api/*` (URL rewrite in `server.ts`).
 
