@@ -55,12 +55,14 @@ supervised by systemd or launchd; npm installs report as non-updatable. See
 Chips for every optional header control, with a live preview of the resulting header:
 
 Run, Font Size, System Stats, Redraw Terminal, Response Viewer, Away Digest, Session
-Manager, Attachments, File Viewer, Multi-monitor, Plan Usage, Lifecycle Log, Monitor,
+Manager, Attachments, File Viewer, Multi-monitor, Split, Plan Usage, Lifecycle Log, Monitor,
 Project Insights, File Browser, Subagents, Approvals Inbox, Read My Mind, Ultracode Agents,
 Ultracode Windows, Cron.
 
 Most default to off. The stock desktop header is system stats, File Viewer, and the gear.
-New header controls never appear on phones.
+New header controls never appear on phones. Split is desktop-only regardless of this
+setting — the button and the feature both stay off below a ~1180px viewport, where two
+resizable panes plus their divider have nowhere to go.
 
 This section also holds background-agent tracking, including whether to track agents for
 every session or only the active tab.

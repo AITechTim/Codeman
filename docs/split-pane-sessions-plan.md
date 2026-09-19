@@ -90,6 +90,13 @@ If this asymmetry actually bothers you in daily use, promoting Pane B to full
 parity is a scoped v2 (extract the shared logic already once you have two
 call sites to compare, rather than guessing the right abstraction now).
 
+One more asymmetry worth naming here rather than discovering by surprise:
+while both panes accept keyboard input, the global capture-phase shortcut
+handler (`app.js`) always resolves against Pane A — it has no notion of
+which pane currently has focus. So Ctrl+L or Ctrl+W typed while Pane B has
+focus clears or closes Pane A, not the session you were actually typing
+into. Not fixed for v1, same reasoning as the rest of this section.
+
 ## Components
 
 ### 1. `SplitTerminalPane` (new, `terminal-split.js`)
