@@ -197,6 +197,7 @@ import {
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
   readCustomModelEndpointsEnabled,
+  closeAllLlamaSwapLogTails,
   detectCustomModelSwapDisplacements,
   pruneIdleLlamaSwapLogTails,
   tryWebviewRefererFallback,
@@ -3718,6 +3719,10 @@ export class WebServer extends EventEmitter {
     // port against the next start — the exact EADDRINUSE this feature already
     // got wrong once.
     void stopDeepSeekWeb();
+
+    // Same teardown rule: the per-endpoint llama-swap log tails are otherwise closed
+    // only by the periodic idle sweep, whose interval is disposed just below.
+    closeAllLlamaSwapLogTails();
 
     // Dispose all managed timers (intervals + resettable timeouts)
     this.cleanup.dispose();

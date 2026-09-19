@@ -93,6 +93,15 @@ function linkSharedProjectsDir(isolatedDir: string): void {
  * keys), and a corrupt or partially-written file (a crash mid-write) is treated as absent
  * rather than failing the whole apply over a nice-to-have.
  */
+/**
+ * The form Claude Code actually stores an approved key in: the trimmed last 20
+ * characters. Mirrors the CLI's own `e.trim().slice(-20)`, which is applied on BOTH
+ * the write and the lookup, so anything else never matches.
+ */
+export function truncateApiKeyForTrustFile(apiKey: string): string {
+  return apiKey.trim().slice(-20);
+}
+
 function seedApiKeyTrustFile(
   configDir: string,
   trustFile: { relPath: string; shape: 'claude-api-key-responses' },
@@ -107,7 +116,18 @@ function seedApiKeyTrustFile(
   }
   const responses = (existing.customApiKeyResponses ?? {}) as { approved?: unknown; rejected?: unknown };
   const approved = new Set(Array.isArray(responses.approved) ? (responses.approved as string[]) : []);
-  approved.add(apiKey);
+  // ⚠ Claude Code stores and compares only the LAST 20 CHARACTERS of a key, never the
+  // whole thing: its lookup is `approved.includes(key.trim().slice(-20))` (decompiled
+  // from the 2.1.278 bundle, and corroborated by real `~/.claude.json` files, whose
+  // customApiKeyResponses entries are all exactly 20 characters). Seeding the full key
+  // therefore never matches for a REAL key, and claude stops at the interactive
+  // "Detected a custom API key in your environment" prompt, whose default is
+  // "No (recommended)" — so the launch hangs or silently refuses the key this feature
+  // just injected. It went unnoticed because a keyless llama.cpp/llama-swap endpoint
+  // uses DEFAULT_API_KEY ('local-dummy-key', 15 chars), where slice(-20) is the whole
+  // string and the seed matches by accident. Truncating here also keeps a full
+  // third-party credential from being written into a second file on disk.
+  approved.add(truncateApiKeyForTrustFile(apiKey));
   const rejected = Array.isArray(responses.rejected) ? responses.rejected : [];
   existing.customApiKeyResponses = { approved: [...approved], rejected };
   try {

@@ -1245,9 +1245,11 @@ export function registerSessionRoutes(
     // no matter what CLAUDE_CODE_MAX_CONTEXT_TOKENS says — confirmed live at ~36.4K tokens
     // against a model configured with a real 16384-token context. Warn before committing
     // to a restart that's certain to fail, rather than letting the user discover it via a
-    // cryptic 400 from the CLI itself. `confirmed` (already used for the swap-conflict
-    // warning below) skips this too — the user has already said "launch anyway" once.
-    if (!body.confirmed && exceedsSafeContextFloor(entry, contextLength)) {
+    // cryptic 400 from the CLI itself. Answered by `confirmedContext` (or the legacy
+    // `confirmed`, which still means both) — NOT by `confirmedSwap`: this warning is
+    // about the caller's own session, and the swap warning below is about someone
+    // else's, so an answer to one is not consent to the other.
+    if (!(body.confirmed || body.confirmedContext) && exceedsSafeContextFloor(entry, contextLength)) {
       return {
         requiresContextWarning: true,
         modelId: body.modelId,
@@ -1275,9 +1277,12 @@ export function registerSessionRoutes(
     const targetReady = swapStatus.running.some((r) => r.model === body.modelId && r.state === 'ready');
 
     // Only ask when switching would actually take the model away from another session
-    // that is currently using it — never just because a swap is needed at all. `confirmed`
-    // (set by the caller after showing that warning once) skips asking again.
-    if (swapNeeded && !body.confirmed) {
+    // that is currently using it — never just because a swap is needed at all. Answered
+    // by `confirmedSwap` (or the legacy `confirmed`). ⚠ It must NOT read
+    // `confirmedContext`: this check runs second, and while the two shared one flag a
+    // user who clicked past a too-small-context warning had already, silently, agreed to
+    // evict another session's model.
+    if (swapNeeded && !(body.confirmed || body.confirmedSwap)) {
       const conflicting = [...ctx.sessions.values()].filter(
         (s) =>
           s.id !== session.id && s.customModel?.endpointId === endpoint.id && s.customModel?.modelId === currentlyLoaded
@@ -3793,7 +3798,12 @@ export function registerSessionRoutes(
       // overhead can exceed a small enough real context on the very first message,
       // regardless of contextLengthVar. Warn before creating a session that's certain to
       // fail immediately.
-      if (!customModel.confirmed && exceedsSafeContextFloor(cmEntry, cmContextLength)) {
+      // See the dedicated route above for why this reads `confirmedContext` and never
+      // `confirmedSwap`.
+      if (
+        !(customModel.confirmed || customModel.confirmedContext) &&
+        exceedsSafeContextFloor(cmEntry, cmContextLength)
+      ) {
         return {
           requiresContextWarning: true,
           modelId: customModel.modelId,
@@ -3816,7 +3826,7 @@ export function registerSessionRoutes(
       // is loaded at all yet. Drives the actual load trigger below.
       const cmTargetReady = cmSwapStatus.running.some((r) => r.model === customModel.modelId && r.state === 'ready');
       qsCustomModelSwapInProgress = cmSwapStatus.isLlamaSwap && !cmTargetReady;
-      if (cmSwapNeeded && !customModel.confirmed) {
+      if (cmSwapNeeded && !(customModel.confirmed || customModel.confirmedSwap)) {
         const cmConflicting = [...ctx.sessions.values()].filter(
           (s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded
         );

@@ -32,6 +32,7 @@ export {
   registerCustomModelRoutes,
   refreshAllCustomModelHosts,
   readCustomModelEndpointsEnabled,
+  closeAllLlamaSwapLogTails,
   detectCustomModelSwapDisplacements,
   pruneIdleLlamaSwapLogTails,
   type CustomModelSessionLike,

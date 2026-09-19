@@ -812,7 +812,7 @@ Object.assign(CodemanApp.prototype, {
    * POSTs a /api/quick-start body already carrying `customModel` (see the run<Mode>()
    * call sites below), showing the same llama-swap "this will unload it for session X"
    * warning the restart path's `_applyCustomModelToSession` shows when the route asks
-   * for confirmation, and retrying with `confirmed: true` on accept. Stashes the final
+   * for confirmation, and retrying with that question's own flag on accept. Stashes the final
    * response's payload on `_lastCustomModelLaunchResult` for
    * `_runCustomModelEntryOneShot` to read `modelSwapInProgress` off afterward — run()'s
    * eleven per-mode dispatch targets have no shared return-value contract of their own,
@@ -827,6 +827,12 @@ Object.assign(CodemanApp.prototype, {
       });
       return res.json();
     };
+    // Each question is answered with its OWN flag, and the answer accumulates, so the
+    // second POST still carries the first answer. Never the blanket `confirmed`: the two
+    // questions are about different people (a context window too small is the caller's
+    // problem, unloading a model is another session's), and while they shared one flag
+    // clicking past the context warning silently answered the swap question too.
+    let answered = {};
     let data = await post(bodyObj);
     if (data?.data?.requiresContextWarning) {
       const { modelId, contextLength, minSafeContextTokens } = data.data;
@@ -835,21 +841,27 @@ Object.assign(CodemanApp.prototype, {
         this._lastCustomModelLaunchResult = undefined;
         return { success: false, error: 'Launch cancelled — context window too small' };
       }
-      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, confirmed: true } });
+      answered = { ...answered, confirmedContext: true };
+      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, ...answered } });
     }
     if (data?.data?.requiresConfirmation) {
       const { currentlyLoadedModel, affectedSessions } = data.data;
+      // The swap is blocked regardless of ownership, but multi-user mode scopes which
+      // sessions get NAMED, so this list can be empty while the conflict is real.
       const names = affectedSessions.map((s) => s.name || s.id).join(', ');
+      const who = names
+        ? `${names} ${affectedSessions.length === 1 ? 'is' : 'are'} currently using`
+        : 'Another session on this endpoint is currently using';
+      const them = names && affectedSessions.length > 1 ? 'those sessions' : 'that session';
       const proceed = await this._confirmModelSwap(
-        `${names} ${affectedSessions.length === 1 ? 'is' : 'are'} currently using ` +
-          `${currentlyLoadedModel} on this endpoint. Switching will unload it for ` +
-          `${affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
+        `${who} ${currentlyLoadedModel} on this endpoint. Switching will unload it for ` + `${them} too. Continue?`
       );
       if (!proceed) {
         this._lastCustomModelLaunchResult = undefined;
         return { success: false, error: 'Model switch cancelled' };
       }
-      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, confirmed: true } });
+      answered = { ...answered, confirmedSwap: true };
+      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, ...answered } });
     }
     this._lastCustomModelLaunchResult = data?.success !== false ? data?.data : undefined;
     return data;
@@ -919,11 +931,15 @@ Object.assign(CodemanApp.prototype, {
     // once `data.success !== false`.
     let payload = data?.success !== false ? data?.data : undefined;
 
+    // Accumulates the questions the user has answered, so a second retry still carries
+    // the first answer. See _applyCustomModelToSession for why these are per-question.
+    let answered = {};
+
     // This CLI's own fixed overhead (system prompt + tool schemas) may exceed the
     // model's real discovered context outright — no context-length declaration can
     // fix that, since compaction only trims conversation history and there is none
     // on message 1. Warn and let the user decide whether to launch anyway, same
-    // confirmed:true re-send pattern as the swap check below.
+    // re-send pattern as the swap check below.
     if (ok && payload?.requiresContextWarning) {
       const proceed = await this._confirmContextWarning(
         payload.modelId,
@@ -935,27 +951,34 @@ Object.assign(CodemanApp.prototype, {
         this.showToast('Kept the native backend — context window too small', 'info');
         return;
       }
-      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, true));
+      answered = { ...answered, confirmedContext: true };
+      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, answered));
       payload = data?.success !== false ? data?.data : undefined;
     }
 
     // llama-swap runs one model at a time: switching would unload it out from under
     // another session actively using it. The route only asks when that's actually true
-    // (never just because a swap is needed at all) — confirming re-sends the exact same
-    // call with `confirmed: true` so the route skips the check the second time.
+    // (never just because a swap is needed at all) — confirming re-sends the same call
+    // with `confirmedSwap` so the route skips THIS check, and only this one, next time.
     if (ok && payload?.requiresConfirmation) {
+      // See the one-shot path above: an empty list means the conflicting sessions are
+      // ones this caller may not be told about, not that there is no conflict.
       const names = payload.affectedSessions.map((s) => s.name || s.id).join(', ');
+      const who = names
+        ? `${names} ${payload.affectedSessions.length === 1 ? 'is' : 'are'} currently using`
+        : 'Another session on this endpoint is currently using';
+      const them = names && payload.affectedSessions.length > 1 ? 'those sessions' : 'that session';
       const proceed = await this._confirmModelSwap(
-        `${names} ${payload.affectedSessions.length === 1 ? 'is' : 'are'} currently using ` +
-          `${payload.currentlyLoadedModel} on this endpoint. Switching to ${modelId} will unload it ` +
-          `for ${payload.affectedSessions.length === 1 ? 'that session' : 'those sessions'} too. Continue?`
+        `${who} ${payload.currentlyLoadedModel} on this endpoint. Switching to ${modelId} will unload it ` +
+          `for ${them} too. Continue?`
       );
       if (!proceed) {
         switchingToast?.dismiss();
         this.showToast('Kept the native backend — model switch cancelled', 'info');
         return;
       }
-      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, true));
+      answered = { ...answered, confirmedSwap: true };
+      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, answered));
       payload = data?.success !== false ? data?.data : undefined;
     }
 
@@ -987,10 +1010,16 @@ Object.assign(CodemanApp.prototype, {
   /** POST /api/sessions/:id/custom-model, returning {ok, data, res} rather than throwing —
    *  see runCustomModelEntry's own comment for why this goes through `_api()` (raw fetch)
    *  rather than `_apiJson()`: a failure's `error` detail must survive to the caller. */
-  async _applyCustomModelToSession(sessionId, endpointId, modelId, confirmed) {
+  /**
+   * `answered` carries the questions the user has ALREADY said yes to, as the route's own
+   * per-question flags (`confirmedContext`, `confirmedSwap`). Never the blanket
+   * `confirmed`: the two questions are about different people, so answering one must not
+   * answer the other. It accumulates, so the second retry still carries the first answer.
+   */
+  async _applyCustomModelToSession(sessionId, endpointId, modelId, answered) {
     const res = await this._api(`/api/sessions/${sessionId}/custom-model`, {
       method: 'POST',
-      body: confirmed ? { endpointId, modelId, confirmed } : { endpointId, modelId },
+      body: { endpointId, modelId, ...(answered || {}) },
     });
     const data = res ? await res.json().catch(() => null) : null;
     return { ok: !!res, data, res };
@@ -1874,7 +1903,7 @@ Object.assign(CodemanApp.prototype, {
       const body = buildBody(sessionName);
       const data = await this._quickStartWithCustomModelConfirm(
         customModelAnswered && body.customModel
-          ? { ...body, customModel: { ...body.customModel, confirmed: true } }
+          ? { ...body, customModel: { ...body.customModel, confirmedContext: true, confirmedSwap: true } }
           : body
       );
       if (!data.success) throw new Error(data.error || `Failed to start ${label}`);

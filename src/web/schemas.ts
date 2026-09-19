@@ -1071,15 +1071,17 @@ export const QuickStartSchema = z.object({
    * model` does — never trusting raw env values from the client. One-shot, launch-time
    * equivalent of that route: no restart, so no visible relaunch (that route's restart-in-
    * place is still what an ALREADY-RUNNING session uses to switch later). Rejected for
-   * remote/docker cases, same reasoning as `envOverrides` above. `confirmed` mirrors that
-   * route's field: skips the llama-swap "this will unload it for another session" check on
-   * a deliberate retry.
+   * remote/docker cases, same reasoning as `envOverrides` above. The three confirmation
+   * flags mirror that route's fields; see `SessionCustomModelSchema` for why there are
+   * two specific ones rather than the single legacy `confirmed`.
    */
   customModel: z
     .object({
       endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
       modelId: z.string().min(1).max(200),
       confirmed: z.boolean().optional(),
+      confirmedContext: z.boolean().optional(),
+      confirmedSwap: z.boolean().optional(),
     })
     .strict()
     .optional(),
@@ -2000,10 +2002,22 @@ export const CustomModelSelectionSchema = z.union([
   z.object({
     endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
     modelId: z.string().min(1).max(200),
-    // Set once the caller has already shown the "this will unload <model> for session(s)
-    // X" warning (see session-routes.ts's llama-swap conflict check) and the user chose to
-    // proceed anyway — skips that check on this call instead of asking again.
+    /**
+     * Two DIFFERENT questions can block a launch, and answering one is not consent to
+     * the other: `confirmedContext` answers "this model's context window is below the
+     * floor for this CLI", which affects only the caller, while `confirmedSwap` answers
+     * "loading this will unload the model another session is using", which affects
+     * someone else. They were one flag until the context check (which runs first)
+     * silently spent the swap answer too, so a user clicking "launch anyway" past a
+     * too-small context evicted another session's model without ever being asked.
+     *
+     * `confirmed` is the original single flag and still means BOTH, because it shipped
+     * in the HTTP-API-only cut of this feature and an existing caller must keep working.
+     * New callers should send the specific one they actually asked about.
+     */
     confirmed: z.boolean().optional(),
+    confirmedContext: z.boolean().optional(),
+    confirmedSwap: z.boolean().optional(),
   }),
   z.object({ clear: z.literal(true) }),
 ]);

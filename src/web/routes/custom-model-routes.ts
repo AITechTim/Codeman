@@ -508,6 +508,18 @@ export function getLatestLlamaSwapLogLine(
 }
 
 /**
+ * Closes EVERY open log tail. The idle sweep above only runs on server.ts's periodic
+ * interval, and that interval is disposed on shutdown, so without this an outbound
+ * stream outlives `WebServer.stop()` against CLAUDE.md's "clear Maps in stop()" rule.
+ * Harmless today only because `cli.ts`'s shutdown handler reaches `process.exit(0)`,
+ * which is not a property to rely on: tests and any in-process restart do not.
+ */
+export function closeAllLlamaSwapLogTails(): void {
+  for (const entry of llamaSwapLogTails.values()) entry.controller.abort();
+  llamaSwapLogTails.clear();
+}
+
+/**
  * Closes any log tail nothing has called `getLatestLlamaSwapLogLine` about in
  * `LOG_TAIL_IDLE_MS` — a stream nobody is polling is an open connection with nothing to
  * show for it. Called from the same periodic sweep as `detectCustomModelSwapDisplacements`

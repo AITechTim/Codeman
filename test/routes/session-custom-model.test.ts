@@ -463,6 +463,99 @@ describe('POST /api/sessions/:id/custom-model', () => {
       expect(session.restartCli).toHaveBeenCalledTimes(1);
     });
 
+    // The two questions are about DIFFERENT people: a context window below the floor is
+    // the caller's own problem, while unloading a model takes it away from someone else's
+    // session. They shared one `confirmed` flag until this release, and because the
+    // context check runs first, clicking "launch anyway" past the context warning silently
+    // answered the swap question too and evicted another session's model unasked.
+    describe('answering one question is not consent to the other', () => {
+      async function bothConditions() {
+        const { app, ctx } = await setup();
+        await writeCustomModelHosts(getDataDir(), [CLAUDE_ENDPOINT, SMALL_CTX_ENDPOINT]);
+        const session = ctx.sessions.get('test-session-1')!;
+        session.mode = 'claude';
+        // another session is actively on the model this endpoint currently has loaded
+        const other = createMockSession('other-session');
+        other.name = 'w2-otherbox';
+        other.customModel = { endpointId: 'ep-small', modelId: 'llama3' };
+        ctx.sessions.set('other-session', other);
+        mockRunning([{ model: 'llama3', state: 'ready' }]);
+        return { app, session };
+      }
+
+      it('still asks about the swap after the context warning was confirmed', async () => {
+        const { app, session } = await bothConditions();
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/test-session-1/custom-model',
+          payload: {
+            endpointId: 'ep-small',
+            modelId: 'qwen3.8-27b-ud-q4_k_xl',
+            confirmedContext: true,
+          },
+        });
+
+        const body = res.json();
+        expect(body.requiresContextWarning).toBeUndefined();
+        expect(body.requiresConfirmation).toBe(true);
+        expect(body.currentlyLoadedModel).toBe('llama3');
+        // and crucially nothing was applied: the other session keeps its model
+        expect(session.setCustomModel).not.toHaveBeenCalled();
+        expect(session.restartCli).not.toHaveBeenCalled();
+      });
+
+      it('applies once BOTH questions are answered', async () => {
+        const { app, session } = await bothConditions();
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/test-session-1/custom-model',
+          payload: {
+            endpointId: 'ep-small',
+            modelId: 'qwen3.8-27b-ud-q4_k_xl',
+            confirmedContext: true,
+            confirmedSwap: true,
+          },
+        });
+
+        const body = res.json();
+        expect(body.requiresContextWarning).toBeUndefined();
+        expect(body.requiresConfirmation).toBeUndefined();
+        expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+      });
+
+      it('confirmedSwap alone does not silence the context warning either', async () => {
+        const { app, session } = await bothConditions();
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/test-session-1/custom-model',
+          payload: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl', confirmedSwap: true },
+        });
+
+        expect(res.json().requiresContextWarning).toBe(true);
+        expect(session.setCustomModel).not.toHaveBeenCalled();
+      });
+
+      // `confirmed` shipped in the HTTP-API-only cut of this feature, so a caller written
+      // against that must keep working: it means both, exactly as it used to.
+      it('keeps the legacy blanket `confirmed` meaning both', async () => {
+        const { app, session } = await bothConditions();
+
+        const res = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/test-session-1/custom-model',
+          payload: { endpointId: 'ep-small', modelId: 'qwen3.8-27b-ud-q4_k_xl', confirmed: true },
+        });
+
+        const body = res.json();
+        expect(body.requiresContextWarning).toBeUndefined();
+        expect(body.requiresConfirmation).toBeUndefined();
+        expect(session.setCustomModel).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('does not warn when the discovered context is comfortably above the floor', async () => {
       const { app, ctx } = await setup();
       const roomyEndpoint: CustomModelHost = {

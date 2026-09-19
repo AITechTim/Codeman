@@ -123,6 +123,34 @@ describe('applyCustomModelInjection: apiKeyTrustFile (pre-approves the injected 
     expect(written.customApiKeyResponses.rejected).toEqual([]);
   });
 
+  // ⚠ Claude Code stores and looks up only the LAST 20 CHARACTERS of a key
+  // (`key.trim().slice(-20)`, applied on both write and read), so seeding the whole key
+  // never matches for a REAL one and the launch stops at the interactive "Detected a
+  // custom API key" prompt whose default is "No (recommended)". Every other test here
+  // uses a key shorter than 20 characters, where slice(-20) is the whole string and the
+  // bug is invisible, which is exactly how it survived review.
+  it('claude: seeds a REAL-length key in the truncated form the CLI actually matches on', () => {
+    const sessionId = 'sess-trust-long';
+    sessionsToClean.push(sessionId);
+    const longKey = 'sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef';
+    expect(longKey.length).toBeGreaterThan(20);
+
+    const applied = applyCustomModelInjection(
+      entryOrThrow('claude'),
+      { ...endpoint, apiKey: longKey },
+      'qwen3',
+      sessionId
+    );
+    const written = JSON.parse(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')) as {
+      customApiKeyResponses: { approved: string[] };
+    };
+
+    expect(written.customApiKeyResponses.approved).toEqual(['cdef0123456789abcdef']);
+    expect(written.customApiKeyResponses.approved[0]).toHaveLength(20);
+    // and the full credential is not written into this second file at all
+    expect(readFileSync(join(applied!.configDir!, '.claude.json'), 'utf8')).not.toContain(longKey);
+  });
+
   it('claude: falls back to the dummy key when the endpoint has none, and still seeds it', () => {
     const sessionId = 'sess-trust-2';
     sessionsToClean.push(sessionId);
