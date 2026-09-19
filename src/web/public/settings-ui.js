@@ -3373,6 +3373,7 @@ Object.assign(CodemanApp.prototype, {
           'showTabDetachButton',
           'mobileOverviewEnabled',
           'sessionLineageLines',
+          'showSplitButton',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. Drop

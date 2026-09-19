@@ -526,7 +526,13 @@ html.mobile-init .file-browser-panel {
   /* Approvals bell: phones answer from the overview's NEEDS YOU rows instead
      (inline approve/deny in mobile-overview.js); the bell would only crowd the
      header it was designed to stay out of. */
-  .btn-icon-header.btn-approvals {
+  .btn-icon-header.btn-approvals,
+  /* Split-pane: desktop-only by design (two 240px min-width panes plus the
+     divider need ~486px, which a 393px phone cannot give them, and the
+     divider has no touch handlers). This is a hard gate independent of the
+     opt-in showSplitButton setting/marker class, so turning the setting on
+     at a desk can never also put the button in the phone header. */
+  .btn-icon-header.btn-split {
     display: none !important;
   }
 
