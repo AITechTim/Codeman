@@ -819,29 +819,40 @@ function decideAutoCopy({ enabled, text, lastCopied, pending } = {}) {
 // _selectTouchSelectionLine already treats those cells as padding. This is that
 // same rule for the mouse and keyboard paths, which never had it.
 //
-// The leading run is the other half, and it applies ACROSS ROWS ONLY. A TUI
-// that indents its whole transcript repeats the indent on every row, so a
-// multi-row selection arrives with the chrome baked into each line; only the
-// run every selected row shares is removed, which is a no-op for shell output
-// and keeps the relative indentation of anything nested inside. A selection of
-// ONE row shares nothing with anything, so its leading spaces are content and
-// stay put — otherwise a single line of `git log` body text, or one line out of
-// `less`, would silently lose its indentation.
+// ⚠ Trailing padding ONLY. A shared LEADING indent is deliberately left alone,
+// and this note is here so the idea is not re-derived: it was built, measured
+// and dropped before merge. Removing the longest leading run every selected row
+// shares looks like the mirror image of the trailing trim and is not, because
+// no native terminal does it and the transform cannot tell a TUI's margin from
+// content that is genuinely indented. Measured over 401 445 three-row windows
+// across 1 010 tracked files in this repo, it fired on 73% of them: 92% inside
+// a YAML workflow, 76% over `git log` output, 48% in a TypeScript source file.
+// No width threshold separates the two, because they are the same widths: a
+// live Claude Code pane's own margins measure 2 and 5 columns while the most
+// common non-TUI shared run is 4, sitting between them.
 //
-// ⚠ The trailing trim takes spaces AND tabs while the leading run counts spaces
-// only, so one tab-led row disables the strip for its whole block. Terminals
-// expand tabs into cells, so a tab should never reach either rule; the
-// asymmetry is deliberate caution rather than an oversight.
+// The asymmetry that settles it is in the failure modes. A wrong trailing trim
+// costs nothing. A wrong dedent silently deletes information that was on the
+// screen, with no signal to the user and nothing in the clipboard to hint at
+// it, and it is wrong on `git log` bodies, on indented code read out of `cat`
+// (semantic in Python), on `git diff` context rows where the leading space is
+// the marker, and on stack traces.
 //
-// ⚠ A WRAPPED logical line keeps its continuation indent. xterm appends a
-// wrapped row to the previous entry instead of starting a new line, so rows
-// 2..n of one wrapped line sit mid-string where no line rule can see them. That
-// is inherent to cleaning xterm's output rather than a gap to fix here.
-function cleanCopiedSelection(text, { startedMidRow = false } = {}) {
+// ⚠ It also cannot be made consistent cheaply. Whether the first row joins the
+// measurement depended on the mousedown COLUMN, which the user never sees, so
+// one block of three rows produced three different clipboard results; and the
+// flag read `getSelectionPosition().start`, which is the mousedown anchor that
+// xterm never normalises, so dragging UP through a block read it off the bottom
+// row. If it is ever revisited, the one qualification that measured clean is
+// painted trailing padding (a full-screen TUI writes real spaces across every
+// row; a shell pane leaves those cells never-written, so xterm trims them):
+// zero false positives over all 401 445 windows. It still mangles a `git log`
+// body sitting inside an agent's own gutter, which is why it was not taken now.
+function cleanCopiedSelection(text) {
   if (typeof text !== 'string' || !text) return '';
   // Split on \n and leave any \r in place: xterm joins rows with \r\n on
   // Windows, and the clipboard should keep the endings xterm chose.
-  // Scanned rather than matched, throughout. A selection can run to the 50 000-row
+  // Scanned rather than matched. A selection can run to the 50 000-row
   // scrollback ceiling, and `/[ \t]+(\r?)$/` is QUADRATIC on a line whose spaces
   // are followed by any non-space character, which is what right-aligned or
   // centred TUI content looks like: the engine retries the run from every
@@ -857,41 +868,7 @@ function cleanCopiedSelection(text, { startedMidRow = false } = {}) {
     while (cut > 0 && (line[cut - 1] === ' ' || line[cut - 1] === '\t')) cut--;
     return cut === end ? line : line.slice(0, cut) + line.slice(end);
   };
-  const lines = text.split('\n').map(trimEnd);
-  const bareLen = (line) => (line.endsWith('\r') ? line.length - 1 : line.length);
-  const leadingRun = (line) => {
-    let n = 0;
-    while (n < line.length && line[n] === ' ') n++;
-    return n;
-  };
-
-  // ⚠ Counted over EVERY line, including a partial first line the loop below
-  // skips. A mid-row drag across two rows therefore measures one row and strips
-  // it. That is deliberate: both rows of a wrapped paragraph wear the TUI's
-  // margin, and the drag only hid the first one's. The cost is that a two-row
-  // mid-row drag over genuinely indented content loses that indent.
-  let contentRows = 0;
-  for (const line of lines) if (bareLen(line)) contentRows++;
-  if (contentRows < 2) return lines.join('\n');
-
-  // startedMidRow keeps the first line out of the measurement. A drag that
-  // begins inside a row gives a first line with no leading run at all, which
-  // would otherwise pin the shared run to zero and leave every row after it
-  // still wearing the indent. That partial line is never stripped either.
-  let shared = Infinity;
-  for (let i = startedMidRow ? 1 : 0; i < lines.length; i++) {
-    // A row left blank by the trailing trim says nothing about the indent, and
-    // counting it as zero would disable the strip for the whole block.
-    if (!bareLen(lines[i])) continue;
-    shared = Math.min(shared, leadingRun(lines[i]));
-    if (shared === 0) break;
-  }
-  if (!shared || shared === Infinity) return lines.join('\n');
-  // The clamp is what keeps a blank row's lone \r intact when the shared run is
-  // wider than that row is long.
-  return lines
-    .map((line, i) => (startedMidRow && i === 0 ? line : line.slice(Math.min(shared, leadingRun(line)))))
-    .join('\n');
+  return text.split('\n').map(trimEnd).join('\n');
 }
 
 if (typeof window !== 'undefined') {

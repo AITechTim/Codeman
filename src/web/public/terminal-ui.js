@@ -374,9 +374,13 @@ Object.assign(CodemanApp.prototype, {
           void this.copyTerminalSelection(selection);
           return false;
         }
-        // Nothing worth copying. Drop a padding-only selection first, or it would
-        // intercept every following press too, then fall through exactly as an
-        // empty selection does so this press still reaches the PTY as 0x03.
+        // Nothing worth copying. The clear is for feedback, not for the
+        // interrupt: the gate above tests the CLEANED selection, so a
+        // padding-only selection left set cleans to '' on every later press and
+        // falls through to the PTY anyway. What it buys is that a highlight
+        // which copies nothing does not linger with no explanation, which is
+        // also what the toast is for. Falls through exactly as an empty
+        // selection does, so this press still reaches the PTY as 0x03.
         if (this.terminal?.hasSelection?.()) {
           this.terminal.clearSelection?.();
           this.showToast('Nothing to copy', 'warning');
@@ -4159,16 +4163,20 @@ Object.assign(CodemanApp.prototype, {
    *
    * `text` is for the callers that already read the selection to decide whether
    * to copy at all (the Ctrl+C gate and the right-click handler), so the read is
-   * not repeated. It must be the selection xterm holds RIGHT NOW, because the
-   * mid-row flag below comes from the live selection rather than from `text`.
+   * not repeated. The transform is idempotent on xterm output, so an
+   * already-cleaned string is an acceptable argument: a CR is consumed by the
+   * parser as a cursor move and never stored in a cell, so the only \r the
+   * selection can carry is the Windows line join, and that is what makes the
+   * trailing scan a fixed point. Fuzzed over 300 000 realistic selections.
    *
-   * A COLUMN selection comes back untouched. Alt+drag makes one — xterm's
+   * A COLUMN selection comes back untouched. Alt+drag makes one (xterm's
    * shouldColumnSelect keys on altKey alone, and Codeman sets neither of the
-   * terminals it creates with the one option that would disable it — and a rectangle's whole point is that its rows line
-   * up, which both halves of the clean would destroy. xterm exposes the mode
-   * nowhere public, so this reads the private field the way this file already
-   * reads terminal._core for cell dimensions, and falls back to cleaning
-   * normally if a future xterm renames it. SelectionMode.COLUMN is 3.
+   * terminals it creates with the one option that would disable it), and a
+   * rectangle's whole point is that its rows line up, which trimming each row
+   * to its own last glyph would destroy. xterm exposes the mode nowhere public,
+   * so this reads the private field the way this file already reads
+   * terminal._core for cell dimensions, and falls back to cleaning normally if
+   * a future xterm renames it. SelectionMode.COLUMN is 3.
    */
   cleanedTerminalSelection(text) {
     const raw = text ?? (this.terminal?.hasSelection?.() ? this.terminal.getSelection() : '');
@@ -4176,8 +4184,7 @@ Object.assign(CodemanApp.prototype, {
     if (this.terminal?._core?._selectionService?._activeSelectionMode === 3) return raw;
     const clean = window.CodemanCopySelection?.clean;
     if (!clean) return raw;
-    const start = this.terminal?.getSelectionPosition?.()?.start;
-    return clean(raw, { startedMidRow: !!start && start.x > 0 });
+    return clean(raw);
   },
 
   // Copy the current terminal selection. Goes through _copyText (Clipboard API,
@@ -4189,10 +4196,10 @@ Object.assign(CodemanApp.prototype, {
     // alone, which are truthy, and a bare newline pasted into a chat composer
     // or a shell submits the line. decideAutoCopy applies the same rule.
     if (!selection.trim()) {
-      // Clearing matters as much as the toast. The Ctrl+C gate tests the RAW
-      // selection, so a padding-only selection left set would make every later
-      // Ctrl+C copy nothing instead of interrupting — the exact failure
-      // docs/architecture-invariants.md warns about under Terminal smart copy.
+      // Clearing is feedback, not protection. The Ctrl+C gate tests the CLEANED
+      // selection, so a padding-only selection left set can no longer swallow a
+      // later interrupt; it cleans to '' and the press reaches the PTY. What the
+      // clear avoids is a highlight that sits there having copied nothing.
       this.terminal?.clearSelection?.();
       this.showToast('Nothing to copy', 'warning');
       return false;
