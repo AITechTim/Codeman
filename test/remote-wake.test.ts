@@ -31,11 +31,14 @@ import {
   waitUntilRemoteReady,
   wakeConfigured,
   REMOTE_WAKE_PENDING_MAX_BYTES,
+  REMOTE_WAKE_READY_INTERVAL_MS,
   REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
   type RemoteWakeDeps,
   type WakeableRemote,
   type WakeableSession,
 } from '../src/remote-wake.js';
+import { RemoteHostSchema } from '../src/web/schemas.js';
+import { MAX_WAKE_MACS } from '../src/config/remote-wake-limits.js';
 
 // ========== Pure decisions ==========
 
@@ -564,6 +567,36 @@ describe('RemoteWakeRegistry', () => {
 
 // ========== Host-scoped wake (session create/attach) ==========
 
+describe('the MAC-count limit lives in one place', () => {
+  // The schema's 128-character cap admits seven MACs while parseMacList takes at most
+  // MAX_WAKE_MACS, all-or-nothing. They used to disagree, so a five-MAC wakeMac
+  // validated, persisted to remote-hosts.json, and then resolved to NO wake target:
+  // the host read as unconfigured and the banner offered "Configure WoL" for a host
+  // the user had just set up.
+  const mac = (n: number) => `04:d9:f5:80:c6:${n.toString(16).padStart(2, '0')}`;
+
+  it('parses exactly MAX_WAKE_MACS', () => {
+    const value = Array.from({ length: MAX_WAKE_MACS }, (_, i) => mac(i)).join(',');
+    expect(parseMacList(value)).toHaveLength(MAX_WAKE_MACS);
+    expect(
+      RemoteHostSchema.safeParse({ id: 'h', label: 'H', host: '10.0.0.5', username: 'joe', wakeMac: value }).success
+    ).toBe(true);
+  });
+
+  it('rejects one more in BOTH the schema and the parser, so neither can admit what the other drops', () => {
+    const value = Array.from({ length: MAX_WAKE_MACS + 1 }, (_, i) => mac(i)).join(',');
+    expect(parseMacList(value)).toBeNull();
+    const parsed = RemoteHostSchema.safeParse({
+      id: 'h',
+      label: 'H',
+      host: '10.0.0.5',
+      username: 'joe',
+      wakeMac: value,
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe('isProbeable', () => {
   const base: WakeableRemote = { hostId: 'h', label: 'H', host: '10.0.0.9', wakeMac: '04:d9:f5:80:c6:58' };
 
@@ -750,13 +783,57 @@ describe('RemoteWakeRegistry — host-scoped wake for a request that waits on it
 
     expect(h.wake).toHaveBeenCalledWith({ kind: 'mac', macs: [[4, 217, 245, 128, 198, 88]] });
     // The budget has to reach the readiness poll: the reverse proxy cuts a request at
-    // 60 s, so a create-path wake must not inherit the 90 s session default.
-    expect(h.waitUntilReady).toHaveBeenCalledWith(hostRemote, {
-      timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
-      // The shutdown signal rides along so `WebServer.stop()` can end the poll.
-      signal: expect.any(AbortSignal),
-    });
+    // 60 s, so a create-path wake must not inherit the 90 s session default. A magic
+    // packet is effectively instant, so the poll gets essentially the whole budget;
+    // it is not asserted to the millisecond because the wake's own elapsed time is
+    // subtracted (see the wakeCommand case below).
+    const [, readyOpts] = h.waitUntilReady.mock.calls[0] as [unknown, { timeoutMs: number; signal: AbortSignal }];
+    expect(readyOpts.timeoutMs).toBeLessThanOrEqual(REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS);
+    expect(readyOpts.timeoutMs).toBeGreaterThan(REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS - 1_000);
+    // The shutdown signal rides along so `WebServer.stop()` can end the poll.
+    expect(readyOpts.signal).toEqual(expect.any(AbortSignal));
     expect(h.events).toContain('remote:hostWaking');
+  });
+
+  it('spends a slow wake command out of the request budget rather than on top of it', async () => {
+    // REMOTE_WAKE_COMMAND_TIMEOUT_MS is 10 s and runs BEFORE the readiness poll, so the
+    // original arithmetic (40 s poll + 1.5 s probe + 15 s tmux prereq) understated a
+    // wakeCommand host's worst case by the whole wake: ~68 s against the 60 s
+    // proxy_read_timeout this budget exists to stay under.
+    const h = harness({ remote: { ...hostRemote, wakeMac: undefined, wakeCommand: '/usr/bin/whuff' } });
+    h.probe.mockResolvedValue(false);
+    h.wake.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+      return true;
+    });
+
+    await expect(
+      h.registry.ensureHostAwake(
+        { ...hostRemote, wakeMac: undefined, wakeCommand: '/usr/bin/whuff' },
+        { timeoutMs: 5_000 }
+      )
+    ).resolves.toBe('ready');
+
+    const [, readyOpts] = h.waitUntilReady.mock.calls[0] as [unknown, { timeoutMs: number }];
+    expect(readyOpts.timeoutMs).toBeLessThan(5_000);
+    expect(readyOpts.timeoutMs).toBeGreaterThanOrEqual(5_000 - 2_000);
+  });
+
+  it('still gives a wake that ate the whole budget one readiness probe', async () => {
+    const h = harness({ remote: { ...hostRemote, wakeMac: undefined, wakeCommand: '/usr/bin/whuff' } });
+    h.probe.mockResolvedValue(false);
+    h.wake.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      return true;
+    });
+
+    await h.registry.ensureHostAwake(
+      { ...hostRemote, wakeMac: undefined, wakeCommand: '/usr/bin/whuff' },
+      { timeoutMs: 10 }
+    );
+
+    const [, readyOpts] = h.waitUntilReady.mock.calls[0] as [unknown, { timeoutMs: number }];
+    expect(readyOpts.timeoutMs).toBe(REMOTE_WAKE_READY_INTERVAL_MS);
   });
 
   it('reports failed when the host never comes back, and probes again on the next attempt', async () => {

@@ -334,6 +334,20 @@ bare `{}`. With `wait`, the route blocks on the wake instead and answers
 sent") when the host never returns, rather than writing into the stalled pane and
 reporting `delivered:true` plus a timeout.
 
+Two endpoints back that flow directly, both scoped to one session's remote host and
+both refusing a session that is not remote (`400 INVALID_INPUT`):
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/sessions/:id/reachability` | Whether the session's remote host answers SSH right now, plus whether a wake target is configured. Read-only: it never wakes. `{"reachable": true\|false\|null, "wakeConfigured": "mac"\|"command"\|"none"}`, where `null` means the answer is unknown (a proxied host, where a TCP probe proves nothing). |
+| `POST` | `/api/sessions/:id/wake` | Wake the host and wait for it to accept SSH again, bounded by the request budget. `422 OPERATION_FAILED` when it does not come back; `400 INVALID_INPUT` with "No wake-on-LAN target configured for this host" when nothing is set. |
+
+⚠️ Waking is deliberately reachable only from an explicit user action (this route, a
+session create/attach, or typing into a sleeping session). No watcher, dropped-session
+handler or boot-recovery path may wake a host, or a suspended machine would be woken
+again seconds after every suspend; `test/remote-wake.test.ts` pins that as an import
+fence around `src/remote-wake.ts`.
+
 ### Response
 
 All three nest the wait result under `data.wait`, so one client helper works against

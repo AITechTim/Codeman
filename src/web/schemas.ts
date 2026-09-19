@@ -19,6 +19,7 @@ import {
 } from '../config/terminal-history.js';
 import { MAX_EDITABLE_BYTES } from '../config/file-editing.js';
 import { MIN_MATCH_LENGTH, MAX_MATCH_LENGTH } from '../config/agent-wait.js';
+import { MAX_WAKE_MACS } from '../config/remote-wake-limits.js';
 import { enabledCliIds, enabledClis } from '../config/cli-registry/registry.js';
 import type { SessionMode } from '../types.js';
 
@@ -760,6 +761,12 @@ export const RemoteHostSchema = z.object({
       /^[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5}(\s*,\s*[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5})*$/,
       'Wake MAC must be one or more MAC addresses, comma-separated'
     )
+    // ⚠ The character cap admits seven MACs while parseMacList takes at most
+    // MAX_WAKE_MACS, all-or-nothing. Without this the extra ones validated, persisted,
+    // and then resolved to NO wake target, so the host read as unconfigured.
+    .refine((value) => value.split(',').length <= MAX_WAKE_MACS, {
+      message: `Wake MAC accepts at most ${MAX_WAKE_MACS} comma-separated addresses`,
+    })
     .optional(),
 });
 

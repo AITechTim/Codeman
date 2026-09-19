@@ -37,6 +37,7 @@
 import { spawn } from 'node:child_process';
 import dgram from 'node:dgram';
 import net from 'node:net';
+import { MAX_WAKE_MACS } from './config/remote-wake-limits.js';
 
 /** Minimum spacing between two reachability probes for the same session. */
 export const REMOTE_WAKE_PROBE_MIN_INTERVAL_MS = 30_000;
@@ -54,6 +55,10 @@ export const REMOTE_WAKE_READY_TIMEOUT_MS = 90_000;
  * the browser reports a failure for a session that exists. The budget has to cover
  * the WHOLE request, not just the wait: 40 s here + the 1.5 s reachability probe +
  * the tmux prereq probe's own 15 s timeout = 56.5 s worst case, still under 60 s.
+ * ⚠ The wake ITSELF counts against this, which the original arithmetic omitted: a
+ * `command` target can spend REMOTE_WAKE_COMMAND_TIMEOUT_MS before the readiness poll
+ * begins, which would have made the real worst case ~68 s. `_wakeAndWait` therefore
+ * subtracts the wake's measured elapsed time from this budget rather than adding to it.
  * A warm S3 resume measures ~12 s, so 40 s is >3× the observed wake.
  */
 export const REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS = 40_000;
@@ -200,7 +205,7 @@ export function resolveWakeTarget(remote: WakeableRemote | undefined): WakeTarge
  * Parse a comma-separated MAC list into byte arrays. Pure; returns null when any
  * entry is malformed (all-or-nothing, so a typo cannot half-arm a host).
  */
-export function parseMacList(value: string, maxMacs = 4): number[][] | null {
+export function parseMacList(value: string, maxMacs = MAX_WAKE_MACS): number[][] | null {
   const parts = value
     .split(',')
     .map((part) => part.trim())
@@ -669,6 +674,7 @@ export class RemoteWakeRegistry {
     });
     this.deps.log?.(`[RemoteWake] waking ${remote.label} (${remote.host}) via ${target.kind} ${forWhat}`);
 
+    const wakeStartedAt = Date.now();
     const woke = await this.deps.wake(target);
     if (!woke) {
       this.deps.log?.(
@@ -676,8 +682,21 @@ export class RemoteWakeRegistry {
       );
     }
 
+    // The request-scoped budget has to cover the WHOLE request, and the wake is part
+    // of it. A `command` target is bounded by REMOTE_WAKE_COMMAND_TIMEOUT_MS, so a slow
+    // one burned 10 s before the readiness poll even started and pushed a wakeCommand
+    // host's worst case to ~68 s, past the 60 s proxy_read_timeout this budget exists to
+    // stay under. A magic packet is effectively instant, so this subtracts nothing there.
+    // Floored at one poll interval so a wake that ate the whole budget still gets one
+    // probe rather than being declared unreachable without asking.
+    const wakeElapsedMs = Date.now() - wakeStartedAt;
+    const readyTimeoutMs =
+      opts.timeoutMs === undefined
+        ? undefined
+        : Math.max(REMOTE_WAKE_READY_INTERVAL_MS, opts.timeoutMs - wakeElapsedMs);
+
     const ready = await this.deps.waitUntilReady(remote, {
-      timeoutMs: opts.timeoutMs,
+      timeoutMs: readyTimeoutMs,
       signal: this.shutdown.signal,
     });
     if (!ready) {
