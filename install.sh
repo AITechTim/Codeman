@@ -587,7 +587,7 @@ cli_catalog_print_install_hints() {
         elif [[ -n "${CLI_DOCS[$i]}" ]]; then
             echo -e "    ${CLI_LABELS[$i]}: see ${CYAN}${CLI_DOCS[$i]}${NC}"
             if [[ "${CLI_LAUNCHER_ONLY[$i]}" == "1" ]]; then
-                echo -e "      (its package installs a launcher only — it needs a profile that can drive a pane, see the docs above)"
+                echo -e "      (installs a launcher only: it still needs a terminal profile, and Codeman's Run menu can add one)"
             fi
         fi
     done

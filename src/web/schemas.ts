@@ -1161,6 +1161,20 @@ const NotificationEventSchema = z
   })
   .optional();
 
+/**
+ * Body of `POST /api/reboot-restore/restore`.
+ *
+ * `sessionIds` restores a subset, and omitting it restores everything the caller
+ * can see. The ids are session ids from `GET /api/reboot-restore`, and an id the
+ * caller does not own is ignored rather than refused, matching how the session
+ * list scopes rather than 403s.
+ */
+export const RebootRestoreRequestSchema = z
+  .object({
+    sessionIds: z.array(z.string().max(128)).max(200).optional(),
+  })
+  .strict();
+
 export const SettingsUpdateSchema = z
   .object({
     // User-facing product branding. This changes browser/UI copy only; package,
