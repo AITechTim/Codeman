@@ -1,4 +1,4 @@
-# ---- Codeman agent preamble 1.22.0 (seeded by Codeman at session spawn; the SKILL.md §0 bootstrap rewrites it when missing or stale) ----
+# ---- Codeman agent preamble 1.30.1 (seeded by Codeman at session spawn; the SKILL.md §0 bootstrap rewrites it when missing or stale) ----
 API="${CODEMAN_API_URL:?CODEMAN_API_URL not set; refusing to guess}"
 SELF="${CODEMAN_SESSION_ID:?CODEMAN_SESSION_ID not set}"
 # Credentials, cheapest first. Your session has usually INHERITED the server's
@@ -71,6 +71,27 @@ _trust_key() {     # <sid> -> "confirm" | "move" | "" (nothing safe to press)
     | sed -e "s/$(printf '\033')\[[0-9;?]*[a-zA-Z]//g" -e "s/$(printf '\033')[()][AB0]//g" \
     | tr -d ' \t' | grep -i '❯[0-9.]*\(yes,itrustthisfolder\|no,exit\)' | tail -1 \
     | sed -e 's/.*[Yy]es,.*/confirm/' -e 's/.*[Nn]o,.*/move/'
+}
+# ---- the composer: is the prompt still sitting there, unsent? ----
+# ⚠️ Claude Code 2.1.277 (auto-installed 2026-09-18) takes typed text the moment the
+# composer paints but IGNORES Enter for the first 30-50 seconds after it: the \r that
+# Codeman sends 50 ms after the text and a lone nudge at 20 s both leave the prompt
+# stranded, with `0 tokens`, while the wait burns its whole timeout. Measured through
+# this very route: Enter at 28 s stranded, Enter at 51 s submitted. So sendwait READS
+# the composer and keeps pressing Enter while the prompt is still there.
+_composer_text() { # <sid> -> the composer's text with ALL whitespace removed: "" once
+  # the prompt was taken, "?" when the pane shows no composer at all. The composer is
+  # the LAST `❯` line: Claude Code echoes a submitted prompt with the same glyph higher
+  # up in the transcript, so only the last one says whether the text was taken.
+  local t
+  t=$("${CURL[@]}" -G "$API/api/v1/sessions/$1/terminal" --data-urlencode 'full=1' \
+    | jq -r '.data.terminalBuffer // empty' \
+    | sed -e "s/$(printf '\033')\[[0-9;?]*[a-zA-Z]//g" -e "s/$(printf '\033')[()][AB0]//g" \
+    | tr -d '\r' | grep -a '^[[:space:]]*❯' | tail -1)
+  [ -n "$t" ] || { printf '?'; return 0; }
+  # Claude Code draws a NO-BREAK SPACE (U+00A0) after the glyph, which [:space:] does
+  # not cover, so it is stripped by its bytes, portably (BSD sed has no \xHH).
+  printf '%s' "$t" | sed 's/^[[:space:]]*❯//' | tr -d '[:space:]' | sed "s/$(printf '\302\240')//g"
 }
 _accept_trust() {  # <sid> -> 0 once it has answered the dialog, 1 if it could not
   local sid="$1" k i=1
@@ -184,12 +205,16 @@ spawn_workers() {
 # worker a silent no-op that still "succeeds" and reports the previous turn's state.
 # Pass seq explicitly for exactly one reason: resending a possibly-delivered frame as a
 # deliberate duplicate, at the SAME number (§5.3).
-# Delivery is SELF-HEALING: an Ink repaint occasionally eats the Enter, leaving the
-# typed prompt stranded on the composer while a long wait runs its whole timeout
-# (observed live). So the first wait is short; on its timeout a bare \r goes out (the
-# missing Enter when the prompt is stranded, a no-op when the turn is genuinely
-# running), then the ORIGINAL frame is resent unchanged, which the server takes as a
-# tagged duplicate: it re-waits without retyping (§5.3). Trustworthy for a worker
+# Delivery is SELF-HEALING: the Enter can be lost (an Ink repaint eats it, and Claude
+# Code 2.1.277+ ignores it outright for the first 30-50 s after the composer paints),
+# leaving the typed prompt stranded on the composer while a long wait runs its whole
+# timeout (observed live, twelve reviews in a row). So the first wait is short; on its
+# timeout the ORIGINAL frame is resent unchanged as a long re-wait (a tagged duplicate:
+# the server re-waits without retyping, §5.3) and kept open in the background, while
+# the composer is READ (_composer_text) and, as long as the prompt is still sitting
+# there, a bare \r goes out about every ten seconds, up to twelve times. An empty
+# composer ends the loop, so a prompt that was taken is never nudged again, and the
+# wait that was open the whole time is what reports the turn's end. Trustworthy for a worker
 # spawn_worker handed back -- claude (hooks vetted) or deepseek (status bridge) --
 # and for those only. Hook-less workspaces and the other modes resolve on flapping
 # idle: markers instead (§5.5). ⚠️ A dsh worker running a profile that does not
@@ -197,7 +222,7 @@ spawn_workers() {
 # it accepts the send and then burns both waits. One timeout on a dsh worker whose
 # pane clearly finished means that profile, so switch that worker to markers.
 sendwait() {
-  local sid="${1:?}" p="${2:?}" seq="${3:-$(date +%s)}" body r
+  local sid="${1:?}" p="${2:?}" seq="${3:-$(date +%s)}" body r c head n=0 tmp bg i
   # `wait:"stop,exit"`, never the `wait:true` default set: that set also carries
   # `idle`, which is INFERRED from output stabilization and flaps mid-turn. On a
   # dsh worker whose TUI repaints rarely the session reads `idle` while the model
@@ -212,16 +237,38 @@ sendwait() {
   r=$("${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
         -H 'Content-Type: application/json' --data-binary "$body")
   if jq -e '.data.delivered and .data.wait.timedOut' <<<"$r" >/dev/null 2>&1; then
-    "${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" -H 'Content-Type: application/json' \
-      -d "$(jq -nc --arg c "$CID-$sid" --argjson s "$(date +%s)" \
-        '{input:"\r",useMux:true,clientId:$c,seq:$s}')" >/dev/null
-    # The resend is a tagged DUPLICATE, so the server skips the write and reports
-    # `delivered:false` for it -- truthfully, but about the wrong send. The first
-    # one delivered, so carry that forward, or §1's cleanup reads a completed turn
-    # as an undelivered one and keeps a finished worker forever.
-    r=$("${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
-          -H 'Content-Type: application/json' --data-binary "$(jq -c '.waitTimeout=580000' <<<"$body")" \
-        | jq -c 'if .success and (.data.wait.ended | not) then .data.delivered = true else . end')
+    # ⚠️ The long re-wait is registered FIRST and stays open for the rest of this call,
+    # in the background, while the Enter loop below works the composer. Signals have
+    # no history: a `stop` that fires while no wait is open (during a composer read
+    # between two short waits, measured) is lost, and the next wait then runs its
+    # whole timeout on a turn that already ended. The resend is a tagged DUPLICATE,
+    # so the server skips the write and re-waits without retyping (§5.3).
+    tmp=$(mktemp "${TMPDIR:-/tmp}/codeman-wait.XXXXXX") || return 1
+    "${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
+        -H 'Content-Type: application/json' --data-binary "$(jq -c '.waitTimeout=580000' <<<"$body")" > "$tmp" &
+    bg=$!
+    # The prompt's head with whitespace removed, matched literally (the "$head"
+    # quoting inside ${c#...} keeps a * or ? in the prompt from acting as a glob).
+    head=$(printf '%s' "$p" | tr -d '[:space:]' | sed "s/$(printf '\302\240')//g" | head -c 24)
+    while [ "$n" -lt 12 ] && [ ! -s "$tmp" ]; do   # a non-empty file means the wait ended
+      c=$(_composer_text "$sid")
+      if [ "$c" = '?' ]; then
+        [ "$n" -eq 0 ] || break         # unreadable pane: one Enter, then trust it
+      elif [ -z "$head" ] || [ "${c#"$head"}" = "$c" ]; then
+        break                           # composer empty (taken) or holding other text
+      fi
+      n=$((n+1))
+      "${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" -H 'Content-Type: application/json' \
+        -d "$(jq -nc --arg c "$CID-$sid" --argjson s "$(date +%s)" \
+          '{input:"\r",useMux:true,clientId:$c,seq:$s}')" >/dev/null
+      i=0; while [ "$i" -lt 10 ] && [ ! -s "$tmp" ]; do sleep 1; i=$((i+1)); done
+    done
+    wait "$bg"
+    # The duplicate reports `delivered:false` -- truthfully, but about the wrong send.
+    # The first one delivered, so carry that forward, or §1's cleanup reads a completed
+    # turn as an undelivered one and keeps a finished worker forever.
+    r=$(jq -c 'if .success and (.data.wait.ended | not) then .data.delivered = true else . end' < "$tmp")
+    rm -f "$tmp"
   fi
   printf '%s\n' "$r"
 }
@@ -247,4 +294,4 @@ last_text() {
 # The stamp is the LAST line on purpose (a truncated write leaves it unset) and is kept
 # bare on purpose: the write condition above anchors on it with $, so an inline comment
 # here would fail that match and rewrite this file on every single bootstrap.
-CODEMAN_PREAMBLE=1.22.0
+CODEMAN_PREAMBLE=1.30.1

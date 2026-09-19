@@ -110,6 +110,7 @@ import {
 import { DEFAULT_TMUX_HISTORY_LIMIT } from './config/terminal-history.js';
 import { EXEC_TIMEOUT_MS } from './config/exec-timeout.js';
 import { getCli } from './config/cli-registry/registry.js';
+import { SubmitVerifier } from './session-submit-verifier.js';
 import { compileVersionRegex } from './config/cli-registry/patterns.js';
 import { resolveSessionCliVersion } from './utils/cli-resolver.js';
 import {
@@ -502,6 +503,8 @@ export class Session extends EventEmitter {
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
   private _trustDialogTimer: NodeJS.Timeout | null = null; // Re-read after a keystroke (see below)
+  /** Re-sends Enter while a programmatic prompt still sits in the composer (session-submit-verifier.ts). */
+  private _submitVerifier: SubmitVerifier | null = null;
   private _interactiveStartedAt = 0; // When the interactive pane launched (bounds that scan)
   private _taskTracker: TaskTracker;
 
@@ -3190,6 +3193,9 @@ export class Session extends EventEmitter {
   }
 
   private _clearAllTimers(): void {
+    // Stop re-sending Enter for a prompt this session will never take now
+    this._submitVerifier?.cancel();
+    this._submitVerifier = null;
     // Clear the workspace-trust follow-up read
     if (this._trustDialogTimer) {
       clearTimeout(this._trustDialogTimer);
@@ -3721,7 +3727,10 @@ export class Session extends EventEmitter {
     const submittedPrompt = this._trackSubmit(data, options);
     if (this._mux && this._muxSession) {
       const sent = await this._mux.sendInput(this.id, data);
-      if (sent) this._emitSubmittedPrompt(submittedPrompt);
+      if (sent) {
+        this._emitSubmittedPrompt(submittedPrompt);
+        this._verifySubmitted(data);
+      }
       return sent;
     }
     // Fallback to PTY write
@@ -3731,6 +3740,28 @@ export class Session extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Arm the composer check for a write that carried Enter (session-submit-verifier.ts):
+   * Claude Code 2.1.277+ ignores Enter for the first 30-50 s after the composer paints,
+   * so the pair `sendInput` just sent can leave the text stranded. Only a mux session
+   * can read its pane, only text can be stranded, and the glyph is the CLI's own.
+   */
+  private _verifySubmitted(data: string): void {
+    if (!data.includes('\r') || !this._mux?.capturePaneText || !this._muxSession) return;
+    const text = data.replace(/[\r\n]/g, '').trimEnd();
+    if (!text) return;
+    this._submitVerifier ??= new SubmitVerifier({
+      capture: () =>
+        this._isStopped || !this._mux || !this._muxSession
+          ? null
+          : this._mux.capturePaneText?.(this._muxSession.muxName),
+      sendEnter: () => this._mux?.sendInput(this.id, '\r'),
+      glyph: () => getCli(this.mode)?.capabilities.workDetect?.promptGlyph ?? '❯',
+      log: (m) => console.log(`[Session ${this.id.slice(0, 8)}] ${m}`),
+    });
+    this._submitVerifier.arm(text);
   }
 
   /** Current PTY dimensions — used to skip no-op resizes that trigger Ink redraws */
