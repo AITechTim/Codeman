@@ -1376,10 +1376,6 @@ export const SettingsUpdateSchema = z
     showFileBrowser: z.boolean().optional(),
     showSubagents: z.boolean().optional(),
     showMultiMonitorButton: z.boolean().optional(),
-    // showSplitButton is per-device (displayKeys in settings-ui.js) and
-    // deliberately NOT declared here, matching showFileViewerButton/skin/etc:
-    // a desktop opt-in must never sync onto a phone that never asked for it,
-    // and the phone header hard-hides .btn-split regardless (mobile.css).
     // Doubles as the plan-usage telemetry COLLECTION switch, read fresh from
     // disk by readPlanUsageTelemetryEnabled() (hooks-config.ts) at every claude
     // session create/respawn — not just the chip's DISPLAY preference. See that

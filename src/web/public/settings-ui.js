@@ -2352,6 +2352,10 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: _pul,
       showAttachmentsButton: _ahb,
       showFileViewerButton: _fvb,
+      // Desktop-only header button, per-device, and absent from
+      // SettingsUpdateSchema (.strict()) — sending it 400s the whole PUT
+      // (moving it into displayKeys alone is not the strip; this is).
+      showSplitButton: _ssp,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
       // Copy-on-select. Per-device (clipboard access differs by device and by
@@ -2950,12 +2954,12 @@ Object.assign(CodemanApp.prototype, {
       multiMonitorBtn.classList.toggle('btn-multimonitor--hidden', !showMultiMonitorButton);
     }
 
-    // Split button — hidden by default
+    // Split button — hidden by default, and hard-gated to desktop widths
+    // regardless of the setting (window.CodemanSplitPane.SPLIT_PANE_MIN_WIDTH,
+    // matching HOME_SESSIONS_MIN_WIDTH's JS-check + media-query-backstop
+    // pattern — the CSS in styles.css is the backstop, this is the check).
     const showSplitButton = settings.showSplitButton ?? defaults.showSplitButton ?? false;
-    const splitBtn = document.querySelector('.btn-split');
-    if (splitBtn) {
-      splitBtn.classList.toggle('btn-split--hidden', !showSplitButton);
-    }
+    this._applySplitButtonVisibility?.(showSplitButton);
 
     // Ultracode/Workflow agents launcher — hidden by default; reveal when enabled.
     // Marker class only (base is display:inline-flex !important) so it's auto-excluded
