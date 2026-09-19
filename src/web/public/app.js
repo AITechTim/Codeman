@@ -6577,8 +6577,17 @@ class CodemanApp {
       // of every non-shell session per page takes the full-history path, an
       // ungated comparison fires most often on the one response it cannot help.
       const framePositionsRowsAbsolutely = data.source === 'mux-visible';
+      // `mux-visible` is necessary but not sufficient: when the `display-message`
+      // cursor query fails, `capturePaneBuffer` skips the snapshot repaint and
+      // returns the raw capture, and the route still labels a non-empty body
+      // `mux-visible`. That body positions nothing and reports no geometry, so a
+      // size that moved during such a load has nothing to repair, and replaying
+      // would buy a second capture, a reset plus chunked rewrite, a dropped
+      // WebSocket and a discarded xterm snapshot for it. The two comparisons
+      // below already stand down on an absent field; this one has to as well.
       const sizeMovedUnderLoad =
         framePositionsRowsAbsolutely &&
+        Number.isFinite(data.captureRows) &&
         !!dimsAtCapture &&
         !!dimsAfterLoad &&
         (dimsAfterLoad.cols !== dimsAtCapture.cols || dimsAfterLoad.rows !== dimsAtCapture.rows);

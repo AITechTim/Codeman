@@ -930,7 +930,7 @@ Object.assign(CodemanApp.prototype, {
 
   async runClaude() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const tabCount = Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
+    const tabCount = this._readTabCount();
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} Claude session(s) in ${caseName}...`
@@ -1257,9 +1257,14 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  /** Reads the "Instance count" stepper, clamped like runClaude()'s own copy. */
+  /**
+   * Reads the "Instance count" stepper, clamped to 1..20. Single source for every
+   * run*(), runClaude() included. Optional-chained because callers read it BEFORE
+   * their try block, to put the count in the opening banner: `#tabCount` ships
+   * unconditionally today, but a throw here would escape the launch-error path.
+   */
   _readTabCount() {
-    return Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
+    return Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount')?.value) || 1));
   },
 
   /**
@@ -1274,9 +1279,6 @@ Object.assign(CodemanApp.prototype, {
   async _launchQuickStartInstances(caseName, tabCount, label, buildBody, ownsLaunchTerminal) {
     const startNumber = this._nextCaseSessionStartNumber(caseName);
     let firstSessionId = null;
-    if (tabCount > 1) {
-      this._appendSessionLaunchStatus(ownsLaunchTerminal, `Starting ${tabCount} ${label} session(s) in ${caseName}...`);
-    }
     for (let i = 0; i < tabCount; i++) {
       const sessionName = `w${startNumber + i}-${caseName}`;
       const res = await fetch('/api/quick-start', {
@@ -1302,7 +1304,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting OpenCode session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} OpenCode session(s) in ${caseName}...`
+    );
     // Focus in sync gesture context (see runClaude comment)
     this.terminal.focus();
 
@@ -1323,7 +1328,6 @@ Object.assign(CodemanApp.prototype, {
       // Quick-start with opencode mode (auto-allow tools by default).
       // No `effort` field — it's Claude-specific (OpenCode has no /effort).
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1359,7 +1363,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Codex session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} Codex session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1377,7 +1384,6 @@ Object.assign(CodemanApp.prototype, {
 
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1417,7 +1423,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Gemini session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} Gemini session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1434,7 +1443,6 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1468,7 +1476,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Antigravity session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} Antigravity session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1485,7 +1496,6 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1528,7 +1538,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Pi session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} Pi session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1545,7 +1558,6 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1576,7 +1588,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting OMP session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} OMP session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1593,7 +1608,6 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1635,7 +1649,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Grok session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} Grok session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1652,7 +1669,6 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
@@ -1704,7 +1720,10 @@ Object.assign(CodemanApp.prototype, {
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting DeepSeek session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} DeepSeek session(s) in ${caseName}...`
+    );
     this.terminal.focus();
 
     try {
@@ -1730,7 +1749,6 @@ Object.assign(CodemanApp.prototype, {
       }
 
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const tabCount = this._readTabCount();
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,
