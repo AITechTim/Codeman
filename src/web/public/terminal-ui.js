@@ -1092,6 +1092,12 @@ Object.assign(CodemanApp.prototype, {
         if (this._localEchoOverlay?.hasPending) {
           this._localEchoOverlay.rerender();
         }
+        // Pane B (split view) has its own container and its own fit()/resize
+        // frame — this observer only ever measured Pane A's container, so
+        // without this call Pane B never learned about a window resize, an
+        // Alt+B sidebar toggle, or a tab-rail drag, and its PTY silently
+        // stayed at whatever size it was last dragged to.
+        this._splitPane?.fit();
       }, 300); // Trailing-edge: only fire after 300ms of no resize events
     };
 
