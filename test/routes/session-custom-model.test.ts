@@ -39,6 +39,17 @@ async function setup(ctxOptions?: Parameters<typeof createRouteTestHarness>[1]) 
 }
 
 describe('POST /api/sessions/:id/custom-model', () => {
+  /** Shared by the conflict-check block and the context-floor block below, which needs
+   *  both conditions true at once. Scoped to the outer describe on purpose: while it
+   *  lived inside the conflict-check block, a sibling calling it threw a ReferenceError
+   *  during setup, so those tests reported as failing rather than as not written. */
+  function mockRunning(running: Array<{ model: string; state: string }>) {
+    fetchMock.mockImplementation(async (url: URL) => {
+      if (url.pathname === '/running') return new Response(JSON.stringify({ running }), { status: 200 });
+      throw new Error(`unexpected request in this test: ${url.href}`);
+    });
+  }
+
   beforeEach(async () => {
     await writeCustomModelHosts(getDataDir(), []);
     fetchMock.mockReset();
@@ -229,13 +240,6 @@ describe('POST /api/sessions/:id/custom-model', () => {
   });
 
   describe('llama-swap conflict check (llama.cpp runs one model at a time)', () => {
-    function mockRunning(running: Array<{ model: string; state: string }>) {
-      fetchMock.mockImplementation(async (url: URL) => {
-        if (url.pathname === '/running') return new Response(JSON.stringify({ running }), { status: 200 });
-        throw new Error(`unexpected request in this test: ${url.href}`);
-      });
-    }
-
     it('applies straight away when the requested model is already loaded', async () => {
       const { app, ctx } = await setup();
       ctx.sessions.get('test-session-1')!.mode = 'claude';

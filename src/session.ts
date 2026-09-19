@@ -3758,7 +3758,18 @@ export class Session extends EventEmitter {
           ? null
           : this._mux.capturePaneText?.(this._muxSession.muxName),
       sendEnter: () => this._mux?.sendInput(this.id, '\r'),
-      glyph: () => getCli(this.mode)?.capabilities.workDetect?.promptGlyph ?? '❯',
+      // ⚠ NO fallback glyph here, unlike the screen-reading probe elsewhere in this file.
+      // Only claude and codex declare a promptGlyph; the other eight modes would fall back
+      // to claude's `❯`, which is ALSO starship's default shell prompt (and pure's, and
+      // spaceship's, and p10k lean's). On a shell session the line `❯ npm run build` sits
+      // on screen for as long as the command runs, promptStillInComposer() reads that as
+      // "still unsubmitted", and the verifier presses Enter into the running program's
+      // stdin on its 2s..60s schedule. Mostly a stray blank line; not harmless against a
+      // y/N prompt, `read -p`, an installer or a pager, where it takes the default.
+      // promptStillInComposer() returns undefined for an empty glyph, so this makes the
+      // verifier inert for every CLI that does not declare one, which is what the Claude
+      // Code 2.1.277 defect it exists for actually calls for.
+      glyph: () => getCli(this.mode)?.capabilities.workDetect?.promptGlyph ?? '',
       log: (m) => console.log(`[Session ${this.id.slice(0, 8)}] ${m}`),
     });
     this._submitVerifier.arm(text);

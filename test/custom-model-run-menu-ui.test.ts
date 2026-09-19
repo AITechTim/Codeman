@@ -574,7 +574,7 @@ describe('Custom Model Endpoint Profiles: llama-swap model-swap confirmation and
     expect(confirmMessage).toContain('qwen3');
     expect(applyBodies).toEqual([
       { endpointId: 'llama-box', modelId: 'qwen3' },
-      { endpointId: 'llama-box', modelId: 'qwen3', confirmed: true },
+      { endpointId: 'llama-box', modelId: 'qwen3', confirmedSwap: true },
     ]);
   });
 
@@ -1041,7 +1041,7 @@ describe("Custom Model Endpoint Profiles: requiresContextWarning (this CLI's own
     expect(confirmArgs).toEqual(['qwen3', 16384, 40000]);
     expect(applyBodies).toEqual([
       { endpointId: 'llama-box', modelId: 'qwen3' },
-      { endpointId: 'llama-box', modelId: 'qwen3', confirmed: true },
+      { endpointId: 'llama-box', modelId: 'qwen3', confirmedContext: true },
     ]);
   });
 

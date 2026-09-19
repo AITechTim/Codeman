@@ -31,5 +31,17 @@ swap window, so a prompt sent mid-swap reads as loading rather than as an answer
 whatever was loaded a moment ago. A background sweep also catches the reverse: your
 session's model being evicted later by somebody else's ordinary use.
 
+Two things worth knowing if you drive this over the HTTP API or run multi-user. The two
+questions an apply can ask (the model's context window is too small, and loading it will
+unload the model another session is using) are now answered by separate
+`confirmedContext` and `confirmedSwap` fields rather than one `confirmed`. They shared a
+flag until now, and since the context check runs first, confirming that one silently
+agreed to evict another session's model as well. The old `confirmed` still means both.
+And `CLAUDE_CONFIG_DIR` is now admin-only in multi-user mode: it joined claude's
+privileged env keys, so a non-granted owner can no longer set it through `envOverrides`,
+and an already-persisted one is dropped on reboot-restore, which returns that session to
+the default Claude account rather than the per-client one it was pointed at. Single-user
+installs are unaffected.
+
 Remote SSH and Docker sessions are refused for now, since their restart reattaches a
 durable tmux rather than relaunching the agent.

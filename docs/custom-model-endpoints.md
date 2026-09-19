@@ -227,7 +227,7 @@ already pointed at the endpoint. No restart, because there was never a
 native-backend launch to restart away from. Runs the same llama-swap
 conflict check as the restart route (below) — a `409`-shaped
 `{requiresConfirmation, currentlyLoadedModel, affectedSessions}` response
-with no session created, resolved by retrying with `confirmed: true` — and
+with no session created, resolved by retrying with `confirmedSwap: true` — and
 is refused the same way for a remote or Docker case. This is what the
 Run-menu picker uses for opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP;
 Claude still uses the restart route below (see "The Run-menu picker" above
@@ -350,7 +350,8 @@ which can take anywhere from a few seconds to well over a minute:
   session's own selection** is using it, the apply returns
   `{requiresConfirmation: true, currentlyLoadedModel, affectedSessions}`
   instead of silently switching — nothing is applied or created yet.
-  Retrying with `confirmed: true` skips the check. Switching with nothing
+  Retrying with `confirmedSwap: true` skips the check (the legacy `confirmed: true`
+  still means both questions). Switching with nothing
   else affected proceeds immediately; this is a warning about disrupting
   another session, never a gate on the switch itself.
 - **Actually starting the load.** llama-swap has no "switch model" admin
@@ -413,7 +414,7 @@ contextLength, minSafeContextTokens}` instead of applying — nothing is
 restarted or created yet. A context length that was never discovered at
 all skips the check entirely (nothing to compare, so it fails open rather
 than warning on every model an endpoint hasn't reported a size for).
-Retrying with `confirmed: true` launches anyway.
+Retrying with `confirmedContext: true` launches anyway (the legacy `confirmed: true` still means both questions).
 
 The Run-menu picker shows this as an in-app modal
 (`#customModelContextWarningModal`, matching the llama-swap conflict

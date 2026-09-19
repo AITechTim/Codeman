@@ -154,7 +154,7 @@ describe('_quickStartWithCustomModelConfirm', () => {
     expect(app._lastCustomModelLaunchResult).toEqual(data.data);
   });
 
-  it('confirming re-sends with confirmed:true and returns the second response', async () => {
+  it('confirming re-sends with confirmedSwap and returns the second response', async () => {
     const { win, app } = bootApp();
     app._confirmModelSwap = async () => true;
     let calls = 0;
@@ -170,7 +170,10 @@ describe('_quickStartWithCustomModelConfirm', () => {
           },
         };
       }
-      expect(body.customModel.confirmed).toBe(true);
+      // the SWAP question's own flag, never the blanket `confirmed`: answering this one
+      // must not also silence the context-floor warning.
+      expect(body.customModel.confirmedSwap).toBe(true);
+      expect(body.customModel.confirmed).toBeUndefined();
       return { success: true, data: { sessionId: 's1', modelSwapInProgress: true } };
     });
     const data = await app._quickStartWithCustomModelConfirm({

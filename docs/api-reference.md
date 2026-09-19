@@ -651,9 +651,17 @@ confirmed? } | { clear: true }` applies (or clears) the session's
   for a remote (SSH) or Docker session — both restart their agent
   differently under the hood, and applying to one would report success
   while changing nothing. Two more responses replace the normal
-  `{customModel, restarted}` shape, neither an error — both require
-  retrying the same call with `confirmed: true` to proceed anyway, and
-  neither restarts or creates anything on the first ask:
+  `{customModel, restarted}` shape, neither an error, and neither restarts
+  or creates anything on the first ask. ⚠️ **Each is answered by its OWN
+  flag on the retry, and answering one is not consent to the other**: they
+  are questions about different people, and while they shared a single flag
+  a caller who confirmed the context warning silently agreed to evict
+  another session's model as well. Send `confirmedContext: true` to proceed
+  past the context warning, `confirmedSwap: true` past the swap conflict,
+  and both when both were asked (they accumulate, so the second retry still
+  carries the first answer). The original `confirmed: true` still means
+  BOTH and is still accepted, because it shipped in this feature's
+  HTTP-API-only cut; new callers should send the specific one:
   - `{requiresConfirmation: true, currentlyLoadedModel, affectedSessions}` —
     llama.cpp/llama-swap only runs one model at a time, and switching would
     unload a model another **live session's own selection** is actively
@@ -669,12 +677,14 @@ minSafeContextTokens}` — Claude Code's own fixed per-turn overhead
     `contextLengthVar` (claude only today), so it never fires for another
     harness.
 - `POST /api/v1/quick-start`'s `customModel: { endpointId, modelId,
-confirmed? }` field (alongside its normal `caseName`/`mode`/etc. body)
+confirmed?, confirmedContext?, confirmedSwap? }` field (alongside its
+normal `caseName`/`mode`/etc. body)
   computes the same injection **before** the session exists and launches
   directly on the endpoint — no restart, because there was never a
   native-backend boot to restart away from. Runs the identical checks as
   the dedicated route above (`requiresConfirmation`/`requiresContextWarning`,
-  same shapes, same `confirmed: true` retry), and is refused the same way
+  same shapes, same per-question `confirmedContext`/`confirmedSwap` retry),
+  and is refused the same way
   for a remote or Docker case. This is what the Run-menu picker uses for
   opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP; Claude still uses the
   dedicated restart route above (its `--resume`-based restart is far less
