@@ -20,15 +20,14 @@
  * near-identical bodies guaranteed to drift, exactly what the CLI registry's
  * own no-id-branching rule exists to prevent server-side.
  *
- * Deliberately a LOCAL table rather than reading `window.__codemanCliCatalog`
- * (server.ts, PR B2): that catalogue carries only menu-facing metadata
- * (id/label/shortBadge/order/kind), and several unit tests exercise these
- * run*() methods inside a bare `vm.createContext()` sandbox with no `window`
- * global at all (see test/run-mode-ui.test.ts) — referencing `window` there
- * unguarded would throw, not degrade. `buildConfig` returns the CLI's
- * top-level legacy config field for a LOCAL launch, or `null` for a CLI that
- * sends none (pi: no bypass flag exists, so there is nothing to send — see
- * runPi's own history below for why that must stay true).
+ * Deliberately a LOCAL table rather than a server-injected catalogue: several
+ * unit tests exercise these run*() methods inside a bare `vm.createContext()`
+ * sandbox with no `window` global at all (see test/run-mode-ui.test.ts) —
+ * referencing `window` there unguarded would throw, not degrade. `buildConfig`
+ * returns the CLI's top-level legacy config field for a LOCAL launch, or
+ * `null` for a CLI that sends none (pi: no bypass flag exists, so there is
+ * nothing to send — see runPi's own history below for why that must stay
+ * true).
  */
 const RUN_MODE_LAUNCH = {
   opencode: {
@@ -112,9 +111,9 @@ const RUN_MODE_LAUNCH = {
 
 /**
  * External (non-Claude, non-Shell) CLI run modes — the keys of RUN_MODE_LAUNCH
- * above, kept as its own Set so `_isAltCliMode()` doesn't recompute an array
- * every call. Single source for what used to be two hand-copied 8-way
- * `session.mode === '<id>' || ...` chains inside one function
+ * above, kept as its own Set (`EXTERNAL_CLI_MODES.has(mode)`) rather than an
+ * array recomputed per call. Single source for what used to be two hand-copied
+ * 8-way `session.mode === '<id>' || ...` chains inside one function
  * (`openSessionOptions`), guaranteed to drift from each other the moment a
  * ninth CLI landed in one and not the other.
  */

@@ -314,6 +314,7 @@ describe('declared-for-later fields', () => {
    * list — and wiring one up should make its line here fail, which is the good direction.
    */
   const DECLARED_FOR_LATER = [
+    'shortBadge',
     'accent',
     'capabilities.echo',
     'capabilities.wheelForward',

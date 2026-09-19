@@ -55,18 +55,22 @@ describe('OpenCode session initial resize', () => {
     await context?.close();
   });
 
-  it('selectSession is not bypassed when runOpenCode sets activeSessionId', async () => {
-    // This test verifies at the code level that runOpenCode does NOT
-    // pre-set activeSessionId before calling selectSession.
-    // If it did, selectSession would early-return and skip sendResize.
+  it('selectSession is not bypassed when the shared launcher sets activeSessionId', async () => {
+    // This test verifies at the code level that the OpenCode launch path does
+    // NOT pre-set activeSessionId before calling selectSession. If it did,
+    // selectSession would early-return and skip sendResize.
+    //
+    // PR B2 consolidated runOpenCode() (and 7 siblings) into one shared
+    // _runCliMode(mode) — runOpenCode is now a one-line wrapper
+    // (`return this._runCliMode('opencode')`), so inspecting ITS source would
+    // never see the real launch logic and this check would pass vacuously
+    // regardless of what _runCliMode actually does. Inspect _runCliMode itself.
     ({ context, page } = await freshPage());
     await navigateAndWait(page);
 
-    // Read the runOpenCode source from the live app and verify
-    // it doesn't assign activeSessionId before selectSession
     const hasPreAssignment = await page.evaluate(() => {
-      const app = (window as unknown as { app: { runOpenCode: { toString: () => string } } }).app;
-      const source = app.runOpenCode.toString();
+      const app = (window as unknown as { app: { _runCliMode: { toString: () => string } } }).app;
+      const source = app._runCliMode.toString();
 
       // Check: the source should NOT have activeSessionId = ... before selectSession
       // Find positions of both patterns

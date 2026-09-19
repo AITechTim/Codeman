@@ -629,15 +629,12 @@ export interface CliOverlays {
 /**
  * ⚠️ DECLARED-FOR-LATER: fields no code reads yet.
  *
- * `accent`, `overlays.credStore`, `capabilities.echo`, `capabilities.wheelForward`,
+ * `shortBadge`, `accent`, `overlays.credStore`, `capabilities.echo`, `capabilities.wheelForward`,
  * `capabilities.keyboardAccessory` and `capabilities.maxFrameBytes` all describe FRONTEND
- * behaviour, and most of the frontend is deliberately untouched by the change that introduced
- * this registry — `app.js`, `terminal-ui.js`, `styles.css` and friends keep their own
+ * behaviour, and the frontend is deliberately untouched by the change that introduced this
+ * registry — `app.js`, `terminal-ui.js`, `styles.css` and friends keep their own
  * hand-authored per-CLI rules, and moving them is its own piece of work with its own way of
- * being verified (a mobile/browser suite the CI gate cannot see). `shortBadge` graduated out of
- * this list (PR B2): it is read server-side into `window.__codemanCliCatalog`
- * (`src/web/server.ts`), the general run-menu catalogue injected for the frontend to consume —
- * see `docs/cli-registry.md`.
+ * being verified (a mobile/browser suite the CI gate cannot see).
  *
  * They are declared now because each entry should describe its CLI completely, and because
  * transcribing them while the hand-written source is still on screen is when the values are
