@@ -511,6 +511,7 @@ describe('Codex quick start settings', () => {
   it('passes global Codex settings into quick-start config for new sessions', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -837,6 +838,7 @@ describe('Gemini quick start', () => {
   it('drives runGemini() through the {success,data} envelope and selects the new session', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'gemini-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -891,6 +893,7 @@ describe('Antigravity quick start', () => {
   it('drives runAntigravity() through the {success,data} envelope and selects the new session', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'ag-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -947,6 +950,7 @@ describe('Pi quick start', () => {
   it('drives runPi() through the {success,data} envelope and sends no piConfig', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'pi-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1035,6 +1039,7 @@ describe('Grok quick start', () => {
   it('drives runGrok() through the {success,data} envelope and sends alwaysApprove', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'grok-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
