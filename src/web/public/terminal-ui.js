@@ -5130,6 +5130,10 @@ Object.assign(CodemanApp.prototype, {
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontSize = size;
+      this._splitPane.fitAddon?.fit();
+    }
   },
 
   /**
@@ -5155,6 +5159,10 @@ Object.assign(CodemanApp.prototype, {
     this.fitAddon?.fit();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontFamily = resolved;
+      this._splitPane.fitAddon?.fit();
+    }
   },
 
   /**
@@ -5205,6 +5213,11 @@ Object.assign(CodemanApp.prototype, {
       } catch {
         /* pane not laid out yet — its own resize observer refits it */
       }
+    }
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontWeight = fontWeight;
+      this._splitPane.terminal.options.fontWeightBold = fontWeightBold;
+      this._splitPane.fitAddon?.fit();
     }
   },
 
@@ -5425,6 +5438,13 @@ Object.assign(CodemanApp.prototype, {
           } catch {}
         }
       }
+    }
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.minimumContrastRatio = minimumContrastRatio;
+      this._splitPane.terminal.options.theme = { ...theme };
+      try {
+        this._splitPane.terminal.refresh(0, this._splitPane.terminal.rows - 1);
+      } catch {}
     }
   },
 });

@@ -526,15 +526,14 @@ html.mobile-init .file-browser-panel {
   /* Approvals bell: phones answer from the overview's NEEDS YOU rows instead
      (inline approve/deny in mobile-overview.js); the bell would only crowd the
      header it was designed to stay out of. */
-  .btn-icon-header.btn-approvals,
-  /* Split-pane: desktop-only by design (two 240px min-width panes plus the
-     divider need ~486px, which a 393px phone cannot give them, and the
-     divider has no touch handlers). This is a hard gate independent of the
-     opt-in showSplitButton setting/marker class, so turning the setting on
-     at a desk can never also put the button in the phone header. */
-  .btn-icon-header.btn-split {
+  .btn-icon-header.btn-approvals {
     display: none !important;
   }
+  /* Split-pane is hidden here too, but the AUTHORITATIVE hard gate is the
+     wider `@media (max-width: 1179px)` rule in styles.css — this file only
+     loads up to 1023px, which does not cover the 1024-1179px tablet range
+     the split feature also needs to stay off (two 240px min-width panes plus
+     the divider need ~486px; the divider also has no touch handlers). */
 
   /* Read My Mind 🧠 header button: never in the phone header; the phone
      surface is the keyboard-accessory 🧠 key (same `readMyMindEnabled` gate,

@@ -2289,6 +2289,32 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
   display: none !important;
 }
 
+/* While a split is open, the button's own click closes it instead of opening
+   the picker — the accent fill is what tells the user which of its two
+   behaviours the next click will get (aria-pressed carries the same state
+   for assistive tech). */
+.btn-icon-header.btn-split.split-open {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.btn-icon-header.btn-split.split-open:hover {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* Split-pane hard desktop gate, independent of the showSplitButton setting:
+   two 240px min-width panes plus the divider need ~486px, the divider has no
+   touch handlers, and mobile.css only loads up to 1023px so it cannot cover
+   the 1024-1179px tablet range on its own. Same threshold and reasoning as
+   HOME_SESSIONS_MIN_WIDTH (home-sessions.js) / SPLIT_PANE_MIN_WIDTH
+   (constants.js) — keep the three in sync. */
+@media (max-width: 1179px) {
+  .btn-icon-header.btn-split {
+    display: none !important;
+  }
+}
+
 .btn-icon-header.btn-settings {
   width: 30px;
   height: 30px;
@@ -2554,6 +2580,7 @@ body.solo-mode .header-system-stats,
 body.solo-mode .header-tokens,
 body.solo-mode .btn-notifications,
 body.solo-mode .btn-multimonitor,
+body.solo-mode .btn-split,
 body.solo-mode .header-plan-usage,
 /* A solo window shows ONE session and has no tab strip to put restored ones in,
    so offering to rebuild a list of them there is an offer it cannot show the
@@ -18592,7 +18619,12 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 }
 
 .terminal-split-container > .terminal-wrap {
-  flex: 0 0 auto;
+  /* flex-shrink 1 (not 0): the divider's own 6px is fixed-width, and Pane A
+     +Pane B's inline flex-basis (openSplitPane/onMove) always sums to 100%,
+     so with flex-shrink 0 on both panes the row is 100% + 6px wide and
+     .main's overflow clips Pane B's right edge by exactly the divider's
+     width. Shrinking lets the two panes give up that 6px between them. */
+  flex: 0 1 auto;
   min-width: 240px;
   overflow: hidden;
 }
@@ -18610,7 +18642,8 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 }
 
 .terminal-pane-b {
-  flex: 0 0 auto;
+  /* flex-shrink 1, matching .terminal-wrap above — see its comment. */
+  flex: 0 1 auto;
   min-width: 240px;
   display: flex;
   flex-direction: column;

@@ -51,6 +51,7 @@ type TestApp = {
   activeSessionId: string | null;
   _splitSessionId: string | null;
   _splitPane: { destroy: ReturnType<typeof vi.fn> } | null;
+  _closingSessions: Set<string>;
   closeSplitPane: ReturnType<typeof vi.fn>;
   selectSession: ReturnType<typeof vi.fn>;
   __originalDeletedCalls?: Array<{ id: string }>;
@@ -62,6 +63,10 @@ function makeSplitActiveApp(): TestApp {
   app.activeSessionId = 'session-a';
   app._splitSessionId = 'session-b';
   app._splitPane = { destroy: vi.fn() };
+  // Empty by default: the app's OWN closeSession() is not mid-await for this
+  // delete, so the promotion below is expected to fire. See the dedicated
+  // test further down for the non-empty (_closingSessions owns it) case.
+  app._closingSessions = new Set();
   // closeSplitPane is mocked but mirrors the REAL implementation's one
   // observable side effect relevant here: it nulls _splitPane/_splitSessionId.
   // If the wrapper captured _splitSessionId AFTER calling closeSplitPane
@@ -116,12 +121,27 @@ describe('terminal-split.js _onSessionDeleted wrapper (I6)', () => {
     app.activeSessionId = 'session-a';
     app._splitSessionId = null;
     app._splitPane = null;
+    app._closingSessions = new Set();
     app.closeSplitPane = vi.fn();
     app.selectSession = vi.fn();
 
     CodemanApp.prototype._onSessionDeleted.call(app, { id: 'session-a' });
 
     expect(app.closeSplitPane).not.toHaveBeenCalled();
+    expect(app.selectSession).not.toHaveBeenCalled();
+    expect(app.__originalDeletedCalls).toEqual([{ id: 'session-a' }]);
+  });
+
+  it('Pane A ends via the user closing its OWN tab: still collapses the split, but skips the promotion', () => {
+    // closeSession() (app.js) adds the id to _closingSessions BEFORE awaiting
+    // the delete, then owns the follow-up selection itself once it lands —
+    // selecting Pane B's session here too would race it for which tab wins.
+    const app = makeSplitActiveApp();
+    app._closingSessions.add('session-a');
+
+    CodemanApp.prototype._onSessionDeleted.call(app, { id: 'session-a' });
+
+    expect(app.closeSplitPane).toHaveBeenCalledTimes(1);
     expect(app.selectSession).not.toHaveBeenCalled();
     expect(app.__originalDeletedCalls).toEqual([{ id: 'session-a' }]);
   });

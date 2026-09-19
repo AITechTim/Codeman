@@ -1520,6 +1520,15 @@ function terminalLogicalLine(buffer, row, cols, maxRows) {
 // Split-Pane Sessions — pure helpers (divider math, picker list)
 // ═══════════════════════════════════════════════════════════════
 
+// Desktop-only, same reasoning and same threshold as HOME_SESSIONS_MIN_WIDTH
+// (home-sessions.js): two 240px min-width panes plus the divider need ~486px,
+// which a phone or narrow tablet cannot give them, and the divider has no
+// touch handlers. A dedicated constant rather than reusing
+// HOME_SESSIONS_MIN_WIDTH directly — that name lives in home-sessions.js,
+// which loads AFTER this file (load order 12.56 vs 7.5), so referencing it
+// from module-evaluation-time code here would be a ReferenceError.
+const SPLIT_PANE_MIN_WIDTH = 1180;
+
 function clampDividerPercent(rawPercent, min = 20, max = 80) {
   if (rawPercent < min) return min;
   if (rawPercent > max) return max;
@@ -1550,5 +1559,6 @@ if (typeof window !== 'undefined') {
   window.CodemanSplitPane = {
     clampDividerPercent,
     buildSplitPickerSessions,
+    SPLIT_PANE_MIN_WIDTH,
   };
 }
