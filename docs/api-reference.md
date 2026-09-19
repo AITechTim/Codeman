@@ -625,7 +625,7 @@ authStyle?, defaultModelId? }` creates one. `id` must match
   `server.ts`), so there is no route for triggering "refresh all" — one
   endpoint being unreachable on a cycle never blocks the others.
 - `GET /api/v1/model-endpoints/:id/running-status` -> `{ isLlamaSwap,
-running: [{model, state, cmd?}], logLine? }`, read-only, no admin gate
+running: [{model, state}], logLine? }`, read-only, no admin gate
   (any session owner who could already point a session at this endpoint can
   equally ask what it currently has loaded). `isLlamaSwap` is
   feature-detected via the endpoint's own `GET /running` — a plain

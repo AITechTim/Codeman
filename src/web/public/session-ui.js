@@ -920,8 +920,8 @@ Object.assign(CodemanApp.prototype, {
     // _apiJson() (used everywhere else in this file) unwraps a success body to
     // its `data`, but on failure it swallows the response entirely and returns
     // null — exactly the `error` text a caller needs to tell "the endpoint is
-    // unreachable" apart from "the CLI can't be redirected", "not one of the
-    // discovered models", or "this is a Docker/remote session". Go through the
+    // unreachable" apart from "the CLI can't be redirected" or "this is a
+    // Docker/remote session". Go through the
     // raw response here instead so a failure is diagnosable, not just present.
     let { ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId);
 
