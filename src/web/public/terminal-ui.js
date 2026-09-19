@@ -364,11 +364,22 @@ Object.assign(CodemanApp.prototype, {
       // this handler before its own cancel()), so preventDefault is explicit:
       // without it the browser runs its native copy on top of ours.
       if (this.shouldCopyTerminalSelectionFromShortcut?.(ev)) {
-        const selection = this.terminal.hasSelection?.() ? this.terminal.getSelection() : '';
-        if (selection) {
+        // The CLEANED selection decides, not the raw one. A drag across the blank
+        // part of a row selects real padding spaces, which are truthy, so testing
+        // the raw text would spend this press on a copy of nothing and make the
+        // user press again to interrupt.
+        const selection = this.cleanedTerminalSelection();
+        if (selection.trim()) {
           ev.preventDefault();
           void this.copyTerminalSelection(selection);
           return false;
+        }
+        // Nothing worth copying. Drop a padding-only selection first, or it would
+        // intercept every following press too, then fall through exactly as an
+        // empty selection does so this press still reaches the PTY as 0x03.
+        if (this.terminal?.hasSelection?.()) {
+          this.terminal.clearSelection?.();
+          this.showToast('Nothing to copy', 'warning');
         }
         if (ev.shiftKey) {
           ev.preventDefault();
@@ -4141,12 +4152,51 @@ Object.assign(CodemanApp.prototype, {
     return !ev.altKey && (ev.key || '').toLowerCase() === 'c';
   },
 
+  /**
+   * xterm's current selection, cleaned for the clipboard. The transform itself
+   * is CodemanCopySelection.clean in constants.js, beside decideAutoCopy; this
+   * is the half that needs the live terminal.
+   *
+   * `text` is for the callers that already read the selection to decide whether
+   * to copy at all (the Ctrl+C gate and the right-click handler), so the read is
+   * not repeated. It must be the selection xterm holds RIGHT NOW, because the
+   * mid-row flag below comes from the live selection rather than from `text`.
+   *
+   * A COLUMN selection comes back untouched. Alt+drag makes one — xterm's
+   * shouldColumnSelect keys on altKey alone, and Codeman sets neither of the
+   * terminals it creates with the one option that would disable it — and a rectangle's whole point is that its rows line
+   * up, which both halves of the clean would destroy. xterm exposes the mode
+   * nowhere public, so this reads the private field the way this file already
+   * reads terminal._core for cell dimensions, and falls back to cleaning
+   * normally if a future xterm renames it. SelectionMode.COLUMN is 3.
+   */
+  cleanedTerminalSelection(text) {
+    const raw = text ?? (this.terminal?.hasSelection?.() ? this.terminal.getSelection() : '');
+    if (!raw) return '';
+    if (this.terminal?._core?._selectionService?._activeSelectionMode === 3) return raw;
+    const clean = window.CodemanCopySelection?.clean;
+    if (!clean) return raw;
+    const start = this.terminal?.getSelectionPosition?.()?.start;
+    return clean(raw, { startedMidRow: !!start && start.x > 0 });
+  },
+
   // Copy the current terminal selection. Goes through _copyText (Clipboard API,
   // then a hidden-textarea + execCommand fallback) because install.sh's LAN
   // option serves plain HTTP, where navigator.clipboard is undefined.
   async copyTerminalSelection(text) {
-    const selection = text ?? (this.terminal.hasSelection?.() ? this.terminal.getSelection() : '');
-    if (!selection) return false;
+    const selection = this.cleanedTerminalSelection(text);
+    // trim(), not emptiness: a multi-row drag across padding cleans to newlines
+    // alone, which are truthy, and a bare newline pasted into a chat composer
+    // or a shell submits the line. decideAutoCopy applies the same rule.
+    if (!selection.trim()) {
+      // Clearing matters as much as the toast. The Ctrl+C gate tests the RAW
+      // selection, so a padding-only selection left set would make every later
+      // Ctrl+C copy nothing instead of interrupting — the exact failure
+      // docs/architecture-invariants.md warns about under Terminal smart copy.
+      this.terminal?.clearSelection?.();
+      this.showToast('Nothing to copy', 'warning');
+      return false;
+    }
     const ok = await this._copyText(selection);
     if (ok) {
       // Clearing is what makes a second Ctrl+C an interrupt (and xterm already
@@ -4195,9 +4245,15 @@ Object.assign(CodemanApp.prototype, {
   async _flushAutoCopySelection() {
     const decide = window.CodemanAutoCopy?.decide;
     if (!decide || !this.terminal) return;
-    const text = this.terminal.hasSelection?.() ? this.terminal.getSelection() : '';
+    // The toggle is read FIRST because Auto Copy is off by default: reading and
+    // cleaning a selection that can run to the 50 000-row scrollback ceiling
+    // costs real time on a phone, and every mouseup would pay it for nothing.
+    // Cleaning before decide() then means its dedupe and size cap both measure
+    // the text that actually reaches the clipboard, not the padded rows behind.
+    const enabled = this._autoCopySelectionEnabled();
+    const text = enabled ? this.cleanedTerminalSelection() : '';
     const verdict = decide({
-      enabled: this._autoCopySelectionEnabled(),
+      enabled,
       text,
       lastCopied: this._autoCopyLastText,
       pending: !!this._autoCopyPending,

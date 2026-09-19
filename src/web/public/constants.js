@@ -806,6 +806,94 @@ function decideAutoCopy({ enabled, text, lastCopied, pending } = {}) {
   return 'copy';
 }
 
+// The text a copy should put on the clipboard, given xterm's raw selection.
+// Pure: the caller reads the selection and decides the mode, this transforms.
+//
+// xterm hands back whole screen ROWS, and its own trim only drops cells that
+// were never written to. A full-screen TUI writes real spaces across the part
+// of a row it is not using, so that padding counts as content and rides along
+// to the clipboard: measured against Claude Code in a 282-column pane, single
+// lines arrived carrying 138 trailing spaces. Native terminals trim it on copy
+// (Windows Terminal, iTerm2 and GNOME Terminal all do), decideAutoCopy above
+// already calls a wall of spaces "never what the gesture meant", and
+// _selectTouchSelectionLine already treats those cells as padding. This is that
+// same rule for the mouse and keyboard paths, which never had it.
+//
+// The leading run is the other half, and it applies ACROSS ROWS ONLY. A TUI
+// that indents its whole transcript repeats the indent on every row, so a
+// multi-row selection arrives with the chrome baked into each line; only the
+// run every selected row shares is removed, which is a no-op for shell output
+// and keeps the relative indentation of anything nested inside. A selection of
+// ONE row shares nothing with anything, so its leading spaces are content and
+// stay put — otherwise a single line of `git log` body text, or one line out of
+// `less`, would silently lose its indentation.
+//
+// ⚠ The trailing trim takes spaces AND tabs while the leading run counts spaces
+// only, so one tab-led row disables the strip for its whole block. Terminals
+// expand tabs into cells, so a tab should never reach either rule; the
+// asymmetry is deliberate caution rather than an oversight.
+//
+// ⚠ A WRAPPED logical line keeps its continuation indent. xterm appends a
+// wrapped row to the previous entry instead of starting a new line, so rows
+// 2..n of one wrapped line sit mid-string where no line rule can see them. That
+// is inherent to cleaning xterm's output rather than a gap to fix here.
+function cleanCopiedSelection(text, { startedMidRow = false } = {}) {
+  if (typeof text !== 'string' || !text) return '';
+  // Split on \n and leave any \r in place: xterm joins rows with \r\n on
+  // Windows, and the clipboard should keep the endings xterm chose.
+  // Scanned rather than matched, throughout. A selection can run to the 50 000-row
+  // scrollback ceiling, and `/[ \t]+(\r?)$/` is QUADRATIC on a line whose spaces
+  // are followed by any non-space character, which is what right-aligned or
+  // centred TUI content looks like: the engine retries the run from every
+  // whitespace position and backtracks over it. Measured over 50 000 rows with a
+  // 280-column run, that regex took 2.9s against 1.3ms for the scan below, and a
+  // 2 000-column run took 16s. It is also the faster of the two on an ordinary
+  // padded row. A length is returned rather than a trimmed string so a
+  // \r-terminated line costs no substring either.
+  const trimEnd = (line) => {
+    let end = line.length;
+    if (end > 0 && line[end - 1] === '\r') end--;
+    let cut = end;
+    while (cut > 0 && (line[cut - 1] === ' ' || line[cut - 1] === '\t')) cut--;
+    return cut === end ? line : line.slice(0, cut) + line.slice(end);
+  };
+  const lines = text.split('\n').map(trimEnd);
+  const bareLen = (line) => (line.endsWith('\r') ? line.length - 1 : line.length);
+  const leadingRun = (line) => {
+    let n = 0;
+    while (n < line.length && line[n] === ' ') n++;
+    return n;
+  };
+
+  // ⚠ Counted over EVERY line, including a partial first line the loop below
+  // skips. A mid-row drag across two rows therefore measures one row and strips
+  // it. That is deliberate: both rows of a wrapped paragraph wear the TUI's
+  // margin, and the drag only hid the first one's. The cost is that a two-row
+  // mid-row drag over genuinely indented content loses that indent.
+  let contentRows = 0;
+  for (const line of lines) if (bareLen(line)) contentRows++;
+  if (contentRows < 2) return lines.join('\n');
+
+  // startedMidRow keeps the first line out of the measurement. A drag that
+  // begins inside a row gives a first line with no leading run at all, which
+  // would otherwise pin the shared run to zero and leave every row after it
+  // still wearing the indent. That partial line is never stripped either.
+  let shared = Infinity;
+  for (let i = startedMidRow ? 1 : 0; i < lines.length; i++) {
+    // A row left blank by the trailing trim says nothing about the indent, and
+    // counting it as zero would disable the strip for the whole block.
+    if (!bareLen(lines[i])) continue;
+    shared = Math.min(shared, leadingRun(lines[i]));
+    if (shared === 0) break;
+  }
+  if (!shared || shared === Infinity) return lines.join('\n');
+  // The clamp is what keeps a blank row's lone \r intact when the shared run is
+  // wider than that row is long.
+  return lines
+    .map((line, i) => (startedMidRow && i === 0 ? line : line.slice(Math.min(shared, leadingRun(line)))))
+    .join('\n');
+}
+
 if (typeof window !== 'undefined') {
   window.WEBGL_FALLBACK = WEBGL_FALLBACK;
   window.evaluateWebGLLongTaskTrip = evaluateWebGLLongTaskTrip;
@@ -853,6 +941,9 @@ if (typeof window !== 'undefined') {
   window.CodemanAutoCopy = {
     decide: decideAutoCopy,
     MAX_CHARS: AUTO_COPY_MAX_CHARS,
+  };
+  window.CodemanCopySelection = {
+    clean: cleanCopiedSelection,
   };
   window.CodemanTerminalFont = {
     DEFAULT_STACK: TERMINAL_FONT_DEFAULT_STACK,
