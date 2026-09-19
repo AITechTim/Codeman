@@ -83,7 +83,9 @@ describe('terminal-split.js _onSessionDeleted wrapper (I6)', () => {
     expect(app.closeSplitPane).toHaveBeenCalledTimes(1);
     // Pinned ordering: selectSession must receive the id _splitSessionId held
     // BEFORE closeSplitPane ran (which nulls it), not whatever it holds after.
-    expect(app.selectSession).toHaveBeenCalledWith('session-b');
+    // { auto: true } because this is an app-driven promotion, not the user
+    // clicking a tab — it must not spend the promoted session's idle alert.
+    expect(app.selectSession).toHaveBeenCalledWith('session-b', { auto: true });
     expect(app.__originalDeletedCalls).toEqual([{ id: 'session-a' }]);
   });
 

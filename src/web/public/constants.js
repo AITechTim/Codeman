@@ -1526,10 +1526,16 @@ function clampDividerPercent(rawPercent, min = 20, max = 80) {
   return rawPercent;
 }
 
-function buildSplitPickerSessions(sessions, sessionOrder, excludeId) {
+function buildSplitPickerSessions(sessions, sessionOrder, excludeId, detachedIds) {
   const result = [];
   for (const id of sessionOrder) {
     if (id === excludeId) continue;
+    // A detached (popped-out) session's own window already yields its PTY
+    // size (see sendResize's detachedElsewhere guard in terminal-ui.js) —
+    // Pane B's SplitTerminalPane._sendResize() has no such check, so letting
+    // one into the picker put its detached window and Pane B in a fight over
+    // the same PTY's dimensions.
+    if (detachedIds?.has?.(id)) continue;
     const session = sessions.get(id);
     if (!session) continue;
     result.push({ id, label: session.name || 'Session' });

@@ -99,9 +99,15 @@
       // closed socket per the WebSocket spec (no exception, no log). No
       // reconnect logic here — Pane B is deliberately plainer than the
       // primary pane (see the fileoverview above); a drop just stops
-      // resizing until the parent recreates the pane.
+      // resizing until the parent recreates the pane. But onData already
+      // silently drops keystrokes while _wsReady is false (below), so
+      // without a visible marker a dropped socket left Pane B looking
+      // normal while it quietly ate everything typed into it. v1 scope is
+      // "say so", not reconnect — collapsing the split would lose the
+      // user's place in Pane B's scrollback for a transient blip.
       this.ws.onclose = () => {
         this._wsReady = false;
+        this.terminal?.write('\r\n\x1b[2m[Pane B disconnected — close and reopen the split to reconnect]\x1b[0m\r\n');
       };
 
       this.ws.onerror = () => {
@@ -163,7 +169,8 @@ Object.assign(CodemanApp.prototype, {
     const candidates = window.CodemanSplitPane.buildSplitPickerSessions(
       this.sessions,
       this.sessionOrder,
-      this.activeSessionId
+      this.activeSessionId,
+      this.detachedSessions
     );
     // Route a pre-existing menu through the SAME dismiss path used
     // everywhere else, instead of a raw `.remove()`: a genuinely still-open
@@ -240,6 +247,11 @@ Object.assign(CodemanApp.prototype, {
   },
 
   openSplitPane(sessionId) {
+    // No active session means there is no `.terminal-wrap` to split against
+    // (the welcome overlay is showing) — without this, a split opened from
+    // the home screen still created the container and connected Pane B, just
+    // behind the opaque overlay with nothing visible to show for it.
+    if (!this.activeSessionId) return;
     // A stale picker click (opened before switching tabs) or clicking Pane
     // B's own session tab while split can otherwise land here with
     // sessionId === activeSessionId: two live WebSockets to the same
@@ -314,6 +326,12 @@ Object.assign(CodemanApp.prototype, {
     const onMove = (e) => {
       if (!dragging) return;
       const container = divider.parentElement;
+      // The split can auto-collapse mid-drag (the other pane's session
+      // ending, or the picker's own close button) — closeSplitPane() removes
+      // `.terminal-split-container` from the DOM, which detaches `divider`
+      // too, so `divider.parentElement` is null on the very next mousemove
+      // and every drag threw here until mouseup finally removed the listener.
+      if (!container) return;
       const rect = container.getBoundingClientRect();
       const rawPercent = ((e.clientX - rect.left) / rect.width) * 100;
       const percent = window.CodemanSplitPane.clampDividerPercent(rawPercent);
@@ -356,10 +374,14 @@ CodemanApp.prototype._onSessionDeleted = function (data) {
     this.closeSplitPane();
   } else if (this._splitPane && this.activeSessionId === data.id) {
     // Pane A's session ended: promote Pane B by closing the split and
-    // selecting its session as the new (single) active pane.
+    // selecting its session as the new (single) active pane. This is an
+    // app-driven selection, not the user clicking a tab, so it must not
+    // spend the promoted session's idle alert (see the Approvals Inbox
+    // acknowledgement rule in CLAUDE.md — only a human opening a session
+    // acknowledges it).
     const promoted = this._splitSessionId;
     this.closeSplitPane();
-    if (promoted) this.selectSession(promoted);
+    if (promoted) this.selectSession(promoted, { auto: true });
   }
   return _originalOnSessionDeleted.call(this, data);
 };
