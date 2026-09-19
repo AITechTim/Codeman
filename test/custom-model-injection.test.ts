@@ -58,6 +58,43 @@ describe('buildCustomModelInjection', () => {
     });
   });
 
+  it('claude: also declares configDirVar (CLAUDE_CONFIG_DIR isolation) on the env-kind result', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.configDirVar).toBe('CLAUDE_CONFIG_DIR');
+  });
+
+  it('claude: injects CLAUDE_CODE_MAX_CONTEXT_TOKENS when a context length is known', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3', 16384);
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.envOverrides.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBe('16384');
+  });
+
+  it('claude: omits CLAUDE_CODE_MAX_CONTEXT_TOKENS when the context length is unknown', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.envOverrides.CLAUDE_CODE_MAX_CONTEXT_TOKENS).toBeUndefined();
+  });
+
+  it('claude: also declares apiKeyTrustFile, carrying the literal apiKey used', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.apiKeyTrustFile).toEqual({ relPath: '.claude.json', shape: 'claude-api-key-responses' });
+    expect(result.apiKey).toBe('my-key');
+  });
+
+  it('claude: also declares skipFirstRunPrompts on the env-kind result', () => {
+    const result = buildCustomModelInjection(entryOrThrow('claude'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.skipFirstRunPrompts).toBe(true);
+  });
+
+  it('opencode: has no skipFirstRunPrompts (no apiKeyTrustFile/configDirVar concept for it either)', () => {
+    const result = buildCustomModelInjection(entryOrThrow('opencode'), endpoint, 'qwen3');
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.skipFirstRunPrompts).toBeUndefined();
+  });
+
   it('claude: falls back to a dummy key when the endpoint has none', () => {
     const result = buildCustomModelInjection(entryOrThrow('claude'), { ...endpoint, apiKey: undefined }, 'qwen3');
     if (result.kind !== 'env') throw new Error('unreachable');
@@ -142,13 +179,29 @@ describe('buildCustomModelInjection', () => {
     expect(result.extraEnv).toEqual({ XAI_API_KEY: 'my-key' });
   });
 
-  it('deepseek: env kind sets base URL/key only, no model var', () => {
+  it('deepseek: env kind sets base URL (with a /v1 suffix appended) and key, no model var', () => {
+    // appendV1Suffix is REQUIRED here, not cosmetic: confirmed by reading dsh's own
+    // bundled source (@deepseek-ai/dsh-llm-deepseek) that it builds the request URL as
+    // `${DEEPSEEK_BASE_URL}/chat/completions` with no "/v1" of its own, while
+    // llama-swap/llama.cpp only serves "/v1/chat/completions" — without this, every
+    // request 404s (confirmed live; this is the fix for the originally-reported
+    // "dsh: HTTP_404: DeepSeek API error (HTTP 404)").
     const result = buildCustomModelInjection(entryOrThrow('deepseek'), endpoint, 'qwen3');
     if (result.kind !== 'env') throw new Error('unreachable');
     expect(result.envOverrides).toEqual({
-      DEEPSEEK_BASE_URL: 'http://192.168.1.50:8080',
+      DEEPSEEK_BASE_URL: 'http://192.168.1.50:8080/v1',
       DEEPSEEK_API_KEY: 'my-key',
     });
+  });
+
+  it('deepseek: appending the /v1 suffix is idempotent against a baseUrl that already ends in /v1', () => {
+    const result = buildCustomModelInjection(
+      entryOrThrow('deepseek'),
+      { ...endpoint, baseUrl: 'http://192.168.1.50:8080/v1' },
+      'qwen3'
+    );
+    if (result.kind !== 'env') throw new Error('unreachable');
+    expect(result.envOverrides.DEEPSEEK_BASE_URL).toBe('http://192.168.1.50:8080/v1');
   });
 
   it('antigravity: unsupported', () => {

@@ -582,6 +582,105 @@ All four enforce session ownership in multi-user mode; a foreign session id
 answers `404 NOT_FOUND` (no existence leak), and profiles of two owners of the
 same directory are distinct by construction.
 
+## Custom Model Endpoints
+
+Points a session's harness at a user-configured OpenAI-compatible endpoint —
+local (llama.cpp, vLLM, DGX Spark) or cloud (Azure AI Foundry, OpenRouter) —
+instead of its native cloud backend, gated by the opt-in
+`customModelEndpointsEnabled` setting (default OFF). Endpoints are
+machine-level infra, like remote/docker hosts: writes are admin-only in
+multi-user mode. Design: [`custom-model-endpoints-plan.md`](custom-model-endpoints-plan.md);
+user guide: [`custom-model-endpoints.md`](custom-model-endpoints.md).
+
+- `GET /api/v1/model-endpoints` -> `CustomModelHost[]`, an unwrapped bare
+  array like every other list route (still riding the standard `{success,
+data}` envelope on the wire — unwrap it the same way). Answers `[]` for a
+  non-admin in multi-user mode. `apiKey` is never returned; `apiKeySet:
+boolean` reports whether one is stored, so a client can render "unchanged
+  if left blank" without ever holding the real value.
+- `POST /api/v1/model-endpoints` with `{ id, label, baseUrl, apiKey?,
+authStyle?, defaultModelId? }` creates one. `id` must match
+  `^[a-zA-Z0-9_-]+$`; `authStyle` is `bearer` (default) or `api-key`, never
+  both (a real server hung indefinitely when sent both headers on one
+  request); `baseUrl` must be `http(s)`, carry no embedded credentials, and
+  is refused if it points at (or resolves to) a link-local or
+  cloud-metadata address. `409 ALREADY_EXISTS` on a duplicate id.
+- `PUT /api/v1/model-endpoints/:id` updates one. An **absent** `apiKey`
+  keeps the stored one rather than clearing it — the client never receives
+  the real value to resend deliberately unchanged, so omission is the only
+  way to say "leave it alone"; there is no way to clear a key back to unset
+  this way. `defaultModelId`, when set, must be one of that endpoint's own
+  `models` (`400 INVALID_INPUT` otherwise).
+- `DELETE /api/v1/model-endpoints/:id` removes one.
+- `POST /api/v1/model-endpoints/:id/discover-models` fetches the endpoint's
+  own `GET /v1/models` and stores the result as `models`, updating
+  `lastDiscoveredAt`, plus (best-effort, only for a model llama-swap's own
+  response already reports loaded) `modelContextLengths` and `modelSizesGB`.
+  A `defaultModelId` that no longer appears in the fresh list is dropped
+  rather than carried forward invalid. Failures answer `422 OPERATION_FAILED`
+  with the underlying connection error, or a named egress refusal if the
+  resolved address turned out to be blocked. The same refresh also runs
+  automatically for every saved endpoint every 5 minutes in the background
+  (`refreshAllCustomModelHosts()`, `custom-model-routes.ts`, started from
+  `server.ts`), so there is no route for triggering "refresh all" — one
+  endpoint being unreachable on a cycle never blocks the others.
+- `GET /api/v1/model-endpoints/:id/running-status` -> `{ isLlamaSwap,
+running: [{model, state, cmd?}], logLine? }`, read-only, no admin gate
+  (any session owner who could already point a session at this endpoint can
+  equally ask what it currently has loaded). `isLlamaSwap` is
+  feature-detected via the endpoint's own `GET /running` — a plain
+  llama.cpp/OpenAI-compatible server has none and always answers `false`.
+  `logLine`, present only when `isLlamaSwap` is true, is the most recent
+  REAL backend `llama-server` process log line (`load_model: ...`,
+  `llama_server: model loaded`, etc.), sourced from the endpoint's own
+  `GET /api/events` SSE stream and filtered to `source: "upstream"` frames
+  only (never llama-swap's own `source: "proxy"` request-access log) — one
+  connection is held open per endpoint and reused across every poller,
+  idle-closed after 30s of nobody asking. This is what the Run-menu
+  picker's loading banner polls once a second while a model is loading.
+- `POST /api/v1/sessions/:id/custom-model` with `{ endpointId, modelId,
+confirmed? } | { clear: true }` applies (or clears) the session's
+  selection and **restarts the session's CLI process in place** — every
+  supported harness reads its endpoint config at process start, never per
+  turn, so there is no live hot-swap. (`POST /api/v1/quick-start`'s own
+  `customModel: { endpointId, modelId, confirmed? }` field is the
+  no-restart equivalent for a session that doesn't exist yet — see below.)
+  A Claude session resumes its existing conversation across the restart;
+  pi/omp/grok additionally get a forced `--model`/`-m` value, since for
+  those three the config file alone does not select it. `400 INVALID_INPUT`
+  for a remote (SSH) or Docker session — both restart their agent
+  differently under the hood, and applying to one would report success
+  while changing nothing. Two more responses replace the normal
+  `{customModel, restarted}` shape, neither an error — both require
+  retrying the same call with `confirmed: true` to proceed anyway, and
+  neither restarts or creates anything on the first ask:
+  - `{requiresConfirmation: true, currentlyLoadedModel, affectedSessions}` —
+    llama.cpp/llama-swap only runs one model at a time, and switching would
+    unload a model another **live session's own selection** is actively
+    using. Never returned for a plain (non-llama-swap) server, and never
+    just because a swap is needed at all — only when it would disrupt
+    someone else.
+  - `{requiresContextWarning: true, modelId, contextLength,
+minSafeContextTokens}` — Claude Code's own fixed per-turn overhead
+    (system prompt + tool schemas) can exceed a small model's entire
+    discovered context on its own, before any conversation history exists
+    to compact, guaranteeing the very first message fails regardless of
+    `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Gated on the CLI registry declaring a
+    `contextLengthVar` (claude only today), so it never fires for another
+    harness.
+- `POST /api/v1/quick-start`'s `customModel: { endpointId, modelId,
+confirmed? }` field (alongside its normal `caseName`/`mode`/etc. body)
+  computes the same injection **before** the session exists and launches
+  directly on the endpoint — no restart, because there was never a
+  native-backend boot to restart away from. Runs the identical checks as
+  the dedicated route above (`requiresConfirmation`/`requiresContextWarning`,
+  same shapes, same `confirmed: true` retry), and is refused the same way
+  for a remote or Docker case. This is what the Run-menu picker uses for
+  opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP; Claude still uses the
+  dedicated restart route above (its `--resume`-based restart is far less
+  jarring than a full relaunch, and folding it into the one-shot path is
+  separate work — see `docs/custom-model-endpoints-plan.md`).
+
 ## Voice dictation
 
 Browser dictation transcribed through this server's Claude Code login, i.e. the

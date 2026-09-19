@@ -340,6 +340,35 @@ const capabilitiesSchema = z
           // an env var, so it declares baseUrl/apiKey injection with no model var at all.
           modelVars: z.array(envName).max(8),
           launchModel: launchModelTemplate,
+          // Optional: the env var to carry a discovered per-model context-window size
+          // (claude's CLAUDE_CODE_MAX_CONTEXT_TOKENS), and/or the env var that isolates
+          // this session's config/credential directory from the user's real one (claude's
+          // CLAUDE_CONFIG_DIR) so an injected API key never collides with a stored OAuth
+          // session. See the customModelInjection doc comment in cli-registry/types.ts.
+          contextLengthVar: envName.optional(),
+          configDirVar: envName.optional(),
+          // Relative path, WITHIN the isolated configDirVar directory, of a trust-dialog
+          // seed file the CLI itself owns the shape of — claude's `.claude.json`
+          // `customApiKeyResponses.approved` list, the same field an interactive "Detected
+          // a custom API key — use it?" prompt writes to on a real terminal. Only makes
+          // sense alongside configDirVar (an isolated, otherwise-empty directory has none
+          // of a real profile's prior approvals), and only implemented for the
+          // 'claude-api-key-responses' shape today — see custom-model-injection-apply.ts.
+          apiKeyTrustFile: z
+            .object({ relPath: z.string().min(1).max(80), shape: z.literal('claude-api-key-responses') })
+            .strict()
+            .optional(),
+          // An isolated config directory replays the CLI's whole first-run sequence (theme
+          // picker, security notes, per-project trust dialog, bypass-permissions warning)
+          // on every launch, same root cause as apiKeyTrustFile above — this reuses that
+          // same file to pre-seed the state a real, already-onboarded profile carries. See
+          // the customModelInjection doc comment in cli-registry/types.ts.
+          skipFirstRunPrompts: z.boolean().optional(),
+          // DeepSeek-only, confirmed by reading its own bundled SDK source: it concatenates
+          // "/chat/completions" onto baseUrlVar's value with no "/v1" of its own, while
+          // llama-swap/llama.cpp only serves the "/v1/..." path — claude/gemini must NOT
+          // get this. See the customModelInjection doc comment in cli-registry/types.ts.
+          appendV1Suffix: z.boolean().optional(),
         })
         .strict(),
       z

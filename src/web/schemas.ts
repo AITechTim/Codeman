@@ -1064,6 +1064,25 @@ export const QuickStartSchema = z.object({
    * because it takes an existing `workingDir` and so never creates a directory to label.
    */
   agentOrigin: z.string().max(64).optional(),
+  /**
+   * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): launches directly
+   * on this saved endpoint/model instead of the mode's native backend, computed server-side
+   * from the admin-configured endpoint store the same way `POST /api/sessions/:id/custom-
+   * model` does — never trusting raw env values from the client. One-shot, launch-time
+   * equivalent of that route: no restart, so no visible relaunch (that route's restart-in-
+   * place is still what an ALREADY-RUNNING session uses to switch later). Rejected for
+   * remote/docker cases, same reasoning as `envOverrides` above. `confirmed` mirrors that
+   * route's field: skips the llama-swap "this will unload it for another session" check on
+   * a deliberate retry.
+   */
+  customModel: z
+    .object({
+      endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+      modelId: z.string().min(1).max(200),
+      confirmed: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
 });
 
 // ========== Hook Events ==========
@@ -1963,6 +1982,17 @@ export const CustomModelHostSchema = z.object({
   authStyle: z.enum(['bearer', 'api-key']).optional(),
   models: z.array(z.string().max(200)).max(200).optional(),
   lastDiscoveredAt: z.string().max(64).optional(),
+  // The Run-menu picker's per-endpoint default; validated against `models` at the
+  // route layer (schema-level cross-field checks can't see the array narrowed the
+  // same way a `.refine()` closure could, and the route already re-reads the stored
+  // host to apply it, so the check belongs there once, not duplicated into a refine
+  // that would run on every unrelated field edit too).
+  defaultModelId: z.string().max(200).optional(),
+  // Server-populated by discovery (custom-model-routes.ts); accepted here only so a client
+  // round-tripping the GET response back through PUT (edit-save) doesn't drop it.
+  modelContextLengths: z.record(z.string().max(200), z.number().int().positive().max(100_000_000)).optional(),
+  // Same reasoning as modelContextLengths above.
+  modelSizesGB: z.record(z.string().max(200), z.number().positive().max(100_000)).optional(),
 });
 
 /** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */
@@ -1970,6 +2000,10 @@ export const CustomModelSelectionSchema = z.union([
   z.object({
     endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
     modelId: z.string().min(1).max(200),
+    // Set once the caller has already shown the "this will unload <model> for session(s)
+    // X" warning (see session-routes.ts's llama-swap conflict check) and the user chose to
+    // proceed anyway — skips that check on this call instead of asking again.
+    confirmed: z.boolean().optional(),
   }),
   z.object({ clear: z.literal(true) }),
 ]);

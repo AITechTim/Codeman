@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
   ApiErrorCode,
@@ -57,6 +57,12 @@ import {
 } from '../schemas.js';
 import { readCustomModelHosts } from '../../custom-model-hosts.js';
 import { applyCustomModelInjection, removeConfigDir } from '../../custom-model-injection-apply.js';
+import {
+  getLlamaSwapStatus,
+  triggerLlamaSwapLoad,
+  exceedsSafeContextFloor,
+  CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+} from './custom-model-routes.js';
 import { matchesPattern } from '../../config/cli-registry/patterns.js';
 import { ownerLayoutKey } from '../../tab-layout-persistence.js';
 import { TabLayoutValidationError } from '../../tab-layout.js';
@@ -1232,13 +1238,78 @@ export function registerSessionRoutes(
     if (!endpoint) {
       return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
     }
+    const contextLength = endpoint.modelContextLengths?.[body.modelId];
+
+    // Some CLIs (today: only claude) carry enough of their own fixed system-prompt/tool-
+    // schema overhead that a small enough real context guarantees a first-message failure
+    // no matter what CLAUDE_CODE_MAX_CONTEXT_TOKENS says — confirmed live at ~36.4K tokens
+    // against a model configured with a real 16384-token context. Warn before committing
+    // to a restart that's certain to fail, rather than letting the user discover it via a
+    // cryptic 400 from the CLI itself. `confirmed` (already used for the swap-conflict
+    // warning below) skips this too — the user has already said "launch anyway" once.
+    if (!body.confirmed && exceedsSafeContextFloor(entry, contextLength)) {
+      return {
+        requiresContextWarning: true,
+        modelId: body.modelId,
+        contextLength,
+        minSafeContextTokens: CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+      };
+    }
+
+    // llama.cpp runs exactly one model at a time; llama-swap unloads and reloads it on
+    // demand, which can take anywhere from a few seconds to over a minute — long enough
+    // that a session mid-swap looks indistinguishable from one that never left the native
+    // backend. Feature-detected via llama-swap's own `GET /running` (a plain llama.cpp
+    // server has no such endpoint and reads as `isLlamaSwap: false` — nothing to check).
+    const swapStatus = await getLlamaSwapStatus(endpoint);
+    const currentlyLoaded = swapStatus.running.find((r) => r.state === 'ready')?.model ?? swapStatus.running[0]?.model;
+    // Distinct from targetReady below: this is ONLY about whether proceeding would evict a
+    // model another session is actively using — true even if nothing is loaded at all yet
+    // would be wrong here (nothing to evict), so this stays narrowly "a DIFFERENT model is
+    // currently ready".
+    const swapNeeded = swapStatus.isLlamaSwap && !!currentlyLoaded && currentlyLoaded !== body.modelId;
+    // Whether the TARGET model itself is already the one loaded and ready — false whether
+    // nothing is loaded yet, a different model is loaded, or this one is loaded but still
+    // mid-load. Drives both the actual load trigger below and modelSwapInProgress in the
+    // response; deliberately broader than swapNeeded, which only gates the confirmation ask.
+    const targetReady = swapStatus.running.some((r) => r.model === body.modelId && r.state === 'ready');
+
+    // Only ask when switching would actually take the model away from another session
+    // that is currently using it — never just because a swap is needed at all. `confirmed`
+    // (set by the caller after showing that warning once) skips asking again.
+    if (swapNeeded && !body.confirmed) {
+      const conflicting = [...ctx.sessions.values()].filter(
+        (s) =>
+          s.id !== session.id && s.customModel?.endpointId === endpoint.id && s.customModel?.modelId === currentlyLoaded
+      );
+      if (conflicting.length > 0) {
+        // Applying a custom model is ungated for any session owner, so in multi-user
+        // mode a non-admin pointing their own session at a shared endpoint must not
+        // learn another user's session names in the confirm dialog — with
+        // autoNameSessions on, those names are that user's own prompts. The swap is
+        // still blocked pending confirmation regardless of ownership (a foreign
+        // session is just as real a disruption); only which ones get NAMED is scoped.
+        const requestUser = getAuthUser(req);
+        const affectedSessions = conflicting
+          .filter((s) => canAccessOwned(requestUser, s.owner))
+          .map((s) => ({ id: s.id, name: s.name }));
+        return { requiresConfirmation: true, currentlyLoadedModel: currentlyLoaded, affectedSessions };
+      }
+    }
 
     // A CLI whose config alone cannot select the model also gets its `model` launch param
     // forced (pi/omp `custom/<id>`, grok's block name). The argv engine DROPS a token that
     // fails its pattern rather than quoting it, which would silently launch the CLI on its
     // own default provider again, so refuse an id the pattern cannot carry up front.
     const modelSpec = entry.launch.params.model;
-    const applied = applyCustomModelInjection(entry, endpoint, body.modelId, session.id);
+    const applied = applyCustomModelInjection(
+      entry,
+      endpoint,
+      body.modelId,
+      session.id,
+      contextLength,
+      session.workingDir
+    );
     if (!applied) {
       return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${session.mode} has no known custom-model mechanism`);
     }
@@ -1271,9 +1342,17 @@ export function registerSessionRoutes(
       removeConfigDir(previousConfigDir);
     }
 
+    // Actually kick off llama-swap's load now, rather than waiting on the restarted CLI's
+    // own first prompt to do it — confirmed live that applying a selection alone never
+    // reached the llama-swap server at all (nothing in its own logs), since llama-swap has
+    // no "switch model" admin call, only a real inference request naming the model.
+    if (swapStatus.isLlamaSwap && !targetReady) {
+      triggerLlamaSwapLoad(endpoint, body.modelId);
+    }
+
     const restarted = await session.restartCli();
     persistAndBroadcastSession(ctx, session);
-    return { customModel: session.customModel, restarted };
+    return { customModel: session.customModel, restarted, modelSwapInProgress: swapStatus.isLlamaSwap && !targetReady };
   });
 
   // ========== Delete Session ==========
@@ -3252,6 +3331,7 @@ export function registerSessionRoutes(
       effort,
       parentSessionId,
       agentOrigin,
+      customModel,
     } = parseBody(QuickStartSchema, req.body);
 
     // Resolved ONCE here: the same value labels a case directory this request creates
@@ -3304,11 +3384,12 @@ export function registerSessionRoutes(
         grokConfig ||
         deepSeekConfig ||
         ompConfig ||
-        openCodeConfig
+        openCodeConfig ||
+        customModel
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, modelOverride, and per-CLI config are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
+          'envOverrides, effort, modelOverride, per-CLI config, and custom model endpoints are not supported for remote cases (they do not cross ssh). Configure the remote command via the host command override instead.'
         );
       }
 
@@ -3372,11 +3453,12 @@ export function registerSessionRoutes(
         grokConfig ||
         deepSeekConfig ||
         ompConfig ||
-        openCodeConfig
+        openCodeConfig ||
+        customModel
       ) {
         return createErrorResponse(
           ApiErrorCode.INVALID_INPUT,
-          'envOverrides, effort, and per-CLI config are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
+          'envOverrides, effort, per-CLI config, and custom model endpoints are not supported for docker cases (they do not cross into the container). Configure the container via the docker host command override instead.'
         );
       }
 
@@ -3664,7 +3746,148 @@ export function registerSessionRoutes(
     );
     const qsTerminalHistoryConfig = await ctx.getTerminalHistoryConfig();
     const qsGatedEnvOverrides = await clampEnvOverridesForOwner(owner, envOverrides);
-    const session = new Session({
+    const qsResolvedOmpConfig = resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig);
+
+    // Custom Model Endpoint Profiles, applied AT CREATE TIME (docs/custom-model-endpoints-plan.md)
+    // rather than via the dedicated restart-in-place route (POST /api/sessions/:id/custom-
+    // model, still what an ALREADY-RUNNING session uses to switch later): computing the
+    // injection before the process exists and launching directly on it avoids the visible
+    // native-boot-then-restart the restart-after-launch design otherwise shows on every
+    // custom-model run — most jarring on a CLI like Codex whose TUI fully reinitializes.
+    // Mirrors the dedicated route's own checks (llama-swap conflict, unsupported CLI,
+    // unknown endpoint, a model id the CLI's argv pattern can't carry) rather than trusting
+    // a lighter version of them, since this is the same server-side authority reached a
+    // different way, not a separate, less-checked path.
+    let qsCustomModelEnvOverrides = qsGatedEnvOverrides;
+    // Only the INJECTED keys (never the caller's envOverrides merged in) — this is what
+    // setCustomModel() bookkeeping must be given below. The Session constructor already
+    // applies qsCustomModelEnvOverrides (the full merged set) directly; re-merging that
+    // full set into setCustomModel() would put CLAUDE_CODE_EFFORT_LEVEL back after the
+    // constructor stripped it (see setCustomModel()'s own doc comment in session.ts).
+    let qsCustomModelAppliedEnvOverrides: Record<string, string> | undefined;
+    let qsCustomModelLaunchModel: string | undefined;
+    let qsCustomModelSessionId: string | undefined;
+    let qsCustomModelSwapInProgress = false;
+    let qsCustomModelBookkeeping:
+      | {
+          endpointId: string;
+          modelId: string;
+          label?: string;
+          envKeys: string[];
+          configDir?: string;
+          launchModel?: string;
+        }
+      | undefined;
+    if (customModel) {
+      const cmEntry = getCli(mode);
+      if (!cmEntry) return createErrorResponse(ApiErrorCode.INVALID_INPUT, `No CLI registry entry for mode ${mode}`);
+      if (cmEntry.capabilities.customModelInjection.kind === 'unsupported') {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
+      }
+      const cmHosts = await readCustomModelHosts(CODEMAN_CONFIG_DIR);
+      const cmEndpoint = cmHosts.find((h) => h.id === customModel.endpointId);
+      if (!cmEndpoint) return createErrorResponse(ApiErrorCode.NOT_FOUND, 'Model endpoint not found');
+      const cmContextLength = cmEndpoint.modelContextLengths?.[customModel.modelId];
+
+      // See the dedicated route's own comment for the full reasoning: some CLIs' own fixed
+      // overhead can exceed a small enough real context on the very first message,
+      // regardless of contextLengthVar. Warn before creating a session that's certain to
+      // fail immediately.
+      if (!customModel.confirmed && exceedsSafeContextFloor(cmEntry, cmContextLength)) {
+        return {
+          requiresContextWarning: true,
+          modelId: customModel.modelId,
+          contextLength: cmContextLength,
+          minSafeContextTokens: CLAUDE_MIN_SAFE_CONTEXT_TOKENS,
+        };
+      }
+
+      // See the dedicated route's own comment for the full reasoning: llama.cpp runs one
+      // model at a time, llama-swap swaps on demand, and switching away from what another
+      // live session is actively using deserves a warning, not a silent switch. There is no
+      // "self" to exclude from the affected-sessions scan here — this session doesn't exist
+      // yet.
+      const cmSwapStatus = await getLlamaSwapStatus(cmEndpoint);
+      const cmCurrentlyLoaded =
+        cmSwapStatus.running.find((r) => r.state === 'ready')?.model ?? cmSwapStatus.running[0]?.model;
+      const cmSwapNeeded = cmSwapStatus.isLlamaSwap && !!cmCurrentlyLoaded && cmCurrentlyLoaded !== customModel.modelId;
+      // Broader than cmSwapNeeded (which only gates the confirmation ask above): true
+      // whenever the TARGET model isn't already loaded and ready, including when nothing
+      // is loaded at all yet. Drives the actual load trigger below.
+      const cmTargetReady = cmSwapStatus.running.some((r) => r.model === customModel.modelId && r.state === 'ready');
+      qsCustomModelSwapInProgress = cmSwapStatus.isLlamaSwap && !cmTargetReady;
+      if (cmSwapNeeded && !customModel.confirmed) {
+        const cmConflicting = [...ctx.sessions.values()].filter(
+          (s) => s.customModel?.endpointId === cmEndpoint.id && s.customModel?.modelId === cmCurrentlyLoaded
+        );
+        if (cmConflicting.length > 0) {
+          // Same reasoning as the dedicated /custom-model route above: the swap is
+          // still blocked pending confirmation regardless of ownership, but a
+          // non-admin caller only learns the names of sessions they can access.
+          const cmRequestUser = getAuthUser(req);
+          const cmAffectedSessions = cmConflicting
+            .filter((s) => canAccessOwned(cmRequestUser, s.owner))
+            .map((s) => ({ id: s.id, name: s.name }));
+          return {
+            requiresConfirmation: true,
+            currentlyLoadedModel: cmCurrentlyLoaded,
+            affectedSessions: cmAffectedSessions,
+          };
+        }
+      }
+
+      // Minted ourselves (rather than left to Session's own default) so the injection
+      // below — and any configDir it writes — can target the REAL id the session launches
+      // with, not a placeholder: `new Session({ id: ... })` accepts an explicit id for
+      // exactly this reason.
+      qsCustomModelSessionId = randomUUID();
+      const cmApplied = applyCustomModelInjection(
+        cmEntry,
+        cmEndpoint,
+        customModel.modelId,
+        qsCustomModelSessionId,
+        cmContextLength,
+        resolvedCasePath
+      );
+      if (!cmApplied) {
+        return createErrorResponse(ApiErrorCode.OPERATION_FAILED, `${mode} has no known custom-model mechanism`);
+      }
+      const cmModelSpec = cmEntry.launch.params.model;
+      if (
+        cmApplied.launchModel !== undefined &&
+        cmModelSpec?.type === 'token' &&
+        !matchesPattern(cmModelSpec.pattern, cmApplied.launchModel)
+      ) {
+        removeConfigDir(cmApplied.configDir);
+        return createErrorResponse(
+          ApiErrorCode.INVALID_INPUT,
+          `Model id ${JSON.stringify(customModel.modelId)} cannot be passed to ${mode} on its command line`
+        );
+      }
+
+      qsCustomModelEnvOverrides = { ...qsGatedEnvOverrides, ...cmApplied.envOverrides };
+      qsCustomModelAppliedEnvOverrides = cmApplied.envOverrides;
+      qsCustomModelLaunchModel = cmApplied.launchModel;
+      qsCustomModelBookkeeping = {
+        endpointId: cmEndpoint.id,
+        modelId: customModel.modelId,
+        label: cmEndpoint.label,
+        envKeys: cmApplied.envKeys,
+        configDir: cmApplied.configDir,
+        launchModel: cmApplied.launchModel,
+      };
+
+      // Actually kick off llama-swap's load now — see the dedicated apply route's own
+      // comment on triggerLlamaSwapLoad for why this can't just wait on the launched CLI's
+      // first prompt. Fired here, before the session is even created, so the load starts
+      // concurrently with Claude/Codex/etc. booting rather than after.
+      if (qsCustomModelSwapInProgress) {
+        triggerLlamaSwapLoad(cmEndpoint, customModel.modelId);
+      }
+    }
+
+    const qsSessionOptions: ConstructorParameters<typeof Session>[0] = {
+      id: qsCustomModelSessionId,
       workingDir: resolvedCasePath,
       name: sessionName ? sessionName.slice(0, MAX_SESSION_NAME_LENGTH) : '',
       mux: ctx.mux,
@@ -3682,15 +3905,42 @@ export function registerSessionRoutes(
       piConfig: mode === 'pi' ? qsGatedPiConfig : undefined,
       grokConfig: mode === 'grok' ? qsGatedGrokConfig : undefined,
       deepSeekConfig: mode === 'deepseek' ? qsGatedDeepSeekConfig : undefined,
-      ompConfig: resolveOmpConfigForCreate(mode, resolvedCasePath, ompConfig),
-      envOverrides: qsGatedEnvOverrides,
+      ompConfig: qsResolvedOmpConfig,
+      envOverrides: qsCustomModelEnvOverrides,
       effort,
       remote,
       docker,
       resumeSessionId: dockerResumeId,
       tmuxHistoryLimit: qsTerminalHistoryConfig.tmuxHistoryLimit,
       parentSessionId: qsParentSessionId,
-    });
+    };
+    // Force the custom-model selection's launchModel (pi/omp `custom/<id>`, grok's
+    // `[model.<name>]` block name) onto whichever config field the registry says the
+    // CLI's `model` launch param lives in — mirrors Session._withCustomModelLaunchModel,
+    // which the restart-in-place path already uses, rather than a hardcoded per-CLI
+    // branch here that a CLI landing its injection recipe later would silently miss.
+    if (qsCustomModelLaunchModel !== undefined) {
+      const qsCustomModelField = getCli(mode)?.launch.legacyConfigField;
+      if (qsCustomModelField) {
+        const qsSessionOptionsBag = qsSessionOptions as unknown as Record<string, unknown>;
+        qsSessionOptionsBag[qsCustomModelField] = {
+          ...((qsSessionOptionsBag[qsCustomModelField] as Record<string, unknown>) ?? {}),
+          model: qsCustomModelLaunchModel,
+        };
+      } else {
+        qsSessionOptions.model = qsCustomModelLaunchModel;
+      }
+    }
+    const session = new Session(qsSessionOptions);
+
+    // Records the selection for session.customModel/getCustomModelForPersist() and future
+    // clear/switch calls — the actual env vars and launch-model config are already part of
+    // the launch above (constructor envOverrides, piConfig/grokConfig/ompConfig.model), so
+    // this is bookkeeping only, never a restart: setCustomModel() is synchronous state, no
+    // tmux IO of its own (see its own doc comment in session.ts).
+    if (qsCustomModelBookkeeping) {
+      session.setCustomModel(qsCustomModelBookkeeping, qsCustomModelAppliedEnvOverrides);
+    }
 
     // Auto-detect completion phrase from CLAUDE.md BEFORE broadcasting
     // so the initial state already has the phrase configured (only if globally enabled)
@@ -3786,6 +4036,7 @@ export function registerSessionRoutes(
         sessionId: session.id,
         casePath: resolvedCasePath,
         caseName,
+        ...(customModel ? { modelSwapInProgress: qsCustomModelSwapInProgress } : {}),
       };
     } catch (err) {
       // Clean up session on error to prevent orphaned resources

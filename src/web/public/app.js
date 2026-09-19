@@ -1720,6 +1720,25 @@ class CodemanApp {
         console.error('[SSE] docker container recreated:', err);
       }
     });
+    // Custom Model Endpoint Profiles: a session's own model got evicted on llama-swap by
+    // another session's activity, detected AFTER the fact by a periodic server sweep (there
+    // is no push notification from llama-swap itself) — see detectCustomModelSwapDisplacements
+    // in custom-model-routes.ts. Global toast rather than a per-tab indicator: the displaced
+    // session need not be the one currently open, and the whole point is telling the user
+    // BEFORE they type into it expecting the model they picked.
+    addListener(SSE_EVENTS.CUSTOM_MODEL_SWAPPED_OUT, (e) => {
+      try {
+        const d = e.data ? JSON.parse(e.data) : {};
+        this.showToast(
+          `${d.sessionName || d.sessionId}'s model (${d.previousModel}) was swapped out on llama-swap by another ` +
+            `session — currently loaded: ${d.currentlyLoadedModel}. Sending a message there will reload it.`,
+          'warning',
+          { duration: 0 }
+        );
+      } catch (err) {
+        console.error('[SSE] custom model swapped out:', err);
+      }
+    });
     // Multi-user admin: live-refresh whichever admin views (panel/Users tab) are open.
     addListener(SSE_EVENTS.ADMIN_USERS_CHANGED, () => {
       window.codemanAdmin?.onUsersChanged?.();
