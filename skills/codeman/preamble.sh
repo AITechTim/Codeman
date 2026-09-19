@@ -209,11 +209,12 @@ spawn_workers() {
 # Code 2.1.277+ ignores it outright for the first 30-50 s after the composer paints),
 # leaving the typed prompt stranded on the composer while a long wait runs its whole
 # timeout (observed live, twelve reviews in a row). So the first wait is short; on its
-# timeout the composer is READ (_composer_text), and while the prompt is still sitting
-# there a bare \r goes out and a short re-wait follows, up to twelve times ten seconds
-# apart. Each re-wait resends the ORIGINAL frame unchanged, which the server takes as a
-# tagged duplicate: it re-waits without retyping (§5.3). An empty composer ends the
-# loop, so a prompt that was taken is never nudged again. Trustworthy for a worker
+# timeout the ORIGINAL frame is resent unchanged as a long re-wait (a tagged duplicate:
+# the server re-waits without retyping, §5.3) and kept open in the background, while
+# the composer is READ (_composer_text) and, as long as the prompt is still sitting
+# there, a bare \r goes out about every ten seconds, up to twelve times. An empty
+# composer ends the loop, so a prompt that was taken is never nudged again, and the
+# wait that was open the whole time is what reports the turn's end. Trustworthy for a worker
 # spawn_worker handed back -- claude (hooks vetted) or deepseek (status bridge) --
 # and for those only. Hook-less workspaces and the other modes resolve on flapping
 # idle: markers instead (§5.5). ⚠️ A dsh worker running a profile that does not
@@ -221,7 +222,7 @@ spawn_workers() {
 # it accepts the send and then burns both waits. One timeout on a dsh worker whose
 # pane clearly finished means that profile, so switch that worker to markers.
 sendwait() {
-  local sid="${1:?}" p="${2:?}" seq="${3:-$(date +%s)}" body r c head n=0
+  local sid="${1:?}" p="${2:?}" seq="${3:-$(date +%s)}" body r c head n=0 tmp bg i
   # `wait:"stop,exit"`, never the `wait:true` default set: that set also carries
   # `idle`, which is INFERRED from output stabilization and flaps mid-turn. On a
   # dsh worker whose TUI repaints rarely the session reads `idle` while the model
@@ -236,10 +237,20 @@ sendwait() {
   r=$("${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
         -H 'Content-Type: application/json' --data-binary "$body")
   if jq -e '.data.delivered and .data.wait.timedOut' <<<"$r" >/dev/null 2>&1; then
+    # ⚠️ The long re-wait is registered FIRST and stays open for the rest of this call,
+    # in the background, while the Enter loop below works the composer. Signals have
+    # no history: a `stop` that fires while no wait is open (during a composer read
+    # between two short waits, measured) is lost, and the next wait then runs its
+    # whole timeout on a turn that already ended. The resend is a tagged DUPLICATE,
+    # so the server skips the write and re-waits without retyping (§5.3).
+    tmp=$(mktemp "${TMPDIR:-/tmp}/codeman-wait.XXXXXX") || return 1
+    "${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
+        -H 'Content-Type: application/json' --data-binary "$(jq -c '.waitTimeout=580000' <<<"$body")" > "$tmp" &
+    bg=$!
     # The prompt's head with whitespace removed, matched literally (the "$head"
     # quoting inside ${c#...} keeps a * or ? in the prompt from acting as a glob).
     head=$(printf '%s' "$p" | tr -d '[:space:]' | sed "s/$(printf '\302\240')//g" | head -c 24)
-    while [ "$n" -lt 12 ]; do
+    while [ "$n" -lt 12 ] && [ ! -s "$tmp" ]; do   # a non-empty file means the wait ended
       c=$(_composer_text "$sid")
       if [ "$c" = '?' ]; then
         [ "$n" -eq 0 ] || break         # unreadable pane: one Enter, then trust it
@@ -250,21 +261,14 @@ sendwait() {
       "${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" -H 'Content-Type: application/json' \
         -d "$(jq -nc --arg c "$CID-$sid" --argjson s "$(date +%s)" \
           '{input:"\r",useMux:true,clientId:$c,seq:$s}')" >/dev/null
-      # The resend is a tagged DUPLICATE, so the server skips the write and reports
-      # `delivered:false` for it -- truthfully, but about the wrong send. The first
-      # one delivered, so carry that forward, or §1's cleanup reads a completed turn
-      # as an undelivered one and keeps a finished worker forever.
-      r=$("${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
-            -H 'Content-Type: application/json' --data-binary "$(jq -c '.waitTimeout=10000' <<<"$body")" \
-          | jq -c 'if .success and (.data.wait.ended | not) then .data.delivered = true else . end')
-      jq -e '.data.wait.ended' <<<"$r" >/dev/null 2>&1 && break
-      sleep 1
+      i=0; while [ "$i" -lt 10 ] && [ ! -s "$tmp" ]; do sleep 1; i=$((i+1)); done
     done
-    if ! jq -e '.data.wait.ended' <<<"$r" >/dev/null 2>&1; then
-      r=$("${CURL[@]}" -X POST "$API/api/v1/sessions/$sid/input" \
-            -H 'Content-Type: application/json' --data-binary "$(jq -c '.waitTimeout=580000' <<<"$body")" \
-          | jq -c 'if .success and (.data.wait.ended | not) then .data.delivered = true else . end')
-    fi
+    wait "$bg"
+    # The duplicate reports `delivered:false` -- truthfully, but about the wrong send.
+    # The first one delivered, so carry that forward, or §1's cleanup reads a completed
+    # turn as an undelivered one and keeps a finished worker forever.
+    r=$(jq -c 'if .success and (.data.wait.ended | not) then .data.delivered = true else . end' < "$tmp")
+    rm -f "$tmp"
   fi
   printf '%s\n' "$r"
 }
