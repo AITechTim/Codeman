@@ -675,6 +675,12 @@ body.tab-rail-resizing * {
   user-select: none !important;
 }
 
+body.split-pane-resizing,
+body.split-pane-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tab-rail,
   .tab-rail-resize-handle {
@@ -18662,6 +18668,12 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 }
 
 .terminal-pane-b-close {
+  /* A native <button> now backs this (keyboard-reachable close), so reset its
+     default chrome back to the plain glyph this rule always drew. */
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
   cursor: pointer;
   padding: 0 6px;
   opacity: 0.7;
@@ -18697,6 +18709,16 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 }
 
 .split-picker-item {
+  /* A native <button> now backs each row (keyboard-reachable picker), so
+     reset its default chrome back to the plain list-row look this always
+     drew — full-width, left-aligned, no border/background of its own. */
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
   padding: 8px 10px;
   border-radius: 6px;
   cursor: pointer;

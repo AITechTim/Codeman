@@ -88,6 +88,35 @@
         }
       });
 
+      // Pane B has no gates of its own by default, so every app-level chord
+      // that the document capture-phase handler (app.js) only preventDefault()s
+      // — never stopPropagation()s — reaches xterm here too and writes its raw
+      // byte/escape sequence into THIS session's PTY on top of whatever the app
+      // action already did to Pane A (COD-153; mirrors the primary pane's own
+      // gates at terminal-ui.js's attachCustomKeyEventHandler). Routed through
+      // the same registry-aware predicates so a rebind or a disable restores
+      // plain terminal behavior here too. Ctrl+V is deliberately left on
+      // xterm's own default (plain-text paste): Pane B has no image-paste trap
+      // to route it to, so intercepting it here would only break paste.
+      this.terminal.attachCustomKeyEventHandler((ev) => {
+        if (ev.isComposing || ev.key === 'Process' || ev.keyCode === 229) return true;
+        if (
+          ev.altKey &&
+          !ev.ctrlKey &&
+          !ev.shiftKey &&
+          /^(Digit[1-9]|BracketLeft|BracketRight|KeyK)$/.test(ev.code || '')
+        ) {
+          return false;
+        }
+        if (ev.type === 'keydown' && global.app?.shouldOpenCommandPaletteFromShortcut?.(ev)) {
+          return false;
+        }
+        if (ev.type === 'keydown' && global.app?.shouldToggleSessionSidebarFromShortcut?.(ev)) {
+          return false;
+        }
+        return true;
+      });
+
       // Load existing scrollback before going live. The WS below is
       // subscribe-only (ws-routes.ts sends nothing on connect, only future
       // 'terminal' events), so without this Pane B stays blank until the
@@ -99,22 +128,7 @@
       // pane. When Pane B's computed dimensions happened to already match
       // the session's last-known size, Session.resize() (session.ts) skips
       // the resize as a no-op, no repaint fires, and the pane stayed blank.
-      //
-      // Mirrors the primary pane's own mode check (app.js's selectSession):
-      // a shell session can retain hundreds of thousands of plain scrollback
-      // lines, so pulling `?full=1` there parses an unbounded, server-capped
-      // (up to terminalBufferMaxBytes, 32MB) body into a 50000-line xterm on
-      // every split. Non-shell (TUI) sessions still get one full replay.
-      try {
-        const query = this.sessionMode === 'shell' ? `tail=${TERMINAL_TAIL_SIZE}` : 'full=1';
-        const res = await fetch(`${window.CodemanBase.base}/api/sessions/${this.sessionId}/terminal?${query}`);
-        const payload = (await res.json())?.data ?? {};
-        if (payload.terminalBuffer && this.terminal) {
-          writeChunked(this.terminal, payload.terminalBuffer, () => this._destroyed);
-        }
-      } catch {
-        /* Best-effort — live output still arrives once the socket below connects. */
-      }
+      await this._loadBuffer();
       if (this._destroyed) return;
 
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -133,6 +147,13 @@
             this.terminal.write(msg.d);
           } else if (msg.t === 'c') {
             this.terminal.clear();
+          } else if (msg.t === 'r') {
+            // Server-triggered refresh (SSE backpressure cleared, terminal
+            // data was dropped). The primary pane routes this to
+            // _onSessionNeedsRefresh (app.js:2990) — Pane B has its own
+            // buffer loader for the same reason connect() does.
+            this.terminal.clear();
+            void this._loadBuffer();
           }
         } catch {
           /* Malformed frame — ignore, matches primary pane's tolerance. */
@@ -158,6 +179,34 @@
       this.ws.onerror = () => {
         // onclose fires after onerror — cleanup happens there.
       };
+    }
+
+    // Fetches and writes the session's current scrollback. Used both by
+    // connect() (initial load) and by the `{t:'r'}` server-refresh frame
+    // (below) — the primary pane's own _onSessionNeedsRefresh (app.js) is
+    // scoped to `this.activeSessionId` and clears/rewrites the primary
+    // terminal, neither of which applies to this independent pane, so this is
+    // a standalone equivalent rather than a call into it.
+    //
+    // Mirrors the primary pane's own mode check (app.js's selectSession /
+    // _onSessionNeedsRefresh): a shell session can retain hundreds of
+    // thousands of plain scrollback lines, so pulling `?full=1` there parses
+    // an unbounded, server-capped (up to terminalBufferMaxBytes, 32MB) body
+    // into a 50000-line xterm on every load. Non-shell (TUI) sessions still
+    // get one full replay. `fetch` here goes through the global wrapper
+    // (constants.js), which already prefixes CodemanBase — unlike the raw
+    // WebSocket URL above, which does not.
+    async _loadBuffer() {
+      try {
+        const query = this.sessionMode === 'shell' ? `tail=${TERMINAL_TAIL_SIZE}` : 'full=1';
+        const res = await fetch(`/api/sessions/${this.sessionId}/terminal?${query}`);
+        const payload = (await res.json())?.data ?? {};
+        if (payload.terminalBuffer && this.terminal) {
+          writeChunked(this.terminal, payload.terminalBuffer, () => this._destroyed);
+        }
+      } catch {
+        /* Best-effort — live output still arrives once the socket connects. */
+      }
     }
 
     // Local reflow only — no PTY resize frame. Split out so a divider drag
@@ -224,8 +273,12 @@ Object.assign(CodemanApp.prototype, {
   _applySplitButtonVisibility(enabled) {
     this._splitButtonSettingEnabled = enabled;
     const splitBtn = document.querySelector('.btn-split');
-    if (!splitBtn) return;
     const wide = window.innerWidth >= SPLIT_PANE_MIN_WIDTH;
+    // Narrowing past the gate must not leave an open split on screen with no
+    // way to reach the button that would close it — the two 240px min-widths
+    // plus the divider overflow a narrow window and .main clips Pane B's edge.
+    if (!wide && this._splitPane) this.closeSplitPane();
+    if (!splitBtn) return;
     splitBtn.classList.toggle('btn-split--hidden', !enabled || !wide);
     if (!this._splitButtonWidthListenerInstalled && window.matchMedia) {
       this._splitButtonWidthListenerInstalled = true;
@@ -273,7 +326,7 @@ Object.assign(CodemanApp.prototype, {
             // does exact-string lookup over text nodes, and a session
             // literally named e.g. "Sessions" would otherwise get translated
             // on zh-CN (see the .session-name skip on the pane header below).
-            `<div class="split-picker-item" data-i18n-skip data-session-id="${escapeHtml(c.id)}" onclick="app.openSplitPane(${escapeHtml(JSON.stringify(c.id))}); app._dismissSplitPicker();">${escapeHtml(c.label)}</div>`
+            `<button type="button" class="split-picker-item" data-i18n-skip data-session-id="${escapeHtml(c.id)}" onclick="app.openSplitPane(${escapeHtml(JSON.stringify(c.id))}); app._dismissSplitPicker();">${escapeHtml(c.label)}</button>`
         )
         .join('');
     }
@@ -340,6 +393,11 @@ Object.assign(CodemanApp.prototype, {
     // the home screen still created the container and connected Pane B, just
     // behind the opaque overlay with nothing visible to show for it.
     if (!this.activeSessionId) return;
+    // A web tab hides `.terminal-wrap`'s container via CSS with nothing
+    // gating the button itself, and `activeSessionId` survives openWebview()
+    // — without this, picking a session opens Pane B's socket behind a
+    // hidden container with nothing on screen to show for it.
+    if (this.activeWebviewId) return;
     // A stale picker click (opened before switching tabs) or clicking Pane
     // B's own session tab while split can otherwise land here with
     // sessionId === activeSessionId: two live WebSockets to the same
@@ -363,7 +421,7 @@ Object.assign(CodemanApp.prototype, {
     paneB.innerHTML = `
       <div class="terminal-pane-b-header">
         <span class="session-name">${escapeHtml(session?.name || 'Session')}</span>
-        <span class="terminal-pane-b-close" onclick="app.closeSplitPane()">&times;</span>
+        <button type="button" class="terminal-pane-b-close" onclick="app.closeSplitPane()" aria-label="Close split">&times;</button>
       </div>
       <div class="terminal-pane-b-container"></div>
     `;
@@ -472,11 +530,18 @@ Object.assign(CodemanApp.prototype, {
       });
     };
 
-    const onUp = () => {
+    const onUp = (e) => {
       dragging = false;
       divider.classList.remove('dragging');
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('split-pane-resizing');
+      try {
+        divider.releasePointerCapture(e.pointerId);
+      } catch {
+        /* Already released (pointercancel/lostpointercapture beat us here). */
+      }
+      divider.removeEventListener('pointermove', onMove);
+      divider.removeEventListener('pointerup', onUp);
+      divider.removeEventListener('pointercancel', onUp);
       if (dragRaf) {
         cancelAnimationFrame(dragRaf);
         dragRaf = null;
@@ -492,11 +557,27 @@ Object.assign(CodemanApp.prototype, {
       this._splitPane?.fit();
     };
 
-    divider.addEventListener('mousedown', () => {
+    // Pointer events + setPointerCapture (mirrors tab-rail-resize.js) instead
+    // of mousedown/document-level mousemove: a plain mousedown drag selects
+    // the text under the cursor as it crosses both terminals, and pointer
+    // capture routes move/up straight to `divider` regardless of what's under
+    // the cursor mid-drag, so no document-level listener leak is possible if
+    // the pointer is released off-window. `body.split-pane-resizing` (mirrors
+    // `body.tab-rail-resizing`) locks the cursor/selection for the drag.
+    divider.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
       dragging = true;
       divider.classList.add('dragging');
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      document.body.classList.add('split-pane-resizing');
+      try {
+        divider.setPointerCapture(e.pointerId);
+      } catch {
+        /* Capture failed — the drag still works via the listeners below. */
+      }
+      divider.addEventListener('pointermove', onMove);
+      divider.addEventListener('pointerup', onUp);
+      divider.addEventListener('pointercancel', onUp);
     });
   },
 });

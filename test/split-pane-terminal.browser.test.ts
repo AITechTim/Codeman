@@ -167,4 +167,67 @@ describe('SplitTerminalPane in a real browser', () => {
       await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     }, sessionId);
   });
+
+  it('gates app-level chords out of Pane B instead of forwarding their raw bytes', async () => {
+    // Regression guard for PR #453's Ctrl+K/Alt+1/Alt+B leak: Pane B had no
+    // attachCustomKeyEventHandler of its own, so the document capture-phase
+    // shortcut handler's preventDefault() (which does not stop xterm) left
+    // every one of these chords ALSO writing its raw byte/escape sequence into
+    // Pane B's live PTY on top of whatever the app action did to Pane A.
+    const sessionId = await page.evaluate(async () => {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workingDir: '/tmp', mode: 'shell' }),
+      });
+      const id = (await res.json()).data.session.id;
+      await fetch(`/api/sessions/${id}/shell`, { method: 'POST' });
+      return id;
+    });
+
+    const sentFrames = await page.evaluate(async (id) => {
+      const mount = document.createElement('div');
+      mount.style.width = '400px';
+      mount.style.height = '300px';
+      document.body.appendChild(mount);
+
+      const pane = new (window as any).SplitTerminalPane(id, mount);
+      await pane.connect();
+      await new Promise((resolve) => {
+        const check = () => (pane._wsReady ? resolve(undefined) : setTimeout(check, 100));
+        check();
+      });
+
+      const sent: string[] = [];
+      const realSend = pane.ws.send.bind(pane.ws);
+      pane.ws.send = (payload: string) => {
+        sent.push(payload);
+        return realSend(payload);
+      };
+
+      pane.terminal.focus();
+      // Dispatch straight at xterm's own textarea, matching how a real
+      // keypress reaches attachCustomKeyEventHandler — page.keyboard.press()
+      // goes through the OS/CDP input pipeline and would also trigger the
+      // app's document-capture handler (opening a real command palette),
+      // which is not what this test is isolating.
+      const textarea = (pane.terminal as any)._core?.textarea || (pane.terminal as any).textarea;
+      const fire = (init: KeyboardEventInit) => {
+        textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
+      };
+      fire({ key: 'k', code: 'KeyK', ctrlKey: true }); // command palette
+      fire({ key: '1', code: 'Digit1', altKey: true }); // Alt+1 tab switch
+      fire({ key: 'b', code: 'KeyB', altKey: true }); // Alt+B sidebar toggle
+
+      pane.destroy();
+      document.body.removeChild(mount);
+      return sent;
+    }, sessionId);
+
+    expect(sentFrames.every((f) => JSON.parse(f).t !== 'i')).toBe(true);
+
+    await page.evaluate(async (id) => {
+      await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+    }, sessionId);
+  });
 });
