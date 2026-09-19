@@ -43,6 +43,8 @@ import { hostname as getHostname, uptime as osUptime } from 'node:os';
 import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
 import { rebootRestoreRegistry } from './reboot-restore-registry.js';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
+import { readRemoteHosts, rehydrateRemoteHostFields } from '../remote-hosts.js';
+import type { RemoteWakeRegistry } from '../remote-wake.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
 import { GLYPH, palette } from '../cli-style.js';
 import { getHookSecret } from '../config/hook-secret.js';
@@ -270,6 +272,14 @@ export class WebServer extends EventEmitter {
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
   /** Cron service (assigned in setupRoutes). */
   private cronService!: CronService;
+  /**
+   * Wake-on-LAN registry, returned by `registerSessionRoutes`. Held for its LIFETIME
+   * only — `drop()` on session cleanup, `stop()` on shutdown. Waking from here would
+   * re-wake a host on every timer tick (the invariant `remote-wake.ts` documents), so
+   * the wiring guard in `test/remote-wake.test.ts` pins that this file calls nothing
+   * but `drop`/`stop` on it.
+   */
+  private remoteWake: RemoteWakeRegistry | null = null;
   private sse: SseStreamManager;
   private store = getStore();
   private tabLayouts!: TabLayoutService;
@@ -1070,7 +1080,9 @@ export class WebServer extends EventEmitter {
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
-    registerSessionRoutes(this.app, ctx);
+    // The registry's lifetime is the server's: it drops per-session wake state on every
+    // cleanup path and resolves in-flight wakes on shutdown.
+    this.remoteWake = registerSessionRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);
     registerPlanRoutes(this.app, ctx);
@@ -1461,6 +1473,11 @@ export class WebServer extends EventEmitter {
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
+    // Wake state goes with the session on EVERY cleanup path (delete routes, the cron
+    // and admin paths, scheduled-run teardown, error paths) — that is why it lives here
+    // rather than in the two delete routes, where it left an entry behind, including up
+    // to 4 KB of the user's buffered keystrokes.
+    this.remoteWake?.drop(sessionId);
 
     this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
   }
@@ -2332,11 +2349,19 @@ export class WebServer extends EventEmitter {
       'scheduled:',
       'team:',
       'case:',
+      'remote:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
-      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string } };
+      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string }; username?: string };
       const sessionId = d.sessionId ?? d.id ?? d.session?.id;
       const owner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
+      // `remote:hostWaking` / `remote:hostWakeFailed` for a create/attach wake have no
+      // session yet (nothing exists until the host is up), so the registry names the
+      // requesting user instead; the payload carries `hostId`/`label`, which non-admins
+      // are not shown elsewhere. No session and no requester: admins only (fail closed).
+      if (!sessionId && event.startsWith('remote:') && d.username) {
+        return { username: d.username, sessionScoped: true };
+      }
       return { owner, sessionScoped: true };
     }
     // #20/#38: clipboard:write writes into the receiver's OS clipboard — route it to
@@ -3116,6 +3141,9 @@ export class WebServer extends EventEmitter {
 
         // For each alive mux session, create a Session object if it doesn't exist
         const muxSessions = this.mux.getSessions();
+        // Host-level config lives in remote-hosts.json, not in the persisted session
+        // snapshot, so refresh the fields that only exist there (see the helper).
+        const remoteHostsById = new Map((await readRemoteHosts(getDataDir())).map((host) => [host.id, host]));
         for (const muxSession of muxSessions) {
           if (!this.sessions.has(muxSession.sessionId)) {
             // Restore session settings from state.json (single source of truth)
@@ -3193,7 +3221,9 @@ export class WebServer extends EventEmitter {
               // respawn rebuilds a LOCAL command, breaking the pane and silently
               // erasing `remote` from state.json on the next persist. mux-sessions.json
               // round-trips MuxSession.remote; state.json carries SessionState.remote.
-              remote: muxSession.remote ?? savedState?.remote,
+              // Host-level fields are refreshed from remote-hosts.json on top, or a
+              // field added to the host config after launch would never arrive.
+              remote: rehydrateRemoteHostFields(muxSession.remote ?? savedState?.remote, remoteHostsById),
               // Docker metadata round-trips the same way (mux-sessions.json carries
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
@@ -3587,6 +3617,10 @@ export class WebServer extends EventEmitter {
     // response), so without this a 10-minute wait holds shutdown open.
     sessionWaits.cancelEverything();
     approvalInbox.stop();
+    // Same reason as `cancelEverything` above: an in-flight wake is awaited by a request,
+    // and `app.close()` (the last line of this method) does not abort in-flight requests —
+    // so without this a restart during a wake waits out the readiness poll.
+    this.remoteWake?.stop();
 
     this.lastRecordedTokens.clear();
 

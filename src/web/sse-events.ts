@@ -5,7 +5,7 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * 158 event constants organized by category:
+ * 160 event constants organized by category:
  * - **Core** (1): init
  * - **Transport** (1): sse:heartbeat
  * - **Session lifecycle** (23): created, updated, deleted, terminal, idle, working, ...
@@ -14,7 +14,7 @@
  * - **Session: Plan** (4): planTaskUpdate, planCheckpoint, planRollback, planTaskAdded
  * - **Tasks** (4): created, completed, failed, updated
  * - **Mux** (4): created, killed, died, statsUpdated
- * - **Remote auto-reconnect** (3): sessionDropped, sessionReconnected, reconnectExhausted
+ * - **Remote auto-reconnect / wake** (5): sessionDropped, sessionReconnected, reconnectExhausted, hostWaking, hostWakeFailed
  * - **Respawn** (24): stateChanged, cycleStarted/Completed, step*, aiCheck*, planCheck*, timer*, log, ...
  * - **Subagents** (7): discovered, updated, tool_call, tool_result, progress, message, completed
  * - **Workflow runs** (3): run_discovered, run_updated, run_removed (ultracode / Workflow tool)
@@ -176,7 +176,9 @@ export const MuxDied = 'mux:died' as const;
 /** tmux session stats refreshed. */
 export const MuxStatsUpdated = 'mux:statsUpdated' as const;
 
-// ─── Remote auto-reconnect (COD-108) ─────────────────────────────────────────
+// ─── Remote auto-reconnect (COD-108) + wake-on-LAN ───────────────────────────
+// Session-scoped in multi-user mode (`deriveSseHint`): routed to the session's owner,
+// or — for a wake with no session yet — to the requesting `username` in the payload.
 
 /** A remote session's local ssh pane died; an auto-reconnect attempt is starting. */
 export const RemoteSessionDropped = 'remote:sessionDropped' as const;
@@ -184,6 +186,15 @@ export const RemoteSessionDropped = 'remote:sessionDropped' as const;
 export const RemoteSessionReconnected = 'remote:sessionReconnected' as const;
 /** Auto-reconnect gave up after the bounded backoff cap — manual reconnect needed. */
 export const RemoteReconnectExhausted = 'remote:reconnectExhausted' as const;
+/**
+ * User input arrived for a session whose host is unreachable, so a Wake-on-LAN
+ * command was started (see `remote-wake.ts`). Input sent meanwhile is buffered.
+ * Payload: `sessionId` (session wake) or `forNewSession: true` + `username`
+ * (create/attach wake), `hostId`, `label`, `queuedInput`.
+ */
+export const RemoteHostWaking = 'remote:hostWaking' as const;
+/** The host did not come back within the wake timeout — buffered input is still held. */
+export const RemoteHostWakeFailed = 'remote:hostWakeFailed' as const;
 
 // ─── Respawn ─────────────────────────────────────────────────────────────────
 
@@ -535,6 +546,8 @@ export const SseEvent = {
   RemoteSessionDropped,
   RemoteSessionReconnected,
   RemoteReconnectExhausted,
+  RemoteHostWaking,
+  RemoteHostWakeFailed,
 
   // Respawn
   RespawnStarted,
