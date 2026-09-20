@@ -1547,6 +1547,14 @@ function buildSplitPickerSessions(sessions, sessionOrder, excludeId, detachedIds
     if (detachedIds?.has?.(id)) continue;
     const session = sessions.get(id);
     if (!session) continue;
+    // A session with no PTY attached (exited CLI, a crash-looped session
+    // whose breaker tripped, a restore that failed to re-attach) has nothing
+    // reading its tmux pane. SplitTerminalPane never does selectSession()'s
+    // re-attach POST, so its socket would open onto a pane nothing feeds:
+    // no terminal events, and Session.write() silently drops every keystroke
+    // with no ack either way (Pane B sends no `seq`), so the loss is
+    // invisible — the healthy socket never trips the disconnect banner.
+    if (session.pid === null) continue;
     result.push({ id, label: session.name || 'Session' });
   }
   return result;

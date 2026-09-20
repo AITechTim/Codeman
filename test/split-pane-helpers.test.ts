@@ -64,4 +64,25 @@ describe('CodemanSplitPane.buildSplitPickerSessions', () => {
     const result = buildSplitPickerSessions(sessions, ['a'], 'a');
     expect(result).toEqual([]);
   });
+
+  it('excludes a session with no PTY attached (pid === null)', () => {
+    const { buildSplitPickerSessions } = loadSplitPaneHelper();
+    const sessions = new Map([
+      ['a', { name: 'w1-codeman' }],
+      ['b', { name: 'w2-exited', pid: null }],
+      ['c', { name: 'w3-alive', pid: 12345 }],
+    ]);
+    const result = buildSplitPickerSessions(sessions, ['a', 'b', 'c'], 'a');
+    expect(result).toEqual([{ id: 'c', label: 'w3-alive' }]);
+  });
+
+  it('excludes a detached session even when it also has no PTY', () => {
+    const { buildSplitPickerSessions } = loadSplitPaneHelper();
+    const sessions = new Map([
+      ['a', { name: 'w1-codeman' }],
+      ['b', { name: 'w2-detached', pid: null }],
+    ]);
+    const result = buildSplitPickerSessions(sessions, ['a', 'b'], 'a', new Set(['b']));
+    expect(result).toEqual([]);
+  });
 });

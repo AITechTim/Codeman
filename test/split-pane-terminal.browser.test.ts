@@ -185,7 +185,7 @@ describe('SplitTerminalPane in a real browser', () => {
       return id;
     });
 
-    const sentFrames = await page.evaluate(async (id) => {
+    const result = await page.evaluate(async (id) => {
       const mount = document.createElement('div');
       mount.style.width = '400px';
       mount.style.height = '300px';
@@ -215,16 +215,83 @@ describe('SplitTerminalPane in a real browser', () => {
       const fire = (init: KeyboardEventInit) => {
         textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
       };
-      fire({ key: 'k', code: 'KeyK', ctrlKey: true }); // command palette
-      fire({ key: '1', code: 'Digit1', altKey: true }); // Alt+1 tab switch
-      fire({ key: 'b', code: 'KeyB', altKey: true }); // Alt+B sidebar toggle
+      // keyCode is what xterm's evaluateKeyboardEvent switches on to decide
+      // whether to produce a data frame at all — at keyCode 0 (unset) it can
+      // never emit bytes, so the assertion below held regardless of whether
+      // the custom key handler's gate actually fired. Real values (K=75,
+      // 1=49, B=66) are what a real keypress carries.
+      const app = window.app as any;
+      fire({ key: 'k', code: 'KeyK', keyCode: 75, ctrlKey: true }); // command palette
+      fire({ key: '1', code: 'Digit1', keyCode: 49, altKey: true }); // Alt+1 tab switch
+
+      // Ctrl+Z (SIGTSTP): this pane's own sessionMode is undefined (no `mode`
+      // opt passed to the constructor above), so `this.sessionMode !== 'shell'`
+      // holds and the gate must block it, mirroring a non-shell (agent) mode.
+      fire({ key: 'z', code: 'KeyZ', keyCode: 90, ctrlKey: true });
+
+      // Shift+Enter: must never reach the PTY as a bare \r (that would submit
+      // an incomplete prompt instead of inserting a newline) — it goes out as
+      // a POST to /api/sessions/:id/send-key instead.
+      const sendKeyCalls: unknown[] = [];
+      const realFetch = window.fetch.bind(window);
+      window.fetch = ((...args: Parameters<typeof fetch>) => {
+        const url = String(args[0]);
+        if (url.includes('/send-key')) {
+          sendKeyCalls.push(args[1] ? JSON.parse((args[1] as RequestInit).body as string) : null);
+        }
+        return realFetch(...args);
+      }) as typeof fetch;
+      fire({ key: 'Enter', code: 'Enter', keyCode: 13, shiftKey: true });
+      window.fetch = realFetch;
+
+      // Smart-copy Ctrl+C: with a real selection in THIS pane's own terminal,
+      // Ctrl+C must copy it (never send 0x03) and must copy Pane B's
+      // selection, not Pane A's. app._copyText is stubbed rather than relying
+      // on a real clipboard, which headless Chromium may refuse permission
+      // for.
+      pane.terminal.write('SPLITPANE_COPY_MARKER');
+      await new Promise((r) => setTimeout(r, 100));
+      pane.terminal.selectAll();
+      let copiedText: string | null = null;
+      const realCopyText = app._copyText;
+      app._copyText = async (text: string) => {
+        copiedText = text;
+        return true;
+      };
+      fire({ key: 'c', code: 'KeyC', keyCode: 67, ctrlKey: true });
+      await new Promise((r) => setTimeout(r, 50));
+      app._copyText = realCopyText;
+
+      // Alt+B only reaches shouldToggleSessionSidebarFromShortcut's gate when
+      // the sidebar layout is actually active (app.js:4325) — under the
+      // default header-strip layout the app doesn't treat Alt+B as its own
+      // shortcut either, so Pane A forwards the same `ESC b` to its own PTY.
+      // Assert the gate where it is meant to hold: sidebar layout active.
+      //
+      // Setting only the `data-session-list` attribute is not enough: this
+      // event bubbles (matching how a real keypress reaches xterm), so it
+      // also reaches app.js's OWN document-level capture-phase shortcut
+      // dispatcher, which matches the same Alt+B binding and calls the real
+      // toggleSessionSidebar() — that reads the persisted settings (still
+      // 'header'), re-runs applySessionListLayout(), and resets the
+      // attribute back to 'header' before xterm's own (later, non-capture)
+      // key handler ever sees it. Persisting the setting through the app's
+      // own settings cache keeps the attribute stable across that bubble.
+      const prevSettings = { ...app.loadAppSettingsFromStorage() };
+      app._cachedAppSettings = { ...prevSettings, sessionListLayout: 'sidebar' };
+      app.applySessionListLayout();
+      fire({ key: 'b', code: 'KeyB', keyCode: 66, altKey: true }); // Alt+B sidebar toggle
+      app._cachedAppSettings = prevSettings;
+      app.applySessionListLayout();
 
       pane.destroy();
       document.body.removeChild(mount);
-      return sent;
+      return { sent, sendKeyCalls, copiedText };
     }, sessionId);
 
-    expect(sentFrames.every((f) => JSON.parse(f).t !== 'i')).toBe(true);
+    expect(result.sent.every((f) => JSON.parse(f).t !== 'i')).toBe(true);
+    expect(result.sendKeyCalls).toEqual([{ key: 'S-Enter' }]);
+    expect(result.copiedText).toContain('SPLITPANE_COPY_MARKER');
 
     await page.evaluate(async (id) => {
       await fetch(`/api/sessions/${id}`, { method: 'DELETE' });

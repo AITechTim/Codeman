@@ -1,6 +1,6 @@
 # Split-Pane Sessions — Design Spec
 
-**Status**: Draft, pending review
+**Status**: Implemented (v1)
 **Author**: Claude (session with Tim), 2026-09-15
 **Scope**: v1 only. v2 items are named and explicitly deferred, not designed.
 

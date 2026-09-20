@@ -93,11 +93,16 @@
       // — never stopPropagation()s — reaches xterm here too and writes its raw
       // byte/escape sequence into THIS session's PTY on top of whatever the app
       // action already did to Pane A (COD-153; mirrors the primary pane's own
-      // gates at terminal-ui.js's attachCustomKeyEventHandler). Routed through
-      // the same registry-aware predicates so a rebind or a disable restores
-      // plain terminal behavior here too. Ctrl+V is deliberately left on
-      // xterm's own default (plain-text paste): Pane B has no image-paste trap
-      // to route it to, so intercepting it here would only break paste.
+      // gates at terminal-ui.js's attachCustomKeyEventHandler: command palette,
+      // Alt+1-9/[/] tab nav, Alt+B sidebar toggle, Ctrl+Z suspend, Shift/Ctrl+Enter
+      // newline, and smart-copy Ctrl+C). Routed through the same registry-aware
+      // predicates so a rebind or a disable restores plain terminal behavior
+      // here too. Ctrl+V is deliberately left on xterm's own default
+      // (plain-text paste): Pane B has no image-paste trap to route it to, so
+      // intercepting it here would only break paste. Ctrl+Shift+C (the
+      // explicit, never-falls-through copy chord) is also left un-ported —
+      // lower value than the plain Ctrl+C case above, since Pane B is rarely
+      // the pane a user is actively selecting text in.
       this.terminal.attachCustomKeyEventHandler((ev) => {
         if (ev.isComposing || ev.key === 'Process' || ev.keyCode === 229) return true;
         if (
@@ -113,6 +118,71 @@
         }
         if (ev.type === 'keydown' && global.app?.shouldToggleSessionSidebarFromShortcut?.(ev)) {
           return false;
+        }
+        // Ctrl+Z (SIGTSTP/job-control suspend): mirrors terminal-ui.js's own
+        // swallow — in a plain shell session this is the user's own
+        // job-control tool and must reach the PTY, but in every other mode
+        // (claude/omp/pi/codex/...) it silently stops an unattended agent
+        // loop dead. Pane B has its own PTY/session and must not send a
+        // suspend into a non-shell one just because the primary pane's own
+        // gate lives elsewhere.
+        if (
+          ev.type === 'keydown' &&
+          ev.key.toLowerCase() === 'z' &&
+          ev.ctrlKey &&
+          !ev.altKey &&
+          !ev.metaKey &&
+          !ev.shiftKey &&
+          this.sessionMode !== 'shell'
+        ) {
+          return false;
+        }
+        // Shift+Enter / Ctrl+Enter: insert a newline instead of submitting.
+        // Mirrors terminal-ui.js's own handling — xterm sends plain \r for
+        // every Enter variant, so an Ink app (Claude Code) can't tell a
+        // newline from a submit. Without this gate, Pane B's onData would
+        // send that bare \r straight over the WS and submit an incomplete
+        // prompt instead of adding a line to it. Targets THIS pane's own
+        // session (this.sessionId), never the primary pane's
+        // activeSessionId, and has no local-echo overlay of its own to flush
+        // first (Pane B is deliberately plainer — see the fileoverview).
+        if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey) && ev.type === 'keydown') {
+          fetch(`/api/sessions/${this.sessionId}/send-key`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: ev.ctrlKey ? 'C-Enter' : 'S-Enter' }),
+          }).catch(() => {
+            /* Best-effort, matching this pane's tolerance elsewhere. */
+          });
+          return false;
+        }
+        // Smart copy (mirrors terminal-ui.js's Ctrl+C gate, #211): with a
+        // selection, Ctrl+C copies THIS pane's own selection instead of
+        // sending ^C; with none, it must fall through unchanged or the
+        // interrupt key is lost. Re-implemented against this.terminal rather
+        // than reusing app.copyTerminalSelection(), which reads app.terminal
+        // — Pane A's — and would copy the wrong pane's selection.
+        if (
+          ev.type === 'keydown' &&
+          global.app?.shouldCopyTerminalSelectionFromShortcut?.(ev) &&
+          this.terminal?.hasSelection?.()
+        ) {
+          const raw = this.terminal.getSelection();
+          const isColumnSelection = this.terminal._core?._selectionService?._activeSelectionMode === 3;
+          const selection = isColumnSelection ? raw : (global.CodemanCopySelection?.clean?.(raw) ?? raw);
+          if (selection.trim()) {
+            ev.preventDefault();
+            void global.app._copyText?.(selection).then((ok) => {
+              this.terminal?.clearSelection?.();
+              global.app.showToast?.(ok ? 'Copied to clipboard' : 'Failed to copy', ok ? 'success' : 'error');
+            });
+            return false;
+          }
+          // Nothing worth copying — clear for feedback (a padding-only
+          // selection cleans to '' and this press still falls through to the
+          // PTY as 0x03, matching the primary pane's own rule).
+          this.terminal.clearSelection?.();
+          global.app.showToast?.('Nothing to copy', 'warning');
         }
         return true;
       });
