@@ -270,9 +270,15 @@ tailscale serve --bg 3000      # HTTPS at https://<node>.<tailnet>.ts.net
 Only devices on your tailnet can reach it; Tailscale handles identity and
 terminates TLS with a real Let's Encrypt certificate (so PWA install and web
 push work). No app password and no `0.0.0.0` bind required. (This is the
-maintainer's production setup.) `CODEMAN_TAILSCALE=1` presets the choice for
-automation; the installer never runs `tailscale serve reset` and never touches
-serve mappings other than `443 -> Codeman's port`.
+maintainer's production setup.) `CODEMAN_TAILSCALE=1` or `--tailscale` presets
+the choice for automation. When `:443` on the node already belongs to another
+app, the installer mounts Codeman under `/codeman` (`tailscale serve --set-path`
+plus `--base-url`, which keeps the loopback bind and the same host guard) or on a
+second port rather than replacing it. The installer never runs `tailscale serve
+reset`, never touches serve mappings other than the one it created, never opens a
+`tailscale funnel` (public internet, a different risk class) and never advertises
+a Tailscale Service. Renaming the node (`--name`, `install.sh name`) is opt-in
+and defaults to no, because the tailnet name is also the machine's SSH identity.
 
 ### B. Authenticated cloudflared tunnel + password
 
