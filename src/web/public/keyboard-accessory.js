@@ -674,7 +674,12 @@ const KeyboardAccessoryBar = {
       <button class="accessory-btn" data-action="tab" title="Tab">Tab</button>
       <button class="accessory-btn accessory-btn-codex" data-action="shift-left" title="Shift+Left (Codex: edit queued message)" aria-label="Shift+Left (Codex: edit queued message)">⇧←</button>
       <button class="accessory-btn accessory-btn-codex" data-action="shift-right" title="Shift+Right (Codex: prompt stack back)" aria-label="Shift+Right (Codex: prompt stack back)">⇧→</button>
-      <button class="accessory-btn accessory-btn-compose" data-action="compose" title="Compose prompt">Compose</button>
+      <button class="accessory-btn accessory-btn-compose" data-action="compose" title="Compose prompt" aria-label="Compose prompt">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 20h9"/>
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+        </svg>
+      </button>
       <button class="accessory-btn accessory-btn-rmm" data-action="readmymind" title="Read My Mind: predict your next prompt">🧠</button>
       <button class="accessory-btn" data-action="esc" title="Escape">Esc</button>
       <button class="accessory-btn accessory-btn-dismiss" data-action="dismiss" title="Dismiss keyboard">
@@ -744,7 +749,12 @@ const KeyboardAccessoryBar = {
           <path d="M9 5l7 7-7 7"/>
         </svg>
       </button>
-      <button class="accessory-btn accessory-btn-compose" data-action="compose" title="Compose prompt">Compose</button>
+      <button class="accessory-btn accessory-btn-compose" data-action="compose" title="Compose prompt" aria-label="Compose prompt">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M12 20h9"/>
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+        </svg>
+      </button>
       <button class="accessory-btn" data-action="pick-path" title="Insert a file or folder path">&#x1F4C1; Path</button>
       <button class="accessory-btn" data-action="clear-input" title="Clear the current unsent input">&#x232B; All</button>
       <button class="accessory-btn accessory-btn-rmm" data-action="readmymind" title="Read My Mind: predict your next prompt">🧠</button>

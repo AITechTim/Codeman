@@ -115,6 +115,21 @@ describe('mobile prompt composer', () => {
     expect(template('_shellButtons')).not.toContain('data-action="compose"');
   });
 
+  it('uses a compact accessible icon for Compose in both agent layouts', () => {
+    const { bar, document } = loadComposer();
+
+    for (const markup of [bar._simpleButtons, bar._extendedButtons]) {
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = markup;
+      const button = wrapper.querySelector('[data-action="compose"]') as HTMLButtonElement;
+
+      expect(button.getAttribute('aria-label')).toBe('Compose prompt');
+      expect(button.getAttribute('title')).toBe('Compose prompt');
+      expect(button.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
+      expect(button.textContent?.trim()).toBe('');
+    }
+  });
+
   it('uses a native autocorrect-aware textarea and stores replacement text exactly once', () => {
     const { app, bar, document } = loadComposer();
     bar.composePrompt();
