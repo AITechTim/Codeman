@@ -213,7 +213,9 @@ describe('SplitTerminalPane in a real browser', () => {
       // which is not what this test is isolating.
       const textarea = (pane.terminal as any)._core?.textarea || (pane.terminal as any).textarea;
       const fire = (init: KeyboardEventInit) => {
-        textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
+        const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
+        textarea.dispatchEvent(event);
+        return event.defaultPrevented;
       };
       // keyCode is what xterm's evaluateKeyboardEvent switches on to decide
       // whether to produce a data frame at all — at keyCode 0 (unset) it can
@@ -262,6 +264,19 @@ describe('SplitTerminalPane in a real browser', () => {
       await new Promise((r) => setTimeout(r, 50));
       app._copyText = realCopyText;
 
+      // Ctrl+Shift+C with NO selection: the blanket "no 'i' frames" check
+      // below is NOT what proves this gate works — xterm's own
+      // evaluateKeyboardEvent never emits data for a shifted ctrl-letter in
+      // the first place (verified live: removing the gate entirely still
+      // produces zero WS frames for this exact key), so an absent 'i' frame
+      // is true whether or not the app-level shiftKey branch fires. What the
+      // branch actually buys is `preventDefault()`, so the browser's own
+      // handling of the chord (e.g. Chrome's Inspect-Element binding) is
+      // pre-empted, mirroring Pane A's own "never falls through" contract —
+      // asserted directly via the dispatched event's defaultPrevented.
+      pane.terminal.clearSelection();
+      const ctrlShiftCPrevented = fire({ key: 'c', code: 'KeyC', keyCode: 67, ctrlKey: true, shiftKey: true });
+
       // Alt+B only reaches shouldToggleSessionSidebarFromShortcut's gate when
       // the sidebar layout is actually active (app.js:4325) — under the
       // default header-strip layout the app doesn't treat Alt+B as its own
@@ -286,12 +301,13 @@ describe('SplitTerminalPane in a real browser', () => {
 
       pane.destroy();
       document.body.removeChild(mount);
-      return { sent, sendKeyCalls, copiedText };
+      return { sent, sendKeyCalls, copiedText, ctrlShiftCPrevented };
     }, sessionId);
 
     expect(result.sent.every((f) => JSON.parse(f).t !== 'i')).toBe(true);
     expect(result.sendKeyCalls).toEqual([{ key: 'S-Enter' }]);
     expect(result.copiedText).toContain('SPLITPANE_COPY_MARKER');
+    expect(result.ctrlShiftCPrevented).toBe(true);
 
     await page.evaluate(async (id) => {
       await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
