@@ -367,6 +367,42 @@ describe('Custom Model Endpoint Profiles: the "which model" picker', () => {
     expect(win.localStorage.getItem('codeman:customModelLastUsed:claude:llama-box')).toBe('qwen3');
   });
 
+  it('a slower currently-loaded probe for an earlier pick must never clobber a faster, later pick for a different endpoint', async () => {
+    const { win, app } = bootApp({});
+    const hostA = { id: 'host-a', label: 'Host A', baseUrl: 'http://a', models: ['a1', 'a2'] };
+    const hostB = { id: 'host-b', label: 'Host B', baseUrl: 'http://b', models: ['b1', 'b2'] };
+    let resolveA!: (v: unknown) => void;
+    const pendingA = new Promise((resolve) => {
+      resolveA = resolve;
+    });
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/host-a/running-status') return pendingA;
+      if (path === '/api/model-endpoints/host-b/running-status') return { isLlamaSwap: false, running: [] };
+      return null;
+    };
+
+    // Host A's picker opens first but its probe never resolves until we say so below —
+    // Host B's opens second and resolves immediately, so it renders first.
+    const openA = app._openCustomModelPickModal('claude', hostA);
+    await app._openCustomModelPickModal('claude', hostB);
+
+    expect(win.document.getElementById('customModelPickHint')!.textContent).toContain('Host B');
+    expect(app._pendingCustomModelPick).toEqual({ mode: 'claude', endpointId: 'host-b' });
+
+    // Host A's probe finally answers, after Host B has already rendered.
+    resolveA({ isLlamaSwap: false, running: [] });
+    await openA;
+
+    // The late-arriving Host A response must be a no-op: still Host B on screen.
+    expect(win.document.getElementById('customModelPickHint')!.textContent).toContain('Host B');
+    expect(app._pendingCustomModelPick).toEqual({ mode: 'claude', endpointId: 'host-b' });
+    const listText = win.document.getElementById('customModelPickList')!.textContent;
+    expect(listText).toContain('b1');
+    expect(listText).toContain('b2');
+    expect(listText).not.toContain('a1');
+    expect(listText).not.toContain('a2');
+  });
+
   it('picking a row in the modal closes it and launches with that exact model', async () => {
     const { win, app } = bootApp({
       hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://localhost:8080', models: ['qwen3', 'llama3'] }],

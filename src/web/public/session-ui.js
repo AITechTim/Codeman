@@ -678,19 +678,25 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  /** Renders the "which model" picker for a (harness, endpoint) pair with more than one discovered model. */
+  /**
+   * Renders the "which model" picker for a (harness, endpoint) pair with more than one
+   * discovered model. Async since it now awaits the currently-loaded-model probe below,
+   * so a SECOND call (a different custom-model entry clicked while the first one's probe
+   * is still in flight — the probe has its own 5s timeout) must not let the first call's
+   * later-arriving response clobber the second's already-rendered, already-correct modal.
+   * `_customModelPickGeneration` is the same guard-a-mutable-counter pattern
+   * `_watchLlamaSwapLoading` uses for the same reason: every DOM write below, including
+   * `_pendingCustomModelPick` itself, stays deferred until after the await, and a call
+   * that finds a newer generation already claimed bails out untouched rather than only
+   * skipping the model-list write and leaving title/hint/`_pendingCustomModelPick`
+   * inconsistent with what's on screen.
+   */
   async _openCustomModelPickModal(mode, host) {
     const modal = document.getElementById('customModelPickModal');
     const list = document.getElementById('customModelPickList');
     if (!modal || !list) return;
-    this._pendingCustomModelPick = { mode, endpointId: host.id };
-    const cliLabel = (window.__codemanCustomModelClis || []).find((c) => c.id === mode)?.label || mode;
-    // A static title (translatable by i18n.js's exact-string walker) plus a
-    // dynamic hint carrying the specifics — same split webviewModalTitle uses,
-    // since the walker cannot i18n a string a variable is already spliced into.
-    document.getElementById('customModelPickTitle').textContent = 'Choose a model';
-    document.getElementById('customModelPickHint').textContent =
-      `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
+    const generation = (this._customModelPickGeneration = (this._customModelPickGeneration || 0) + 1);
+    const isCurrent = () => this._customModelPickGeneration === generation;
 
     // Whichever model llama-swap actually has loaded right now beats a merely
     // remembered choice — it's what a launch would attach to with zero wait, while
@@ -698,6 +704,7 @@ Object.assign(CodemanApp.prototype, {
     // reorders past the top: exactly one model is promoted, everything else keeps
     // its discovery order.
     const currentlyLoaded = await this._getCustomModelCurrentlyLoaded(host);
+    if (!isCurrent()) return; // a newer pick opened (and possibly already rendered) while this probe was in flight
     const lastUsed = currentlyLoaded ? null : this._getCustomModelLastUsed(mode, host.id);
     const promoted = currentlyLoaded || lastUsed;
     const models = [...(host.models || [])];
@@ -706,6 +713,14 @@ Object.assign(CodemanApp.prototype, {
       models.unshift(promoted);
     }
 
+    this._pendingCustomModelPick = { mode, endpointId: host.id };
+    const cliLabel = (window.__codemanCustomModelClis || []).find((c) => c.id === mode)?.label || mode;
+    // A static title (translatable by i18n.js's exact-string walker) plus a
+    // dynamic hint carrying the specifics — same split webviewModalTitle uses,
+    // since the walker cannot i18n a string a variable is already spliced into.
+    document.getElementById('customModelPickTitle').textContent = 'Choose a model';
+    document.getElementById('customModelPickHint').textContent =
+      `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
     list.innerHTML = models
       .map((m) => {
         const isDefault = m === host.defaultModelId;
