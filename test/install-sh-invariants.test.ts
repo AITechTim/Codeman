@@ -179,8 +179,13 @@ describe('install.sh runtime safety', () => {
       /if \[\[ -n "\$\{CODEMAN_INSTALL_SH_LIB:-\}" \]\]; then return 0 2>\/dev\/null \|\| exit 0; fi/
     );
     const guardAt = SOURCE.indexOf('CODEMAN_INSTALL_SH_LIB');
-    const dispatchAt = SOURCE.indexOf('case "${1:-}" in');
+    const dispatchAt = SOURCE.indexOf('case "$SUBCOMMAND" in');
+    expect(dispatchAt, 'the dispatch case must exist').toBeGreaterThan(-1);
     expect(guardAt, 'the sourcing guard must precede the dispatch case').toBeLessThan(dispatchAt);
+    // parse_flags runs only in the dispatch tail, after the guard: a sourced copy must
+    // never consume the harness's own arguments.
+    const parseAt = SOURCE.indexOf('\nparse_flags "$@"');
+    expect(parseAt, 'parse_flags must be invoked after the sourcing guard').toBeGreaterThan(guardAt);
   });
 
   it('still sets the strict flags it has always run under', () => {
@@ -202,6 +207,104 @@ describe('install.sh DeepSeek identity probe', () => {
     expect(identity, 'the deepseek entry no longer declares an identity probe').toBeDefined();
     expect(identity?.arg).toBe('--help');
     expect(new RegExp(identity!.regex, 'i').test('DeepSeek Harness')).toBe(true);
+  });
+});
+
+describe('install.sh owns the build and the start', () => {
+  it('runs npm install with CODEMAN_NO_AUTOSTART=1', () => {
+    // scripts/postinstall.js builds dist/ and starts a detached `codeman web` on its
+    // own unless told not to. Under the installer that orphan made the service
+    // crash-loop on EADDRINUSE while the done screen reported "running" off the
+    // orphan (fresh Ubuntu 24 sandbox, 2026-09-20). Every npm install here must
+    // carry the opt-out.
+    // Executed installs only: the catalogue's `npm install -g` literals and the
+    // failure message that quotes the command are prose here.
+    const installs = CODE_LINES.filter(
+      (line) => /\bnpm install\b/.test(line) && !/npm install -g/.test(line) && !/\b(error|warn|info|echo) "/.test(line)
+    );
+    expect(installs.length, 'expected the one npm install call').toBeGreaterThan(0);
+    for (const line of installs) {
+      expect(line, `npm install without CODEMAN_NO_AUTOSTART=1:\n  ${line}`).toContain('CODEMAN_NO_AUTOSTART=1');
+    }
+  });
+});
+
+describe('install.sh Tailscale safety rules', () => {
+  // Every rule here protects config that is not ours. `serve reset` destroys a user's
+  // unrelated serve mappings (the maintainer's own node carries two); funnel is the
+  // public internet, a different risk class than tailnet-only serve; advertising a
+  // Tailscale Service requires a tagged node and admin approval and is documented
+  // as a hint only. All three are pinned as absences.
+  it('never runs `tailscale serve reset`', () => {
+    const offenders = CODE_LINES.filter((line) => /serve\s+reset\b/.test(line));
+    expect(offenders).toEqual([]);
+  });
+
+  it('never runs `tailscale funnel` and never advertises a Tailscale Service', () => {
+    // The installer's own `--service` flag (run as a service) is not Tailscale's
+    // `--service=svc:<name>`; the pin keys on the svc: prefix and the serve form.
+    const offenders = CODE_LINES.filter(
+      (line) => /\bfunnel\b/.test(line) || /\bsvc:/.test(line) || /\bserve\b.*--service/.test(line)
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it('routes every serve mutation through ts_cmd_serve (the sudo-aware wrapper)', () => {
+    // A bare `tailscale serve --bg` or `set --hostname` would fail for a non-operator
+    // user on Linux, exactly the state the wrapper exists to handle.
+    const mutations = CODE_LINES.filter((line) => /\bserve --(bg|https)/.test(line) || /\bset --hostname\b/.test(line));
+    expect(mutations.length).toBeGreaterThan(0);
+    for (const line of mutations) {
+      // Prose in warn/info strings and manual-command hints are fine; executed lines
+      // must start with the wrapper.
+      const executed = /^\s*(if\s+)?(!\s*)?(out=\$\()?ts_cmd_serve\b/.test(line);
+      const quoted = /(info|warn|echo -e|success) /.test(line) || /Run: /.test(line) || /Configuring: /.test(line);
+      expect(executed || quoted, `serve mutation outside ts_cmd_serve:\n  ${line}`).toBe(true);
+    }
+  });
+
+  it('decides the rename before the serve shape, and applies serve only after the build', () => {
+    // Serve config is keyed by the DNS name it was written under: renaming after
+    // configuring would orphan the mapping (and only `serve reset` could remove the
+    // stale key). tailscale_prepare therefore asks the name first, chooses the shape
+    // second, and main() applies the shape only after the build and the service.
+    const prepare = SOURCE.slice(SOURCE.indexOf('tailscale_prepare() {'), SOURCE.indexOf('tailscale_apply() {'));
+    expect(prepare.indexOf('tailscale_choose_name')).toBeGreaterThan(-1);
+    expect(prepare.indexOf('tailscale_choose_name')).toBeLessThan(prepare.indexOf('tailscale_choose_mapping'));
+    const main = SOURCE.slice(SOURCE.indexOf('\nmain() {'), SOURCE.indexOf('\npreflight_detect() {'));
+    const order = [
+      'choose_network_binding',
+      'choose_launch_mode',
+      'install_or_update_repo',
+      'npm_install_deps',
+      'run_step "Building Codeman"',
+      'tailscale_apply',
+      'print_done_screen',
+    ];
+    const positions = order.map((needle) => main.indexOf(needle));
+    for (let i = 0; i < positions.length; i++) {
+      expect(positions[i], `${order[i]} missing from main()`).toBeGreaterThan(-1);
+      if (i > 0) expect(positions[i], `${order[i]} must come after ${order[i - 1]}`).toBeGreaterThan(positions[i - 1]);
+    }
+  });
+
+  it('documents every flag it parses', () => {
+    // The header comment is the only manual most people read (it is what `curl` shows
+    // them if they look). A flag parse_flags accepts and the header does not mention
+    // is a flag nobody finds.
+    const header = SOURCE.slice(0, SOURCE.indexOf('set -euo pipefail'));
+    const parse = SOURCE.slice(SOURCE.indexOf('parse_flags() {'), SOURCE.indexOf('# Sourcing guard'));
+    const flags = Array.from(parse.matchAll(/^\s+(--[a-z-]+)(?:[|)=\s])/gm), (m) => m[1]);
+    expect(flags.length).toBeGreaterThan(5);
+    for (const flag of new Set(flags)) {
+      expect(header.includes(flag), `${flag} is parsed but not documented in the header`).toBe(true);
+    }
+  });
+
+  it('renames only as an opt-in: the question defaults to no and --yes never renames', () => {
+    const fn = SOURCE.slice(SOURCE.indexOf('tailscale_choose_name() {'), SOURCE.indexOf('tailscale_rename_node() {'));
+    expect(fn).toMatch(/prompt_yes_no "Rename this machine to \$suggested\?" "n"/);
+    expect(fn).toMatch(/\[\[ "\$ASSUME_YES" == "1" \]\]/);
   });
 });
 
