@@ -654,6 +654,9 @@ const KeyboardAccessoryBar = {
   _composerDrafts: new Map(),
   _composerUploads: new Map(),
   _composerOverlay: null,
+  // Leave room for both six-character bracketed-paste markers under the
+  // WebSocket input frame's 64 KiB character limit.
+  _composerMaxLength: 65524,
 
   /** HTML for simple mode: arrows, commands, Compose, Esc, dismiss */
   _simpleButtons: `
@@ -1193,7 +1196,12 @@ const KeyboardAccessoryBar = {
     // Match xterm's prepareTextForTerminal(): CR keeps embedded newlines inside
     // the single-line input transport and is what terminal.paste() emitted.
     const pasteText = text.replace(/\r?\n/g, '\r');
-    app._sendInputAsync(sessionId, `\x1b[200~${pasteText}\x1b[201~`);
+    const payload = `\x1b[200~${pasteText}\x1b[201~`;
+    if (payload.length > 65536) {
+      app.showToast?.(`Prompt is too long to send (maximum ${this._composerMaxLength.toLocaleString()} characters)`, 'error');
+      return false;
+    }
+    app._sendInputAsync(sessionId, payload);
     setTimeout(() => app._sendInputAsync(sessionId, '\r', { useMux: true }), 120);
     return true;
   },

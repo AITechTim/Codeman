@@ -269,6 +269,21 @@ describe('mobile prompt composer', () => {
     expect(app._echoPassthroughSessions.has('session-2')).toBe(true);
   });
 
+  it('keeps an oversized prompt as a draft instead of queueing a rejected frame', () => {
+    const { app, bar, document } = loadComposer();
+    bar.composePrompt();
+    const input = textarea(document);
+    input.value = 'x'.repeat(65525);
+    input.dispatchEvent(new document.defaultView!.Event('input', { bubbles: true }));
+
+    (document.querySelector('.paste-send') as HTMLButtonElement).click();
+
+    expect(app._sendInputAsync).not.toHaveBeenCalled();
+    expect(app.showToast).toHaveBeenCalledWith(expect.stringContaining('too long'), 'error');
+    expect(document.querySelector('.prompt-composer-overlay')).not.toBeNull();
+    expect(bar._composerDrafts.get('session-1')).toHaveLength(65525);
+  });
+
   it('preserves the draft and focuses xterm when Use terminal keyboard is chosen', () => {
     const { app, bar, document, localEcho, runTimers } = loadComposer();
     const composeButton = mountComposeButton(bar, document);
