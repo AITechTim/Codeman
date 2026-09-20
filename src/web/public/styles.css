@@ -13613,6 +13613,14 @@ body.touch-device.cjk-input-visible .main {
   background: var(--control-bg-hover);
 }
 
+.accessory-btn-compose.has-draft::after {
+  width: 6px;
+  height: 6px;
+  background: var(--yellow);
+  border-radius: 50%;
+  content: '';
+}
+
 .accessory-btn svg {
   width: 14px;
   height: 14px;

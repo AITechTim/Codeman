@@ -777,6 +777,7 @@ const KeyboardAccessoryBar = {
     // The ⇧←/⇧→ keys are Codex bindings: same shape, gated on the active
     // session's mode instead of a setting.
     this.syncCodexKeys();
+    this._syncComposerDraftIndicator();
 
     // Add click handlers — preventDefault stops event from reaching terminal
     this.element.addEventListener('click', (e) => {
@@ -824,6 +825,7 @@ const KeyboardAccessoryBar = {
     }
     this._applyLayout(this._resolveMode());
     this.syncCodexKeys();
+    this._syncComposerDraftIndicator();
   },
 
   /** Which layout the current state calls for. */
@@ -851,6 +853,20 @@ const KeyboardAccessoryBar = {
     this.clearCtrl();
     this.element.innerHTML =
       mode === 'shell' ? this._shellButtons : mode === 'extended' ? this._extendedButtons : this._simpleButtons;
+    this._syncComposerDraftIndicator();
+  },
+
+  /** Show when the active session has a prompt parked in memory. The marker
+   *  keeps non-Send closes visible without copying the draft back into the PTY
+   *  and creating a second source of truth. */
+  _syncComposerDraftIndicator() {
+    const button = this.element?.querySelector('[data-action="compose"]');
+    if (!button) return;
+    const sessionId = typeof app !== 'undefined' ? app.activeSessionId : null;
+    const hasDraft = !!(sessionId && this._composerDrafts.get(sessionId));
+    button.classList.toggle('has-draft', hasDraft);
+    button.title = hasDraft ? 'Resume saved prompt draft' : 'Compose prompt';
+    button.setAttribute('aria-label', hasDraft ? 'Compose prompt, draft saved' : 'Compose prompt');
   },
 
   // ── One-shot Ctrl modifier (shell bar) ──────────────────────────────────
@@ -1166,19 +1182,18 @@ const KeyboardAccessoryBar = {
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
   },
 
-  /** Deliver one complete prompt through xterm's paste path. terminal.paste()
-   *  preserves bracketed-paste markers and multiline content; Enter is a
-   *  separate delayed durable write because Codex drops keys sharing a PTY read
-   *  with a bracketed paste. Capture the session so a fast tab switch cannot
-   *  submit the prompt in a different pane. */
+  /** Deliver one complete prompt as an explicit bracketed paste. xterm loses
+   *  its DECSET 2004 mirror after terminal replay, even though the CLI still
+   *  expects bracketed input, so build the byte-identical sequence directly on
+   *  the durable session-bound path. Enter stays a separate delayed write
+   *  because Codex drops keys sharing a PTY read with a bracketed paste. */
   _sendComposedPrompt(sessionId, text) {
-    if (!sessionId || !text || !app.terminal?.paste) return false;
-    if (app.terminal.modes?.bracketedPasteMode !== true) {
-      app.showToast?.('Prompt composer is waiting for the agent input to become ready', 'info');
-      return false;
-    }
+    if (!sessionId || !text || typeof app._sendInputAsync !== 'function') return false;
     app._predictiveEcho?.clearPredictions();
-    app.terminal.paste(text);
+    // Match xterm's prepareTextForTerminal(): CR keeps embedded newlines inside
+    // the single-line input transport and is what terminal.paste() emitted.
+    const pasteText = text.replace(/\r?\n/g, '\r');
+    app._sendInputAsync(sessionId, `\x1b[200~${pasteText}\x1b[201~`, { useMux: true });
     setTimeout(() => app._sendInputAsync(sessionId, '\r', { useMux: true }), 120);
     return true;
   },
@@ -1187,6 +1202,7 @@ const KeyboardAccessoryBar = {
   discardComposerDraft(sessionId) {
     this._composerDrafts.delete(sessionId);
     this._composerUploads.delete(sessionId);
+    this._syncComposerDraftIndicator();
     if (this._composerOverlay?.dataset.sessionId === sessionId) {
       this._composerOverlay._closeComposer?.({ preserveDraft: false });
     }
@@ -1238,6 +1254,7 @@ const KeyboardAccessoryBar = {
     const focusTrap = new FocusTrap(overlay);
     textarea.value = initial;
     if (initial) this._composerDrafts.set(sessionId, initial);
+    this._syncComposerDraftIndicator();
     const initialUploads = this._composerUploads.get(sessionId) || 0;
     imageButton.disabled = initialUploads > 0;
     sendButton.disabled = initialUploads > 0;
@@ -1246,6 +1263,7 @@ const KeyboardAccessoryBar = {
     const saveDraft = () => {
       if (textarea.value) this._composerDrafts.set(sessionId, textarea.value);
       else this._composerDrafts.delete(sessionId);
+      this._syncComposerDraftIndicator();
     };
     const close = ({ focusTerminal = false, preserveDraft = true, restoreFocus = true } = {}) => {
       if (preserveDraft) saveDraft();
@@ -1259,6 +1277,7 @@ const KeyboardAccessoryBar = {
       const text = textarea.value;
       if (!text || !this._sendComposedPrompt(sessionId, text)) return;
       this._composerDrafts.delete(sessionId);
+      this._syncComposerDraftIndicator();
       close({ preserveDraft: false });
     };
     const handleImages = async (files) => {
@@ -1293,6 +1312,7 @@ const KeyboardAccessoryBar = {
           else if (app.sessions?.has(sessionId)) {
             const draft = this._composerDrafts.get(sessionId) || '';
             this._composerDrafts.set(sessionId, `${draft}${draft && !/\s$/.test(draft) ? ' ' : ''}${paths.join(' ')}`);
+            this._syncComposerDraftIndicator();
           }
         }
       } finally {

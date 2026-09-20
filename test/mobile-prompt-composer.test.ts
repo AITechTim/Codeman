@@ -92,6 +92,14 @@ function textarea(document: Document): HTMLTextAreaElement {
   return document.querySelector('.prompt-composer-textarea') as HTMLTextAreaElement;
 }
 
+function mountComposeButton(bar: any, document: Document): HTMLButtonElement {
+  bar.element = document.createElement('div');
+  bar.element.innerHTML = bar._simpleButtons;
+  document.body.appendChild(bar.element);
+  bar._syncComposerDraftIndicator();
+  return bar.element.querySelector('[data-action="compose"]') as HTMLButtonElement;
+}
+
 describe('mobile prompt composer', () => {
   beforeEach(() => vi.restoreAllMocks());
 
@@ -145,13 +153,16 @@ describe('mobile prompt composer', () => {
 
   it('closes on tab switch and keeps drafts isolated by session', () => {
     const { app, bar, document } = loadComposer();
+    const composeButton = mountComposeButton(bar, document);
     bar.composePrompt();
     textarea(document).value = 'first session draft';
     textarea(document).dispatchEvent(new document.defaultView!.Event('input', { bubbles: true }));
+    expect(composeButton.classList.contains('has-draft')).toBe(true);
 
     app.activeSessionId = 'session-2';
     bar.refreshForActiveSession();
     expect(document.querySelector('.prompt-composer-overlay')).toBeNull();
+    expect(composeButton.classList.contains('has-draft')).toBe(false);
     expect(() => bar.refreshForActiveSession()).not.toThrow();
     bar.composePrompt();
     expect(textarea(document).value).toBe('');
@@ -161,19 +172,24 @@ describe('mobile prompt composer', () => {
 
     app.activeSessionId = 'session-1';
     bar.refreshForActiveSession();
+    expect(composeButton.classList.contains('has-draft')).toBe(true);
+    expect(composeButton.getAttribute('aria-label')).toBe('Compose prompt, draft saved');
     bar.composePrompt();
     expect(textarea(document).value).toBe('first session draft');
   });
 
   it('drops a draft and closes its composer when the session is deleted', () => {
     const { bar, document } = loadComposer();
+    const composeButton = mountComposeButton(bar, document);
     bar.composePrompt();
     textarea(document).value = 'temporary secret';
     textarea(document).dispatchEvent(new document.defaultView!.Event('input', { bubbles: true }));
+    expect(composeButton.classList.contains('has-draft')).toBe(true);
 
     bar.discardComposerDraft('session-1');
 
     expect(document.querySelector('.prompt-composer-overlay')).toBeNull();
+    expect(composeButton.classList.contains('has-draft')).toBe(false);
     bar.composePrompt();
     expect(textarea(document).value).toBe('');
   });
@@ -187,6 +203,7 @@ describe('mobile prompt composer', () => {
 
   it('keeps Enter as a newline and sends multiline text once via bracketed paste plus delayed Enter', () => {
     const { app, bar, document, timers, runTimers } = loadComposer();
+    const composeButton = mountComposeButton(bar, document);
     bar.composePrompt();
     const input = textarea(document);
     input.value = 'first line\nsecond line';
@@ -197,44 +214,51 @@ describe('mobile prompt composer', () => {
     expect(app._sendInputAsync).not.toHaveBeenCalled();
     (document.querySelector('.paste-send') as HTMLButtonElement).click();
 
-    expect(app.terminal.paste).toHaveBeenCalledOnce();
-    expect(app.terminal.paste).toHaveBeenCalledWith('first line\nsecond line');
-    expect(app._sendInputAsync).not.toHaveBeenCalled();
+    expect(app.terminal.paste).not.toHaveBeenCalled();
+    expect(app._sendInputAsync).toHaveBeenCalledOnce();
+    expect(app._sendInputAsync).toHaveBeenNthCalledWith(1, 'session-1', '\x1b[200~first line\rsecond line\x1b[201~', {
+      useMux: true,
+    });
+    expect(composeButton.classList.contains('has-draft')).toBe(false);
     expect(timers).toContainEqual(expect.objectContaining({ delay: 120 }));
     runTimers();
-    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\r', { useMux: true });
+    expect(app._sendInputAsync).toHaveBeenNthCalledWith(2, 'session-1', '\r', { useMux: true });
     expect(document.querySelector('.prompt-composer-overlay')).toBeNull();
 
     bar.composePrompt();
     expect(textarea(document).value).toBe('');
   });
 
-  it('keeps the draft open when the agent has not enabled bracketed paste', () => {
-    const { app, bar, document } = loadComposer();
+  it('sends after replay resets xterm’s mirrored bracketed-paste mode', () => {
+    const { app, bar, document, runTimers } = loadComposer();
     app.terminal.modes.bracketedPasteMode = false;
     bar.composePrompt();
-    textarea(document).value = 'do not lose this';
+    textarea(document).value = 'still\nmultiline';
     textarea(document).dispatchEvent(new document.defaultView!.Event('input', { bubbles: true }));
 
     (document.querySelector('.paste-send') as HTMLButtonElement).click();
 
     expect(app.terminal.paste).not.toHaveBeenCalled();
-    expect(app._sendInputAsync).not.toHaveBeenCalled();
-    expect(textarea(document).value).toBe('do not lose this');
-    expect(app.showToast).toHaveBeenCalledWith(
-      'Prompt composer is waiting for the agent input to become ready',
-      'info'
-    );
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x1b[200~still\rmultiline\x1b[201~', {
+      useMux: true,
+    });
+    expect(document.querySelector('.prompt-composer-overlay')).toBeNull();
+    expect(app.showToast).not.toHaveBeenCalled();
+    runTimers();
+    expect(app._sendInputAsync).toHaveBeenLastCalledWith('session-1', '\r', { useMux: true });
   });
 
   it('preserves the draft and focuses xterm when Use terminal keyboard is chosen', () => {
     const { app, bar, document, localEcho, runTimers } = loadComposer();
+    const composeButton = mountComposeButton(bar, document);
     bar.composePrompt();
     textarea(document).value = 'keep this';
     textarea(document).dispatchEvent(new document.defaultView!.Event('input', { bubbles: true }));
     (document.querySelector('.prompt-composer-terminal') as HTMLButtonElement).click();
 
     expect(app.terminal.focus).toHaveBeenCalledOnce();
+    expect(composeButton.classList.contains('has-draft')).toBe(true);
+    expect(composeButton.title).toBe('Resume saved prompt draft');
     runTimers();
     localEcho.pendingText = '; then continue';
     bar.composePrompt();
