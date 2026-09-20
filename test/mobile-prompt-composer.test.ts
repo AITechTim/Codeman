@@ -217,9 +217,7 @@ describe('mobile prompt composer', () => {
 
     expect(app.terminal.paste).not.toHaveBeenCalled();
     expect(app._sendInputAsync).toHaveBeenCalledOnce();
-    expect(app._sendInputAsync).toHaveBeenNthCalledWith(1, 'session-1', '\x1b[200~first line\rsecond line\x1b[201~', {
-      useMux: true,
-    });
+    expect(app._sendInputAsync).toHaveBeenNthCalledWith(1, 'session-1', '\x1b[200~first line\rsecond line\x1b[201~');
     expect(composeButton.classList.contains('has-draft')).toBe(false);
     expect(timers).toContainEqual(expect.objectContaining({ delay: 120 }));
     runTimers();
@@ -240,9 +238,7 @@ describe('mobile prompt composer', () => {
     (document.querySelector('.paste-send') as HTMLButtonElement).click();
 
     expect(app.terminal.paste).not.toHaveBeenCalled();
-    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x1b[200~still\rmultiline\x1b[201~', {
-      useMux: true,
-    });
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x1b[200~still\rmultiline\x1b[201~');
     expect(document.querySelector('.prompt-composer-overlay')).toBeNull();
     expect(app.showToast).not.toHaveBeenCalled();
     runTimers();

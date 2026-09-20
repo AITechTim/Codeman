@@ -1193,7 +1193,7 @@ const KeyboardAccessoryBar = {
     // Match xterm's prepareTextForTerminal(): CR keeps embedded newlines inside
     // the single-line input transport and is what terminal.paste() emitted.
     const pasteText = text.replace(/\r?\n/g, '\r');
-    app._sendInputAsync(sessionId, `\x1b[200~${pasteText}\x1b[201~`, { useMux: true });
+    app._sendInputAsync(sessionId, `\x1b[200~${pasteText}\x1b[201~`);
     setTimeout(() => app._sendInputAsync(sessionId, '\r', { useMux: true }), 120);
     return true;
   },
