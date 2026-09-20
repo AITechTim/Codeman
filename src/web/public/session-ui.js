@@ -666,16 +666,31 @@ Object.assign(CodemanApp.prototype, {
    * `state === 'ready'` check. Returns null for a plain (non-llama-swap) server, an
    * unreachable endpoint, or a loaded model this host no longer lists as discovered —
    * never throws, since a failed probe should just skip promotion, not break the picker.
+   *
+   * ⚠️ Client-side bounded to ~800ms via Promise.race, on top of (never instead of) the
+   * route's own 5s server-side timeout (`RUNNING_TIMEOUT_MS`, custom-model-routes.ts) —
+   * a saved endpoint keeps its discovered models cached, so "the box behind this endpoint
+   * is asleep or firewalled" is a normal way to reach this path, not an exotic one, and
+   * the modal must not sit invisible (Run menu already closed, nothing else on screen)
+   * for the full 5s a slow/dead endpoint can take. The losing side of the race is left to
+   * resolve on its own — `.catch(() => null)` only stops an unhandled-rejection warning
+   * when it eventually fails, it never cancels the in-flight fetch.
+   *
+   * `timeoutMs` exists to let a test drive this in milliseconds instead of the real
+   * 800 — same reasoning as `_watchLlamaSwapLoading`'s own `pollIntervalMs`: this code
+   * runs inside a JSDOM window's own realm, whose `setTimeout` is not the one
+   * `vi.useFakeTimers()` patches, so a param is the only way to test the timeout without
+   * actually waiting on it. Real callers never pass it.
    */
-  async _getCustomModelCurrentlyLoaded(host) {
-    try {
-      const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(host.id)}/running-status`);
-      if (!status?.isLlamaSwap) return null;
-      const ready = (status.running || []).find((r) => r.state === 'ready' && (host.models || []).includes(r.model));
-      return ready?.model || null;
-    } catch {
-      return null;
-    }
+  async _getCustomModelCurrentlyLoaded(host, timeoutMs = 800) {
+    const probe = this._apiJson(`/api/model-endpoints/${encodeURIComponent(host.id)}/running-status`).catch(
+      () => null
+    );
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
+    const status = await Promise.race([probe, timeout]);
+    if (!status?.isLlamaSwap) return null;
+    const ready = (status.running || []).find((r) => r.state === 'ready' && (host.models || []).includes(r.model));
+    return ready?.model || null;
   },
 
   /**
@@ -844,10 +859,12 @@ Object.assign(CodemanApp.prototype, {
    * (Codex, confirmed live) than on claude's own `--resume`-based restart.
    */
   async runCustomModelEntry(mode, endpointId, modelId) {
-    // Recorded on the attempt, not gated on success below — the picker's "Last used"
-    // promotion is a convenience hint, not a launch-history log, so it should reflect
-    // what the user picked even if this particular launch goes on to fail.
-    this._setCustomModelLastUsed(mode, endpointId, modelId);
+    // "Last used" is recorded by each path itself, ONLY once the model is actually
+    // applied — never here, unconditionally, on the mere attempt. A context-window
+    // warning or a swap-conflict question can still say no after this call, and the
+    // context-warning case is the one that bites: declining it means this exact
+    // model cannot work with this CLI at all, so promoting it as "Last used" next
+    // time the picker opens would be actively wrong, not just premature.
     if (mode === 'claude') {
       return this._runCustomModelEntryViaRestart(mode, endpointId, modelId);
     }
@@ -940,7 +957,15 @@ Object.assign(CodemanApp.prototype, {
       answered = { ...answered, confirmedSwap: true };
       data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, ...answered } });
     }
-    this._lastCustomModelLaunchResult = data?.success !== false ? data?.data : undefined;
+    const launched = data?.success !== false;
+    this._lastCustomModelLaunchResult = launched ? data?.data : undefined;
+    // Only once actually launched, and only for a call that carried a custom-model pick
+    // at all — `_launchQuickStartInstances` runs every quick-start body (custom-model or
+    // not) through this same function, so a plain launch must not fall through here with
+    // an undefined endpointId/modelId that quietly no-ops the (mode, endpointId) key.
+    if (launched && bodyObj.customModel) {
+      this._setCustomModelLastUsed(bodyObj.mode, bodyObj.customModel.endpointId, bodyObj.customModel.modelId);
+    }
     return data;
   },
 
@@ -1067,6 +1092,11 @@ Object.assign(CodemanApp.prototype, {
       });
       return;
     }
+
+    // The apply has actually succeeded and both questions (if asked) are answered
+    // yes — only now is this a real "last used" for the picker's next open, not
+    // before either confirmation had a chance to decline it.
+    this._setCustomModelLastUsed(mode, endpointId, modelId);
 
     // The apply above already succeeded — the session IS pointed at the endpoint — but
     // llama-swap itself may still be unloading the old model and loading this one, which

@@ -183,6 +183,28 @@ launch, with the endpoint's `defaultModelId` marked but not auto-chosen —
 the point of asking is letting one launch deliberately differ from the
 saved default, not just confirming it.
 
+The modal promotes exactly one row to the top of the list rather than
+always showing raw discovery order, so the zero-wait choice is the one
+under your thumb:
+
+- **"Currently loaded"** — a model from this host's own list that
+  llama-swap reports `ready` right now, queried via
+  `GET /api/model-endpoints/:id/running-status`. Bounded client-side to
+  ~800ms (`Promise.race`), on top of the route's own 5s server-side
+  timeout, so an endpoint that is asleep or firewalled cannot leave the
+  modal invisible for the full 5s after the Run menu has already closed.
+- **"Last used"** — shown only when nothing is currently loaded: the model
+  actually launched last for this exact (harness, endpoint) pair, read
+  from the per-device `codeman:customModelLastUsed:<mode>:<endpointId>`
+  localStorage key. Written by `runCustomModelEntry` /
+  `_quickStartWithCustomModelConfirm` only once the model is actually
+  applied, never on the mere click — declining the context-window warning
+  means this exact model cannot work with this CLI at all, so promoting it
+  next time would be actively wrong, not just premature.
+
+Neither tag reorders anything past that one promoted row, and both defer
+to "Default" when neither applies.
+
 **How the launch itself applies the endpoint depends on the harness.** For
 opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP (`runCustomModelEntry` →
 `_runCustomModelEntryOneShot`), the endpoint/model is folded into the SAME

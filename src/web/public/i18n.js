@@ -312,6 +312,8 @@
       '运行菜单选择器会为此端点应用该模型。请先发现可用模型。',
     'Custom Endpoints': '自定义端点',
     'Choose a model': '选择模型',
+    'Currently loaded': '当前已加载',
+    'Last used': '上次使用',
     'That endpoint no longer exists': '该端点已不存在',
     'No models discovered for this endpoint yet': '此端点尚未发现任何模型',
     'Subagent Options': '子智能体选项',

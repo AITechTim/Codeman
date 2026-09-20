@@ -357,10 +357,19 @@ describe('Custom Model Endpoint Profiles: the "which model" picker', () => {
     expect(buttons[0].textContent).toContain('qwen3');
   });
 
-  it('remembers the launched model as "last used" for this (harness, endpoint) pair', async () => {
+  it('remembers the launched model as "last used" only once the apply actually succeeds, not on the mere attempt', async () => {
     const { win, app } = bootApp({});
-    app.run = async () => {};
-    app._api = async () => ({ ok: true, json: async () => ({ success: true, data: {} }) });
+    app.activeSessionId = 'old-session';
+    // A real new session, and a real successful apply with no questions asked — the
+    // restart path only reaches its _setCustomModelLastUsed call past both.
+    app.run = async () => {
+      app.activeSessionId = 'new-session';
+    };
+    app._api = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ success: true, data: { customModel: { endpointId: 'llama-box' }, restarted: true } }),
+    });
 
     await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
 
@@ -461,6 +470,48 @@ describe('Custom Model Endpoint Profiles: the "which model" picker', () => {
     };
     await app.selectCustomModelEntry('claude', 'llama-box');
     expect(toastMessage).toMatch(/no models discovered/i);
+  });
+});
+
+describe('Custom Model Endpoint Profiles: _getCustomModelCurrentlyLoaded is client-side bounded', () => {
+  // `timeoutMs` driven in milliseconds rather than the real 800 — same reasoning as
+  // `_watchLlamaSwapLoading`'s own `pollIntervalMs` a few describe blocks down: this
+  // code runs inside the JSDOM window's own realm, whose setTimeout vi.useFakeTimers()
+  // does not patch, so this is the only way to test the bound without actually waiting
+  // on it (or, worse, hanging on a promise that deliberately never resolves).
+
+  it('never lets an endpoint that never answers keep the picker waiting past the client-side bound', async () => {
+    const { app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3'] }],
+    });
+    // A `running-status` probe that simply never resolves — the exact shape of an
+    // endpoint that is asleep or firewalled, distinct from one that answers an error.
+    app._apiJson = () => new Promise(() => {});
+
+    const result = await app._getCustomModelCurrentlyLoaded({ id: 'llama-box', models: ['qwen3'] }, 5);
+
+    expect(result).toBeNull();
+  });
+
+  it('an endpoint that answers well within the bound is unaffected by it', async () => {
+    const { app } = bootApp({});
+    app._apiJson = async () => ({ isLlamaSwap: true, running: [{ model: 'qwen3', state: 'ready' }] });
+
+    const result = await app._getCustomModelCurrentlyLoaded({ id: 'llama-box', models: ['qwen3'] }, 5);
+
+    expect(result).toBe('qwen3');
+  });
+
+  it('a rejected probe settles quietly to null rather than leaving an unhandled rejection once the timeout has already won the race', async () => {
+    const { app } = bootApp({});
+    app._apiJson = () => new Promise((_resolve, reject) => setTimeout(() => reject(new Error('boom')), 10));
+
+    const result = await app._getCustomModelCurrentlyLoaded({ id: 'llama-box', models: ['qwen3'] }, 2);
+    expect(result).toBeNull();
+    // Give the loser of the race a turn to actually reject and hit its own .catch —
+    // an unswallowed rejection here would surface as an "Unhandled Errors" failure
+    // for the whole test file, not a failed assertion in this test.
+    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 });
 
@@ -1156,8 +1207,8 @@ describe("Custom Model Endpoint Profiles: requiresContextWarning (this CLI's own
     return { win, app, applyBodies };
   }
 
-  it('confirming the in-app context-warning modal re-sends the apply with confirmed:true', async () => {
-    const { app, applyBodies } = launchHarness([
+  it('confirming the in-app context-warning modal re-sends the apply with confirmed:true, and only THEN records "last used"', async () => {
+    const { win, app, applyBodies } = launchHarness([
       { requiresContextWarning: true, modelId: 'qwen3', contextLength: 16384, minSafeContextTokens: 40000 },
       { customModel: { endpointId: 'llama-box' }, restarted: true, modelSwapInProgress: false },
     ]);
@@ -1174,10 +1225,11 @@ describe("Custom Model Endpoint Profiles: requiresContextWarning (this CLI's own
       { endpointId: 'llama-box', modelId: 'qwen3' },
       { endpointId: 'llama-box', modelId: 'qwen3', confirmedContext: true },
     ]);
+    expect(win.localStorage.getItem('codeman:customModelLastUsed:claude:llama-box')).toBe('qwen3');
   });
 
-  it('declining the in-app context-warning modal keeps the native backend and never re-sends the apply', async () => {
-    const { app, applyBodies } = launchHarness([
+  it('declining the in-app context-warning modal keeps the native backend, never re-sends the apply, and must NEVER record this model as "last used" — it cannot work with this CLI at all', async () => {
+    const { win, app, applyBodies } = launchHarness([
       { requiresContextWarning: true, modelId: 'qwen3', contextLength: 16384, minSafeContextTokens: 40000 },
     ]);
     app._confirmContextWarning = async () => false;
@@ -1190,6 +1242,7 @@ describe("Custom Model Endpoint Profiles: requiresContextWarning (this CLI's own
 
     expect(applyBodies).toHaveLength(1); // no second (confirmed) call
     expect(toastMessage).toMatch(/context window too small/i);
+    expect(win.localStorage.getItem('codeman:customModelLastUsed:claude:llama-box')).toBeNull();
   });
 });
 
