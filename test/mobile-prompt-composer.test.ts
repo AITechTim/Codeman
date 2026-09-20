@@ -38,6 +38,7 @@ function loadComposer(sessionId = 'session-1') {
     _localEchoOverlay: localEcho,
     _flushedOffsets: new Map<string, number>(),
     _flushedTexts: new Map<string, string>(),
+    _echoPassthroughSessions: new Set<string>(),
     _predictiveEcho: { clearPredictions: vi.fn() },
     _sendInputAsync: vi.fn(),
     _uploadAndInsertImages: vi.fn(async () => ['/tmp/image-one.png']),
@@ -246,6 +247,19 @@ describe('mobile prompt composer', () => {
     expect(app.showToast).not.toHaveBeenCalled();
     runTimers();
     expect(app._sendInputAsync).toHaveBeenLastCalledWith('session-1', '\r', { useMux: true });
+  });
+
+  it('releases echo passthrough after a composed prompt is queued', () => {
+    const { app, bar, document } = loadComposer();
+    app._echoPassthroughSessions.add('session-1');
+    app._echoPassthroughSessions.add('session-2');
+    bar.composePrompt();
+    textarea(document).value = 'send from composer';
+
+    (document.querySelector('.paste-send') as HTMLButtonElement).click();
+
+    expect(app._echoPassthroughSessions.has('session-1')).toBe(false);
+    expect(app._echoPassthroughSessions.has('session-2')).toBe(true);
   });
 
   it('preserves the draft and focuses xterm when Use terminal keyboard is chosen', () => {

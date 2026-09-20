@@ -1276,6 +1276,7 @@ const KeyboardAccessoryBar = {
     const send = () => {
       const text = textarea.value;
       if (!text || !this._sendComposedPrompt(sessionId, text)) return;
+      app._echoPassthroughSessions?.delete(sessionId);
       this._composerDrafts.delete(sessionId);
       this._syncComposerDraftIndicator();
       close({ preserveDraft: false });
