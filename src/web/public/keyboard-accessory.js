@@ -1156,13 +1156,13 @@ const KeyboardAccessoryBar = {
     const pending = app._localEchoOverlay.pendingText || '';
     const overlayFlushed = app._localEchoOverlay.getFlushed?.() || {};
     const flushedText = overlayFlushed.text || app._flushedTexts?.get(sessionId) || '';
-    const flushedCount = overlayFlushed.count || app._flushedOffsets?.get(sessionId) || 0;
+    const flushedLength = Array.from(flushedText).length;
     app._localEchoOverlay.clear();
     app._localEchoOverlay.suppressBufferDetection?.();
     app._flushedOffsets?.delete(sessionId);
     app._flushedTexts?.delete(sessionId);
-    if (flushedCount > 0) {
-      app._sendInputAsync(sessionId, '\x7f'.repeat(flushedCount), { useMux: true });
+    if (flushedLength > 0) {
+      app._sendInputAsync(sessionId, '\x7f'.repeat(flushedLength), { useMux: true });
     }
     return flushedText + pending;
   },

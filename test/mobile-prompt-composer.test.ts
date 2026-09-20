@@ -152,6 +152,17 @@ describe('mobile prompt composer', () => {
     expect(app._flushedTexts.has('session-1')).toBe(false);
   });
 
+  it('uses Unicode code points when erasing flushed text', () => {
+    const { app, bar, document } = loadComposer();
+    app._flushedOffsets.set('session-1', 3);
+    app._flushedTexts.set('session-1', 'a😀');
+
+    bar.composePrompt();
+
+    expect(textarea(document).value).toBe('a😀');
+    expect(app._sendInputAsync).toHaveBeenCalledWith('session-1', '\x7f'.repeat(2), { useMux: true });
+  });
+
   it('closes on tab switch and keeps drafts isolated by session', () => {
     const { app, bar, document } = loadComposer();
     const composeButton = mountComposeButton(bar, document);
