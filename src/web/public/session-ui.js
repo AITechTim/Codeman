@@ -633,11 +633,53 @@ Object.assign(CodemanApp.prototype, {
     if (models.length === 1) {
       return this.runCustomModelEntry(mode, endpointId, models[0]);
     }
-    this._openCustomModelPickModal(mode, host);
+    await this._openCustomModelPickModal(mode, host);
+  },
+
+  /** localStorage key for the last model launched on a given (harness, endpoint) pair — per-device by design, like every other `codeman:*` UI preference, never synced. */
+  _customModelLastUsedKey(mode, endpointId) {
+    return `codeman:customModelLastUsed:${mode}:${endpointId}`;
+  },
+
+  /** Reads the last model chosen for this (harness, endpoint) pair, or null. Never throws — a blocked/full localStorage just means no promotion, not a broken picker. */
+  _getCustomModelLastUsed(mode, endpointId) {
+    try {
+      return localStorage.getItem(this._customModelLastUsedKey(mode, endpointId));
+    } catch {
+      return null;
+    }
+  },
+
+  /** Remembers `modelId` as the last one launched for this (harness, endpoint) pair. */
+  _setCustomModelLastUsed(mode, endpointId, modelId) {
+    try {
+      localStorage.setItem(this._customModelLastUsedKey(mode, endpointId), modelId);
+    } catch {
+      // best-effort — losing the "last used" hint is cosmetic, never worth surfacing
+    }
+  },
+
+  /**
+   * Best-effort lookup of the model llama-swap currently has loaded and ready on this
+   * endpoint, so the picker can offer it first instead of making the user remember what
+   * they picked last time it mattered. Mirrors `_watchLlamaSwapLoading`'s own
+   * `state === 'ready'` check. Returns null for a plain (non-llama-swap) server, an
+   * unreachable endpoint, or a loaded model this host no longer lists as discovered —
+   * never throws, since a failed probe should just skip promotion, not break the picker.
+   */
+  async _getCustomModelCurrentlyLoaded(host) {
+    try {
+      const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(host.id)}/running-status`);
+      if (!status?.isLlamaSwap) return null;
+      const ready = (status.running || []).find((r) => r.state === 'ready' && (host.models || []).includes(r.model));
+      return ready?.model || null;
+    } catch {
+      return null;
+    }
   },
 
   /** Renders the "which model" picker for a (harness, endpoint) pair with more than one discovered model. */
-  _openCustomModelPickModal(mode, host) {
+  async _openCustomModelPickModal(mode, host) {
     const modal = document.getElementById('customModelPickModal');
     const list = document.getElementById('customModelPickList');
     if (!modal || !list) return;
@@ -649,13 +691,29 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('customModelPickTitle').textContent = 'Choose a model';
     document.getElementById('customModelPickHint').textContent =
       `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
-    list.innerHTML = (host.models || [])
+
+    // Whichever model llama-swap actually has loaded right now beats a merely
+    // remembered choice — it's what a launch would attach to with zero wait, while
+    // "last used" might have been swapped out by another session since. Neither
+    // reorders past the top: exactly one model is promoted, everything else keeps
+    // its discovery order.
+    const currentlyLoaded = await this._getCustomModelCurrentlyLoaded(host);
+    const lastUsed = currentlyLoaded ? null : this._getCustomModelLastUsed(mode, host.id);
+    const promoted = currentlyLoaded || lastUsed;
+    const models = [...(host.models || [])];
+    if (promoted && models.includes(promoted)) {
+      models.splice(models.indexOf(promoted), 1);
+      models.unshift(promoted);
+    }
+
+    list.innerHTML = models
       .map((m) => {
         const isDefault = m === host.defaultModelId;
+        const tag = m === currentlyLoaded ? 'Currently loaded' : m === lastUsed ? 'Last used' : isDefault ? 'Default' : null;
         const arg = escapeHtml(JSON.stringify(m));
         return `
           <button class="run-mode-option" onclick="app.chooseCustomModelAndRun(${arg})">
-            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${isDefault ? ' <span class="set-scope">Default</span>' : ''}
+            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${tag ? ` <span class="set-scope">${escapeHtml(tag)}</span>` : ''}
           </button>`;
       })
       .join('');
@@ -771,6 +829,10 @@ Object.assign(CodemanApp.prototype, {
    * (Codex, confirmed live) than on claude's own `--resume`-based restart.
    */
   async runCustomModelEntry(mode, endpointId, modelId) {
+    // Recorded on the attempt, not gated on success below — the picker's "Last used"
+    // promotion is a convenience hint, not a launch-history log, so it should reflect
+    // what the user picked even if this particular launch goes on to fail.
+    this._setCustomModelLastUsed(mode, endpointId, modelId);
     if (mode === 'claude') {
       return this._runCustomModelEntryViaRestart(mode, endpointId, modelId);
     }

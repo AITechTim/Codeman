@@ -272,6 +272,101 @@ describe('Custom Model Endpoint Profiles: the "which model" picker', () => {
     expect(win.document.getElementById('customModelPickList')!.textContent).toContain('Default');
   });
 
+  it('promotes the model llama-swap currently has loaded and ready to the top of the list, tagged', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3', 'llama3', 'phi4'] }],
+    });
+    const origApiJson = app._apiJson;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/llama-box/running-status') {
+        return { isLlamaSwap: true, running: [{ model: 'phi4', state: 'ready' }] };
+      }
+      return origApiJson(path);
+    };
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    const buttons = [...win.document.getElementById('customModelPickList')!.querySelectorAll('button')];
+    expect(buttons.map((b) => b.textContent)).toHaveLength(3);
+    expect(buttons[0].textContent).toContain('phi4');
+    expect(buttons[0].textContent).toContain('Currently loaded');
+    // Nothing else got relabelled or reordered past the promoted row.
+    expect(buttons[1].textContent).toContain('qwen3');
+    expect(buttons[2].textContent).toContain('llama3');
+  });
+
+  it('falls back to the last model launched on this (harness, endpoint) pair when nothing is currently loaded', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3', 'llama3', 'phi4'] }],
+    });
+    const origApiJson = app._apiJson;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/llama-box/running-status') return { isLlamaSwap: false, running: [] };
+      return origApiJson(path);
+    };
+    // Simulate a prior launch on this exact (harness, endpoint) pair having picked llama3.
+    win.localStorage.setItem('codeman:customModelLastUsed:claude:llama-box', 'llama3');
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    const buttons = [...win.document.getElementById('customModelPickList')!.querySelectorAll('button')];
+    expect(buttons[0].textContent).toContain('llama3');
+    expect(buttons[0].textContent).toContain('Last used');
+    expect(buttons[0].textContent).not.toContain('Currently loaded');
+  });
+
+  it('prefers the currently-loaded model over a stale "last used" entry when both are present', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3', 'llama3', 'phi4'] }],
+    });
+    const origApiJson = app._apiJson;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/llama-box/running-status') {
+        return { isLlamaSwap: true, running: [{ model: 'phi4', state: 'ready' }] };
+      }
+      return origApiJson(path);
+    };
+    win.localStorage.setItem('codeman:customModelLastUsed:claude:llama-box', 'llama3');
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    const buttons = [...win.document.getElementById('customModelPickList')!.querySelectorAll('button')];
+    expect(buttons[0].textContent).toContain('phi4');
+    expect(buttons[0].textContent).toContain('Currently loaded');
+  });
+
+  it('is not fooled by a model llama-swap reports loaded but not yet ready, or one this host no longer lists', async () => {
+    const { win, app } = bootApp({
+      hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3', 'llama3'] }],
+    });
+    const origApiJson = app._apiJson;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/llama-box/running-status') {
+        // "loading", not "ready" — and a model id this host's own /v1/models no longer serves.
+        return { isLlamaSwap: true, running: [{ model: 'ghost-model', state: 'loading' }] };
+      }
+      return origApiJson(path);
+    };
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    const list = win.document.getElementById('customModelPickList')!;
+    expect(list.textContent).not.toContain('Currently loaded');
+    expect(list.textContent).not.toContain('ghost-model');
+    const buttons = [...list.querySelectorAll('button')];
+    expect(buttons[0].textContent).toContain('qwen3');
+  });
+
+  it('remembers the launched model as "last used" for this (harness, endpoint) pair', async () => {
+    const { win, app } = bootApp({});
+    app.run = async () => {};
+    app._api = async () => ({ ok: true, json: async () => ({ success: true, data: {} }) });
+
+    await app.runCustomModelEntry('claude', 'llama-box', 'qwen3');
+
+    expect(win.localStorage.getItem('codeman:customModelLastUsed:claude:llama-box')).toBe('qwen3');
+  });
+
   it('picking a row in the modal closes it and launches with that exact model', async () => {
     const { win, app } = bootApp({
       hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://localhost:8080', models: ['qwen3', 'llama3'] }],
