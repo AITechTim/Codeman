@@ -24,53 +24,70 @@ const PUBLIC = fileURLToPath(new URL('../src/web/public/', import.meta.url));
 const SCANNED_FILES = ['session-ui.js', 'mobile-overview.js'];
 
 /**
- * Every currently-surviving branch, each with the reason it is not a
- * CLI-behaviour branch a `CliCapabilities` field should express, keyed
- * `<file>::<the matched expression>` — deliberately NO line number. An
- * earlier version keyed on `<file>::<line>::<expression>`, and inserting one
- * comment line at the top of `session-ui.js` shifted every subsequent line
- * number, so all 21 entries went stale and the same 21 branches were then
- * reported as "new". `session-ui.js` is one of the most contended files in
- * the repo, so a guard that goes red on any unrelated edit to it sends the
- * next person after the wrong problem. Several entries below cover more than
- * one physical call site sharing the same expression in the same file —
- * that collapsing is the point, not a loss of precision (the backend guard
- * this mirrors made the identical choice, for the identical reason).
+ * Every currently-surviving branch, each with the COUNT of physical call
+ * sites carrying it and the reason none of them is a `CliCapabilities`
+ * field, keyed `<file>::<the matched expression>` — deliberately NO line
+ * number. An earlier version keyed on `<file>::<line>::<expression>`, and
+ * inserting one comment line at the top of `session-ui.js` shifted every
+ * subsequent line number, so all 21 entries went stale and the same 21
+ * branches were then reported as "new". `session-ui.js` is one of the most
+ * contended files in the repo, so a guard that goes red on any unrelated
+ * edit to it sends the next person after the wrong problem.
+ *
+ * The `count` is what closes the gap dropping the line number opened: a key
+ * alone says "this expression is approved somewhere in this file", so a
+ * BRAND NEW `mode === 'codex'` site anywhere in `session-ui.js` would reuse
+ * the same key as the two approved ones and pass silently. The count makes
+ * that a mismatch — one more occurrence than declared — and the "counts
+ * match" test below catches it, while a genuinely new expression (a CLI id
+ * with no ALLOWED_BRANCHES entry at all) is still caught by the separate
+ * "no unapproved id branches" test either way.
  */
-const ALLOWED_BRANCHES: Record<string, string> = {
-  "session-ui.js::mode === 'shell'":
-    'run() dispatch: shell needs no CLI probe at all, and it keeps its own row in the ' +
-    'button-label ternary (pinned exact text, see Open Question 7 in PR-B2.md)',
+const ALLOWED_BRANCHES: Record<string, { count: number; reason: string }> = {
+  "session-ui.js::mode === 'shell'": {
+    count: 2,
+    reason:
+      'run() dispatch (shell needs no CLI probe at all) and the button-label ternary (pinned exact ' +
+      "text — test/run-mode-ui.test.ts asserts e.g. 'Run OMP', which diverges from CliEntry.shortBadge " +
+      "for at least omp ('OM' vs the displayed 'OMP'), so a catalogue-driven rewrite would silently " +
+      'change user-visible text and break that pinned test; the maintainer confirmed leaving this ' +
+      'hardcoded, see the PR #458 review thread)',
+  },
 
-  "session-ui.js::mode === 'claude'":
-    'four claude-specific call sites, not one branch: run() dispatch (claude has its own ' +
-    'remote/docker branching and parallel-create path, unlike every RUN_MODE_LAUNCH entry), ' +
-    'runCustomModelEntry() (restart-vs-one-shot launch mechanism, not a preference — see ' +
-    "CLAUDE.md's Custom Model Endpoint Profiles section), the Respawn/Ralph section (claude-only " +
-    "by design, mirroring the backend capabilities.ralph gate), and the runMode setter's " +
-    'validity check',
+  "session-ui.js::mode === 'claude'": {
+    count: 4,
+    reason:
+      'four claude-specific call sites, not one branch: run() dispatch (claude has its own ' +
+      'remote/docker branching and parallel-create path, unlike every RUN_MODE_LAUNCH entry), ' +
+      'runCustomModelEntry() (restart-vs-one-shot launch mechanism, not a preference — see ' +
+      "CLAUDE.md's Custom Model Endpoint Profiles section), the Respawn/Ralph section (claude-only " +
+      "by design, mirroring the backend capabilities.ralph gate), and the runMode setter's " +
+      'validity check',
+  },
 
   // The 8 external CLIs share the same two call sites and the same reason at
-  // each: the button-label ternary (pinned exact text — test/run-mode-ui.test.ts
-  // asserts e.g. 'Run OMP', which diverges from CliEntry.shortBadge for at
-  // least omp ('OM' vs the displayed 'OMP'), so a catalogue-driven rewrite
-  // would silently change user-visible text and break that pinned test — see
-  // Open Question 7 in PR-B2.md), and the runMode property setter's validity
-  // allowlist (not a behaviour branch; left hardcoded in Phase 2 since its
-  // chain has no shell arm at all and no evidence of what callers rely on it).
-  "session-ui.js::mode === 'opencode'": 'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'codex'": 'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'gemini'": 'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'antigravity'":
-    'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'pi'": 'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'grok'": 'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'deepseek'": 'button-label ternary + runMode setter validity check (see the header comment)',
-  "session-ui.js::mode === 'omp'": 'button-label ternary + runMode setter validity check (see the header comment)',
+  // each: the button-label ternary (see the shell entry above for why it
+  // stays hardcoded) and the runMode property setter's validity allowlist
+  // (not a behaviour branch; left hardcoded in Phase 2 since its chain has
+  // no shell arm at all and no evidence of what callers rely on it).
+  "session-ui.js::mode === 'opencode'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
+  "session-ui.js::mode === 'codex'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
+  "session-ui.js::mode === 'gemini'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
+  "session-ui.js::mode === 'antigravity'": {
+    count: 2,
+    reason: 'button-label ternary + runMode setter validity check',
+  },
+  "session-ui.js::mode === 'pi'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
+  "session-ui.js::mode === 'grok'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
+  "session-ui.js::mode === 'deepseek'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
+  "session-ui.js::mode === 'omp'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
 
   // mobile-overview.js: shell is exempt from the isCliAvailable() gate the
   // same way the toolbar's #runModeMenu exempts it (shell needs no CLI).
-  "mobile-overview.js::mode !== 'shell'": 'shell needs no CLI, so it is exempt from the availability gate',
+  "mobile-overview.js::mode !== 'shell'": {
+    count: 1,
+    reason: 'shell needs no CLI, so it is exempt from the availability gate',
+  },
 };
 
 /** Every stock CLI id, derived rather than restated so a new entry is covered automatically. */
@@ -119,6 +136,12 @@ function scan(): Finding[] {
 
 const findings = scan();
 
+function actualCounts(): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const f of findings) counts.set(f.key, (counts.get(f.key) ?? 0) + 1);
+  return counts;
+}
+
 describe('no NEW CLI-id branching in session-ui.js / mobile-overview.js (PR B2)', () => {
   it('scans both files (sanity)', () => {
     // If this drops to zero the scanner or the file list drifted and every
@@ -164,13 +187,33 @@ describe('no NEW CLI-id branching in session-ui.js / mobile-overview.js (PR B2)'
     ).toEqual([]);
   });
 
-  it('has no stale allowlist entries', () => {
-    // An allowlisted branch that no longer exists anywhere in either file is a
-    // lie about the codebase, and the next person to reintroduce that exact
-    // expression would sail straight through under a pre-approved reason that
-    // no longer describes anything real.
-    const present = new Set(findings.map((f) => f.key));
-    const stale = Object.keys(ALLOWED_BRANCHES).filter((key) => !present.has(key));
-    expect(stale, `ALLOWED_BRANCHES entries no longer present — delete them:\n  ${stale.join('\n  ')}`).toEqual([]);
+  it('every allowlisted branch occurs exactly its declared number of times', () => {
+    // This is what closes the gap the line-number removal opened (see the
+    // ALLOWED_BRANCHES header comment): a key alone cannot tell "the two
+    // approved sites" from "the two approved sites plus a brand new third
+    // one reusing the same expression" — the count can. A mismatch in
+    // either direction is real: higher means an unreviewed NEW branch
+    // landed reusing an approved expression, lower means one of the
+    // reviewed call sites was removed and the entry is now a stale lie
+    // about the codebase (the count going to 0 is the old "stale entry"
+    // case, now folded into this same check rather than a separate one).
+    const actual = actualCounts();
+    const mismatches: string[] = [];
+    for (const [key, { count: expected }] of Object.entries(ALLOWED_BRANCHES)) {
+      const got = actual.get(key) ?? 0;
+      if (got !== expected) {
+        mismatches.push(`  ${key}  expected ${expected}, found ${got}`);
+      }
+    }
+    expect(
+      mismatches,
+      mismatches.length === 0
+        ? ''
+        : `ALLOWED_BRANCHES count mismatch(es):\n${mismatches.join('\n')}\n\n` +
+            'A count LOWER than declared means a reviewed call site was removed — update or delete ' +
+            'the entry. A count HIGHER than declared means a NEW branch landed reusing an already-' +
+            'approved expression — review it and bump the count (or fix the branch) explicitly, ' +
+            'rather than let it ride in on an existing approval.'
+    ).toEqual([]);
   });
 });
