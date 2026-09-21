@@ -81,6 +81,7 @@ import {
   trackActivityStreak,
   isSustainedActivity,
   isPaneQuiet,
+  watchingLabel,
   IDLE_RECHECK_MS,
   PANE_PROBE_MIN_INTERVAL_MS,
   PANE_PROBE_RECHECK_MS,
@@ -497,8 +498,11 @@ export class Session extends EventEmitter {
   private _activityStreak: ActivityStreak | null = null; // Unbroken run of PTY repaints (working detection)
   private _lastPaneProbeAt = 0; // Throttle for the tmux screen probe
   private _lastPaneProbeWorking: boolean | null = null; // Its last verdict (null = could not read)
+  private _watching: string | null = null; // Background work the pane's own footer reports
   /** Lazily compiled `capabilities.workDetect.workingLine`. See _workingLinePattern(). */
   private _workingLineRe: RegExp | undefined = undefined;
+  /** Lazily compiled `capabilities.workDetect.watchingLine`. See _watchingLinePattern(). */
+  private _watchingLineRe: RegExp | null | undefined = undefined;
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
@@ -1119,6 +1123,16 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * What the pane says is still running in the background, e.g. `1 monitor`, or null when
+   * nothing is. A session with a label here has ended its turn without wanting anything
+   * from the user, so a surface that would otherwise file it under "needs you" can say
+   * what it is waiting for instead.
+   */
+  get watching(): string | null {
+    return this._watching;
+  }
+
+  /**
    * Check if the session's process tree has active child processes beyond Claude itself.
    * Detects running bash tools, test suites, builds, servers, etc. that Claude spawned.
    *
@@ -1675,6 +1689,7 @@ export class Session extends EventEmitter {
       totalCost: this._totalCost,
       messageCount: this._messages.length,
       isWorking: this._isWorking,
+      watching: this._watching,
       lastPromptTime: this._lastPromptTime,
       // Buffer statistics for monitoring long-running sessions
       bufferStats: {
@@ -2709,7 +2724,41 @@ export class Session extends EventEmitter {
     this._lastPaneProbeAt = now;
     const text = this._mux.capturePaneText?.(this._muxSession.muxName) ?? null;
     this._lastPaneProbeWorking = text === null ? null : this._workingLinePattern().test(text);
+    this._readWatching(text);
     return this._lastPaneProbeWorking;
+  }
+
+  /**
+   * Read the background-work chip off the same capture the working probe just took.
+   *
+   * The two questions are different. A turn that is running is work the user is waiting
+   * for; a monitor, a backgrounded shell or a cloud session the agent started is work
+   * the AGENT is waiting for, and it is the reason a pane can sit at its composer with
+   * nothing to say and still not want anything from the user. `_confirmIdle` takes this
+   * capture at exactly the moment the turn ends, which is the moment the answer starts
+   * mattering.
+   *
+   * A capture that could not be read leaves the last answer standing, the way the
+   * working probe treats its own null: no evidence is not evidence of none.
+   */
+  private _readWatching(paneText: string | null): void {
+    const pattern = this._watchingLinePattern();
+    if (!pattern || paneText === null) return;
+    this._watching = watchingLabel(paneText, pattern);
+  }
+
+  /**
+   * The regex matching this CLI's background-work chip, or null for a CLI whose registry
+   * entry declares none. Compiled once per session, like the working-line pattern, and
+   * null rather than a fallback: no other CLI has been measured drawing such a chip, and
+   * guessing one would badge sessions on the strength of an unread screen.
+   */
+  private _watchingLinePattern(): RegExp | null {
+    if (this._watchingLineRe === undefined) {
+      const src = getCli(this.mode)?.capabilities.workDetect?.watchingLine;
+      this._watchingLineRe = src ? compileVersionRegex(src) : null;
+    }
+    return this._watchingLineRe;
   }
 
   /**
@@ -3963,6 +4012,9 @@ export class Session extends EventEmitter {
   async stop(killMux: boolean = true): Promise<void> {
     // Set stopped flag first to prevent new timers from being created
     this._isStopped = true;
+    // A pane that is gone is watching nothing. Nothing probes a stopped session, so
+    // without this the last chip it drew would ride along on its row forever.
+    this._watching = null;
 
     this._clearAllTimers();
 

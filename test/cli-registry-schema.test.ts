@@ -122,6 +122,24 @@ describe('workDetect.workingLine is guarded like every other config regex', () =
       expect(compileVersionRegex(src), `${entry.id} declares a workingLine the guard refuses`).not.toBeNull();
     }
   });
+
+  it('holds the optional watchingLine to the same guard', () => {
+    expectRejected((e) => {
+      (e.capabilities as Record<string, unknown>).workDetect = {
+        promptGlyph: '>',
+        workingLine: 'working',
+        watchingLine: '(a+)+b',
+      };
+    }, 'this one runs over a pane capture every time a session settles, so it can freeze the event loop the same way');
+  });
+
+  it('accepts every shipped watchingLine', () => {
+    for (const entry of STOCK_CLIS) {
+      const src = entry.capabilities.workDetect?.watchingLine;
+      if (!src) continue;
+      expect(compileVersionRegex(src), `${entry.id} declares a watchingLine the guard refuses`).not.toBeNull();
+    }
+  });
 });
 
 describe('no shell text can reach the command line', () => {

@@ -73,3 +73,35 @@ describe('vertical session navigation UX contract', () => {
     expect(i18n).toContain("'Adjust only session names in the vertical sidebar.':");
   });
 });
+
+describe('watching badge on a rich session row', () => {
+  it('reads the label off the session payload', () => {
+    expect(app).toContain("watching: typeof session.watching === 'string' ? session.watching : ''");
+  });
+
+  it('renders it beside the state pill rather than in place of it', () => {
+    // A session can be watching a monitor AND holding a question for the user, so the
+    // pill that says which one still decides the row; this badge only adds a fact.
+    const meta = app.slice(app.indexOf('_sidebarRichMetaHTML(row) {'));
+    const body = meta.slice(0, meta.indexOf('_sidebarRichStampText(timestamp, format) {'));
+    expect(body).toContain('tab-pill tab-pill--${escapeHtml(row.state)}');
+    expect(body).toContain('tab-pill tab-pill--watching');
+    expect(body).toContain('Still running in the background:');
+  });
+
+  it('re-renders the row when the background work changes', () => {
+    // The meta line is rebuilt only when this signature moves, so a badge left out of
+    // it would appear and disappear a render late, or not at all.
+    expect(app).toContain(
+      'const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`'
+    );
+  });
+
+  it('colours it with the accent, never with the two colours that mean a human is needed', () => {
+    const rule = styles.slice(styles.indexOf('.tab-pill--watching'));
+    const block = rule.slice(0, rule.indexOf('}'));
+    expect(block).toContain('var(--accent)');
+    expect(block).not.toContain('var(--red)');
+    expect(block).not.toContain('var(--yellow)');
+  });
+});

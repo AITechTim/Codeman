@@ -91,3 +91,42 @@ export function isSustainedActivity(streak: ActivityStreak | null, streakMs: num
 export function isPaneQuiet(lastActivityAt: number, now: number, silenceMs: number = IDLE_SILENCE_MS): boolean {
   return now - lastActivityAt >= silenceMs;
 }
+
+/**
+ * How many lines at the foot of a pane capture may hold the background-work chip.
+ *
+ * Claude Code draws that chip on the last row of the screen, under its composer box
+ * and under whatever status line the user configured, so five lines reach it with
+ * room to spare. The ceiling is the point of the constant: the transcript above the
+ * composer quotes arbitrary text, and a session that PRINTS the words "1 monitor"
+ * must not be read as running one.
+ */
+export const WATCHING_TAIL_LINES = 5;
+
+/**
+ * What a pane says is still running in the background, e.g. `1 monitor` or `2 shells`.
+ *
+ * The CLI writes that chip while a monitor, a backgrounded shell or a cloud session it
+ * started is still going, which is exactly the case where the agent has ended its turn
+ * without wanting anything from the user. `pattern` comes from the CLI's own registry
+ * entry (`capabilities.workDetect.watchingLine`); group 1 is the label when the pattern
+ * declares one, and the whole match stands in when it does not.
+ *
+ * @returns the label, or null when the pane shows no background work
+ */
+export function watchingLabel(paneText: string | null | undefined, pattern: RegExp): string | null {
+  if (!paneText) return null;
+  const lines = paneText
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line !== '');
+  if (lines.length === 0) return null;
+  // A pattern compiled by compileVersionRegex() never carries the `g` flag, but a caller
+  // reaching in from a test or a config reload might, and a stale lastIndex would make
+  // the same screen match every other call.
+  pattern.lastIndex = 0;
+  const match = pattern.exec(lines.slice(-WATCHING_TAIL_LINES).join('\n'));
+  if (!match) return null;
+  const label = (match[1] ?? match[0]).trim();
+  return label === '' ? null : label;
+}

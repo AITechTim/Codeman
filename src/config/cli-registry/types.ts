@@ -344,6 +344,14 @@ export interface CliCapabilities {
     promptGlyph: string;
     /** Source of a regex matching the status line this CLI draws while a turn runs. */
     workingLine: string;
+    /**
+     * Source of a regex matching the chip this CLI draws at the foot of its screen while
+     * work it started in the background is still running, e.g. Claude's `· 1 monitor ·`.
+     * Capture group 1 is the label Codeman shows, and the whole match stands in when the
+     * pattern declares no group. A CLI that omits this reports no background work, which
+     * is what every CLI did before the field existed.
+     */
+    watchingLine?: string;
   };
   /** No direct-PTY fallback: the CLI must run inside tmux (secrets ride tmux setenv). */
   requiresMux: boolean;

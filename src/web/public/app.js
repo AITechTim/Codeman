@@ -4574,6 +4574,11 @@ class CodemanApp {
     return {
       state,
       pill: this._sidebarRichPillLabel(state),
+      // What the pane's own footer says is still running in the background ("1 monitor",
+      // "2 shells"). A row that has one went quiet because the agent is waiting for that,
+      // which is a different thing from waiting for the user — so it rides BESIDE the
+      // state pill and never replaces it.
+      watching: typeof session.watching === 'string' ? session.watching : '',
       createdAt: Number(session.createdAt) || 0,
       since: this._mobileOverviewSince ? this._mobileOverviewSince(state, session) : null,
     };
@@ -4609,6 +4614,13 @@ class CodemanApp {
       parts.push(stamp(row.since.key, row.since.at, 'for', 'tab-meta-since'));
     }
     parts.push(`<span class="tab-pill tab-pill--${escapeHtml(row.state)}">${escapeHtml(row.pill)}</span>`);
+    // The word is duplicated from mobile-overview.js for the same reason the pill labels
+    // above are: it is one word, and this file must render a complete row even when a
+    // stale cached mobile-overview.js has arrived without it.
+    if (row.watching) {
+      const title = escapeHtml(`Still running in the background: ${row.watching}`);
+      parts.push(`<span class="tab-pill tab-pill--watching" title="${title}">watching</span>`);
+    }
     // Both absolute stamps ALSO on the line itself, not only on the two items.
     // Below 288px the rail hides `.tab-meta-created` (the `tab-rail-tight`
     // rule), and a tooltip on a `display: none` element has no hover target —
@@ -4646,7 +4658,7 @@ class CodemanApp {
     const prev = tab.dataset.tabState;
     // The since ANCHOR moves without the state changing (each new turn re-stamps
     // lastSubmitAt), so key the compare on both.
-    const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}`;
+    const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`;
     if (tab.dataset.tabMetaSig === sig) return;
     tab.dataset.tabMetaSig = sig;
     tab.dataset.tabState = row.state;

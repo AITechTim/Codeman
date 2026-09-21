@@ -308,6 +308,16 @@ const capabilitiesSchema = z
             (src) => compileVersionRegex(src) !== null,
             'workingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
           ),
+        // Same guard, same reasons: this one runs over the foot of a pane capture every
+        // time a session settles, and ~/.codeman/clis.json can set it.
+        watchingLine: z
+          .string()
+          .min(1)
+          .refine(
+            (src) => compileVersionRegex(src) !== null,
+            'watchingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
+          )
+          .optional(),
       })
       .strict()
       .optional(),

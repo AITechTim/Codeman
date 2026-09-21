@@ -2961,6 +2961,13 @@ html.mobile-init .file-browser-panel {
     color: var(--green);
   }
 
+  /* Accent, and none of the three above: a session watching work it started itself
+     is not asking the user for anything, and red and yellow are what say it is. */
+  .mobile-overview-pill--watching {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
   .mobile-overview-chevron {
     flex-shrink: 0;
     color: var(--text-muted);

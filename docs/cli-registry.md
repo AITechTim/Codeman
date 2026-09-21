@@ -36,7 +36,8 @@ interface CliEntry {
   launch: CliLaunch; // the structured argv template
   env: CliEnv; // exports, tmux setenv keys, the env-override allowlist
   capabilities: CliCapabilities; // what every call site reads instead of the id
-  //   .workDetect?: { promptGlyph, workingLine } — how this CLI's pane shows work
+  //   .workDetect?: { promptGlyph, workingLine, watchingLine? } — how this CLI's pane
+  //   shows work, and how it shows work it started in the background
   overlays: CliOverlays; // remote-SSH / Docker pane commands, credential store
 }
 ```
@@ -45,9 +46,18 @@ interface CliEntry {
 
 ### Regexes that come from config
 
-Two capability fields carry a regular expression an override file can set: `discovery.version.regex` and `capabilities.workDetect.workingLine`. Both go through `compileVersionRegex()`, which caps the source at 200 characters, refuses the nested-quantifier shapes that cause catastrophic backtracking, and returns `null` rather than throwing so every caller degrades instead of crashing.
+Three capability fields carry a regular expression an override file can set: `discovery.version.regex`, `capabilities.workDetect.workingLine` and `capabilities.workDetect.watchingLine`. All three go through `compileVersionRegex()`, which caps the source at 200 characters, refuses the nested-quantifier shapes that cause catastrophic backtracking, and returns `null` rather than throwing so every caller degrades instead of crashing.
 
 `workingLine` is the one that matters most, because it is compiled once per session and then run against every accumulated PTY chunk and every pane capture. A nested quantifier there is a ReDoS against the event loop for the whole server, not just that session. The guard therefore runs in two places, and neither is redundant: `schema.ts` rejects the entry at LOAD time so a bad pattern never reaches a session, and `_workingLinePattern()` in `session.ts` compiles through the same helper so the runtime cannot end up with a pattern the schema would have refused.
+
+`watchingLine` reads a different row of the same screen. A CLI draws it while work the agent
+itself started is still running — Claude prints `⏵⏵ bypass permissions on · 1 monitor · ← for
+agents` while a monitor, a backgrounded shell or a cloud session is live — and Codeman shows
+that as the session's watching badge, so a quiet pane waiting for its own background work
+does not read as a pane waiting for a human. `watchingLabel()` in `session-activity.ts` runs
+the pattern over the last few lines of a capture only, because the transcript above the
+composer quotes arbitrary text and a session that PRINTS "1 monitor" is not running one.
+Group 1 is the label, and a CLI that declares no pattern reports no background work.
 
 ### Three capabilities that must stay independent
 
