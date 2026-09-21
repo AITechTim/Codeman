@@ -325,6 +325,55 @@ function parseSessionPrefix(name) {
   return null;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Exited-agent tab label (Ark0N/Codeman#446)
+// ═══════════════════════════════════════════════════════════════
+// The server publishes session.paneExit when the agent inside a local tmux
+// pane has exited while remain-on-exit kept the pane. The field is tri-state
+// and its third state is absence, which means Codeman does not know — that
+// renders as nothing here and must never read as alive.
+//
+// status and signal are each optional, because tmux can know the pane died
+// without reporting how (a SIGKILLed pane on tmux 3.2a reports neither). So an
+// absent status shows a bare "exited" rather than "exited (0)": a clean exit
+// and an unexplained one must not look the same.
+function paneExitLabel(paneExit) {
+  if (!paneExit || typeof paneExit !== 'object') return '';
+  if (typeof paneExit.signal === 'number' && paneExit.signal > 0) return `exited (signal ${paneExit.signal})`;
+  if (typeof paneExit.status === 'number') return `exited (${paneExit.status})`;
+  return 'exited';
+}
+
+// Add, update or remove one tab's exited-agent badge in place. Separate from
+// the render loop so it can be exercised directly: this is the only path a
+// session going live-to-exited ever takes, since that transition adds and
+// removes no tab and so never reaches the full rebuild.
+function applyPaneExitBadge(tab, paneExit) {
+  const label = paneExitLabel(paneExit);
+  const existing = tab.querySelector('.tab-exited-badge');
+  // Quiets the status dot too. That dot reports `status`, which stays `idle` or
+  // `busy` for an exited pane by design, so without this a green or pulsing dot
+  // sits next to a badge saying the agent is gone.
+  tab.classList.toggle('tab-agent-exited', !!label);
+  if (!label) {
+    existing?.remove();
+    return;
+  }
+  if (!existing) {
+    const badge = document.createElement('span');
+    badge.className = 'tab-exited-badge';
+    // Generated status text, like the status pills: it carries data-i18n-skip
+    // rather than a dictionary entry. Without it the translator would rewrite
+    // the badge and the next render pass would rewrite it back, because the
+    // comparison below is against the English string.
+    badge.setAttribute('data-i18n-skip', '');
+    badge.textContent = label;
+    tab.querySelector('.tab-name')?.insertAdjacentElement('afterend', badge);
+    return;
+  }
+  if (existing.textContent !== label) existing.textContent = label;
+}
+
 const DEFAULT_SHORTCUTS = [
   {
     id: 'show-shortcuts',
@@ -4968,6 +5017,11 @@ class CodemanApp {
           statusEl.className = `tab-status ${status}`;
         }
 
+        // The exited-agent badge (Ark0N/Codeman#446). A session going from live
+        // to exited changes no tab count, so the full rebuild below never runs
+        // for it and this is the only path that ever draws the badge.
+        applyPaneExitBadge(tab, session.paneExit);
+
         // Rich sidebar meta ("created 3d ago · working 12m" + pill). The stamps
         // themselves move on _tickSidebarRichTimes(); this is here for the parts
         // a tick cannot see — the state flipping, and with it the pill, the row
@@ -5268,10 +5322,15 @@ class CodemanApp {
         ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}"`
         : '';
 
+      // '' whenever the server said nothing about this pane's agent, which covers
+      // a running pane and every session shape the field never applies to
+      // (direct-PTY, remote SSH, docker). See paneExitLabel().
+      const paneExitBadge = paneExitLabel(session.paneExit);
+
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>`;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${status}" aria-hidden="true"></span>
@@ -5279,6 +5338,7 @@ class CodemanApp {
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : mode === 'grok' ? '<span class="tab-mode grok" aria-hidden="true">gk</span>' : mode === 'deepseek' ? '<span class="tab-mode deepseek" aria-hidden="true">ds</span>' : mode === 'omp' ? '<span class="tab-mode omp" aria-hidden="true">om</span>' : ''}
               <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
+              ${paneExitBadge ? `<span class="tab-exited-badge" data-i18n-skip>${escapeHtml(paneExitBadge)}</span>` : ''}
               ${inlineSessionActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>
