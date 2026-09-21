@@ -451,6 +451,17 @@
     'Show Shortcuts': '显示快捷键',
     'Full shortcut reference': '完整快捷键参考',
 
+    // Mobile prompt composer (keyboard-accessory.js). The textarea's own
+    // placeholder and label are looked up by the module at build time, since
+    // the DOM translator skips <textarea> subtrees.
+    'Compose prompt': '撰写提示词',
+    'Compose prompt, draft saved': '撰写提示词，草稿已保存',
+    'Resume saved prompt draft': '继续编辑已保存的提示词草稿',
+    'Enter adds a new line': '按 Enter 换行',
+    'Write your prompt…': '请输入提示词…',
+    'Use terminal keyboard': '使用终端键盘',
+    'Uploading…': '上传中…',
+
     // Mobile overview (phone home screen)
     'Needs you': '需要你',
     'Current sessions': '当前会话',

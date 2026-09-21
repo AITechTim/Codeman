@@ -13809,7 +13809,10 @@ body.touch-device.cjk-input-visible .main {
 
 .prompt-composer-dialog {
   max-width: 560px;
-  max-height: calc(100dvh - min(15dvh, 72px) - 12px - env(safe-area-inset-bottom));
+  /* The overlay's top inset and bottom gutter, plus the strip a folding device
+     reserves below the dialog (0px everywhere else; see the fold rules at the
+     end of this file). */
+  max-height: calc(100dvh - min(15dvh, 72px) - 12px - env(safe-area-inset-bottom) - var(--fold-block-end));
   overflow-y: auto;
 }
 
@@ -18681,6 +18684,19 @@ html[data-session-list="sidebar"][data-sidebar="collapsed"] .btn-sidebar-toggle 
 .paste-overlay {
   padding-right: var(--fold-inline-end);
   padding-bottom: var(--fold-block-end);
+}
+
+/* The mobile prompt composer is a .paste-overlay with a gutter of its own: a
+   three-value `padding` shorthand whose bottom is 12px plus the safe area. The
+   generic rule above is a later longhand at the same specificity, so it ERASED
+   that gutter (measured at 393x852: padding-bottom 0 instead of 12px, and with
+   the fold variables set the hinge strip stood in for the gutter instead of
+   adding to it). Restate the composer's bottom gutter on top of the strip; the
+   side has no gutter of its own. The dialog's height cap subtracts the same
+   strip where it is declared (.prompt-composer-dialog). */
+.prompt-composer-overlay {
+  padding-right: var(--fold-inline-end);
+  padding-bottom: calc(12px + env(safe-area-inset-bottom) + var(--fold-block-end));
 }
 
 /* The response viewer is a bottom sheet, so a vertical hinge running through it

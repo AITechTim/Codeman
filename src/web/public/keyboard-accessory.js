@@ -636,6 +636,16 @@ function applyOneShotCtrl(data) {
   return { data, consumed: true };
 }
 
+// The composer's Send goes out as ONE bracketed-paste frame on the WebSocket
+// input path, and ws-routes.ts drops a frame longer than MAX_INPUT_LENGTH
+// (config/terminal-limits.ts: 64 KiB, compared in UTF-16 code units) WITHOUT
+// an ACK, which would wedge the durable input queue. So the prompt budget is
+// that limit minus the two markers, derived here once so the refusal in
+// _sendComposedPrompt() and the toast that names the maximum cannot drift.
+const COMPOSER_INPUT_FRAME_LIMIT = 64 * 1024;
+const COMPOSER_PASTE_START = '\x1b[200~';
+const COMPOSER_PASTE_END = '\x1b[201~';
+
 /**
  * KeyboardAccessoryBar - Quick action buttons shown above keyboard when typing.
  */
@@ -654,9 +664,8 @@ const KeyboardAccessoryBar = {
   _composerDrafts: new Map(),
   _composerUploads: new Map(),
   _composerOverlay: null,
-  // Leave room for both six-character bracketed-paste markers under the
-  // WebSocket input frame's 64 KiB character limit.
-  _composerMaxLength: 65524,
+  // Longest prompt Send accepts: the input frame limit minus both markers.
+  _composerMaxLength: COMPOSER_INPUT_FRAME_LIMIT - COMPOSER_PASTE_START.length - COMPOSER_PASTE_END.length,
 
   /** HTML for simple mode: arrows, commands, Compose, Esc, dismiss */
   _simpleButtons: `
@@ -833,7 +842,8 @@ const KeyboardAccessoryBar = {
    *  the next one. */
   refreshForActiveSession() {
     this.clearCtrl();
-    if (this._composerOverlay && this._composerOverlay.dataset.sessionId !== app.activeSessionId) {
+    const activeSessionId = typeof app !== 'undefined' ? app.activeSessionId : null;
+    if (this._composerOverlay && this._composerOverlay.dataset.sessionId !== activeSessionId) {
       this._composerOverlay._closeComposer?.({ restoreFocus: false });
     }
     this._applyLayout(this._resolveMode());
@@ -1206,12 +1216,11 @@ const KeyboardAccessoryBar = {
     // Match xterm's prepareTextForTerminal(): CR keeps embedded newlines inside
     // the single-line input transport and is what terminal.paste() emitted.
     const pasteText = text.replace(/\r?\n/g, '\r');
-    const payload = `\x1b[200~${pasteText}\x1b[201~`;
-    if (payload.length > 65536) {
+    if (pasteText.length > this._composerMaxLength) {
       app.showToast?.(`Prompt is too long to send (maximum ${this._composerMaxLength.toLocaleString()} characters)`, 'error');
       return false;
     }
-    app._sendInputAsync(sessionId, payload);
+    app._sendInputAsync(sessionId, `${COMPOSER_PASTE_START}${pasteText}${COMPOSER_PASTE_END}`);
     setTimeout(() => app._sendInputAsync(sessionId, '\r', { useMux: true }), 120);
     return true;
   },
@@ -1266,6 +1275,13 @@ const KeyboardAccessoryBar = {
 
     this._composerOverlay = overlay;
     const textarea = overlay.querySelector('.prompt-composer-textarea');
+    // i18n.js skips <textarea> subtrees (what is typed there is user content),
+    // so the placeholder and label are translated here, when the dialog is built.
+    const i18n = typeof window !== 'undefined' ? window.CodemanI18n : undefined;
+    if (typeof i18n?.t === 'function') {
+      textarea.placeholder = i18n.t('Write your prompt…');
+      textarea.setAttribute('aria-label', i18n.t('Prompt'));
+    }
     const fileInput = overlay.querySelector('.paste-file-input');
     const imageButton = overlay.querySelector('.paste-image');
     const sendButton = overlay.querySelector('.paste-send');
@@ -1292,8 +1308,10 @@ const KeyboardAccessoryBar = {
     };
     overlay._closeComposer = close;
     const send = () => {
+      // Whitespace-only counts as empty (it would submit blank lines), but the
+      // text goes out untrimmed so deliberate leading or trailing lines survive.
       const text = textarea.value;
-      if (!text || !this._sendComposedPrompt(sessionId, text)) return;
+      if (!text.trim() || !this._sendComposedPrompt(sessionId, text)) return;
       app._echoPassthroughSessions?.delete(sessionId);
       this._composerDrafts.delete(sessionId);
       this._syncComposerDraftIndicator();

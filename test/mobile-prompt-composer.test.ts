@@ -299,6 +299,32 @@ describe('mobile prompt composer', () => {
     expect(bar._composerDrafts.get('session-1')).toHaveLength(65525);
   });
 
+  it('treats a whitespace-only draft as empty instead of submitting blank lines', () => {
+    const { app, bar, document } = loadComposer();
+    bar.composePrompt();
+    textarea(document).value = ' \n\n ';
+
+    (document.querySelector('.paste-send') as HTMLButtonElement).click();
+
+    expect(app._sendInputAsync).not.toHaveBeenCalled();
+    expect(document.querySelector('.prompt-composer-overlay')).not.toBeNull();
+  });
+
+  it('derives the prompt budget from the 64 KiB input frame minus both paste markers', () => {
+    // ws-routes.ts drops a frame longer than MAX_INPUT_LENGTH without an ACK,
+    // so a prompt of exactly the budget must produce a frame of exactly 64 KiB.
+    const { app, bar, document } = loadComposer();
+    expect(bar._composerMaxLength).toBe(64 * 1024 - '\x1b[200~\x1b[201~'.length);
+    bar.composePrompt();
+    textarea(document).value = 'y'.repeat(bar._composerMaxLength);
+
+    (document.querySelector('.paste-send') as HTMLButtonElement).click();
+
+    expect(app._sendInputAsync).toHaveBeenCalledOnce();
+    expect((app._sendInputAsync.mock.calls[0][1] as string).length).toBe(64 * 1024);
+    expect(app.showToast).not.toHaveBeenCalled();
+  });
+
   it('preserves the draft and focuses xterm when Use terminal keyboard is chosen', () => {
     const { app, bar, document, localEcho, runTimers } = loadComposer();
     const composeButton = mountComposeButton(bar, document);
