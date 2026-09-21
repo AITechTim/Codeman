@@ -41,6 +41,26 @@ Releases that change `server.Dockerfile`, `docker-compose.yaml`, or add a key to
 changed, and asks you to run `Start-Codeman.sh` here on the host instead. Details:
 [`../docs/docker-self-update.md`](../docs/docker-self-update.md).
 
+### Major updates
+
+`Start-Codeman.sh` rebuilds the image and clears the build-artefact volumes on
+its own, but only when it detects the checkout's HEAD or `package-lock.json`
+moved — exactly right for an ordinary `git pull`, too conservative when a
+release note (or the updater's own blocker message) calls for starting over.
+For that case, `docker/Update-Codeman.sh` stops the stack, force-rebuilds the
+image with no layer cache, then hands off to `Start-Codeman.sh` for the usual
+start:
+
+```sh
+bash docker/Update-Codeman.sh
+```
+
+Add `--volumes` to also clear the `codeman-node-modules`/`codeman-dist`
+volumes — the scripted form of "Resetting the build artefacts" in
+[`../docs/docker-self-update.md`](../docs/docker-self-update.md). Those two
+are the only named volumes this stack declares; application data and case
+workspaces are host bind mounts and are never touched either way.
+
 ## Local customisation
 
 Compose merges `docker-compose.override.yml` on top of `docker-compose.yaml`. Keep host-specific changes there rather than editing `docker-compose.yaml`, so this repository can be updated without losing them. Both `docker-compose.override.yml` and `docker-compose.override.yaml` are ignored by Git.

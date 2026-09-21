@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,7 @@ const compose = read('docker/docker-compose.yaml');
 const entrypoint = read('docker/entrypoint.sh');
 const dockerfile = read('docker/server.Dockerfile');
 const startScript = read('docker/Start-Codeman.sh');
+const updateScript = read('docker/Update-Codeman.sh');
 
 /** The `- NAME` entries under `cap_add:` (the block ends at the next key at the same indent). */
 function composeCapAdd(text: string): string[] {
@@ -171,6 +172,59 @@ describe('Start-Codeman.sh', () => {
 
   it('falls back to `down --volumes` when the Compose project name cannot be resolved', () => {
     expect(startScript).toMatch(/if \[\[ -z "\$project_name" \]\]; then[\s\S]*down --volumes/);
+  });
+});
+
+describe('Update-Codeman.sh (the scripted major-update path — docker/README.md "Major updates")', () => {
+  it('parses under bash -n', () => {
+    execFileSync('bash', ['-n', join(ROOT, 'docker/Update-Codeman.sh')]);
+  });
+
+  it('is executable, like every other script this deployment runs directly', () => {
+    // Windows checkouts (this repo is developed on both) do not carry a real
+    // execute bit, so this only meaningfully asserts on POSIX — matching how
+    // docker/README.md documents running it (`bash docker/Update-Codeman.sh`,
+    // not `./docker/Update-Codeman.sh`) either way.
+    if (process.platform === 'win32') return;
+    const mode = statSync(join(ROOT, 'docker/Update-Codeman.sh')).mode;
+    expect(mode & 0o111).not.toBe(0);
+  });
+
+  it('stops the stack, THEN force-rebuilds with --no-cache, THEN hands off to Start-Codeman.sh', () => {
+    const down = updateScript.indexOf('"${compose_command[@]}" down');
+    const build = updateScript.indexOf('"${compose_command[@]}" build --no-cache');
+    const handoff = updateScript.indexOf('exec "$script_dir/Start-Codeman.sh"');
+    expect(down).toBeGreaterThan(-1);
+    expect(build).toBeGreaterThan(down);
+    expect(handoff).toBeGreaterThan(build);
+  });
+
+  it('--volumes (or -v) removes the named volumes on the way down; the default path does not', () => {
+    expect(updateScript).toMatch(/--volumes \| -v\)\s*\n\s*remove_volumes=1/);
+    expect(updateScript).toMatch(/"\$\{compose_command\[@\]\}" down --volumes/);
+    // The unconditional call further down (the else branch) must stay a plain
+    // `down` — accidentally merging the two branches would silently start
+    // wiping the build-artefact volumes on every major update, not just when
+    // the flag is passed.
+    expect(updateScript).toMatch(/else\s*\n\s*"\$\{compose_command\[@\]\}" down\s*\n\s*fi/);
+  });
+
+  it('rejects an unrecognised argument rather than silently ignoring it', () => {
+    expect(updateScript).toMatch(/Error: unrecognised argument/);
+    expect(updateScript).toMatch(/exit 1/);
+  });
+
+  it('resolves the override file exactly like Start-Codeman.sh, so `down` and `up` never target different Compose files', () => {
+    // \r stripped before comparing: git's autocrlf normalises the COMMITTED blob to LF
+    // either way, but a Windows checkout can have already converted one file's line
+    // endings on disk and not the other's (e.g. Start-Codeman.sh checked out before this
+    // script existed), which would fail a raw byte comparison for a reason that has
+    // nothing to do with the two scripts actually agreeing.
+    const overrideBlock = (script: string) =>
+      script
+        .slice(script.indexOf('override_yml='), script.indexOf('compose_command=(docker compose'))
+        .replace(/\r\n/g, '\n');
+    expect(overrideBlock(updateScript)).toBe(overrideBlock(startScript));
   });
 });
 
