@@ -36,7 +36,7 @@ unattended. You can leave while it builds. What it asks you:
 2. **How the dashboard should be reachable.** Three choices:
    - **Tailscale** (recommended for phone access): keeps the loopback bind, installs
      Tailscale if needed, logs in, enables the tailnet HTTPS toggle (it opens the admin
-     page for you and waits), then configures `tailscale serve` after the build and
+     page for you and waits; Ctrl+C there skips Tailscale for this run), then configures `tailscale serve` after the build and
      verifies the result end to end. If another app already owns `:443` on your node,
      you choose between a sub-path (`https://<machine>.<tailnet>.ts.net/codeman`, the
      default), a second port, replacing the other mapping, or skipping.
@@ -88,7 +88,9 @@ curl -fsSL https://getcodeman.com/install | bash -s -- --local --run
 `--tailscale` / `--lan` / `--local` answer the access question, `--name <n>` / `--no-rename`
 the name, `--service` / `--run` / `--no-start` the last one. `--yes` takes every default
 (it still waits on a Tailscale login URL, and a network bind still asks for a password).
-`--port <n>` moves Codeman off 3000; the service file and the serve mapping follow it.
+`--port <n>` moves Codeman off 3000; the service file and the serve mapping follow it. On an
+existing install, `--port` and `--password` re-run the setup so the service file picks them up,
+and a re-run with `--lan` or `--tailscale` keeps the password the service already has.
 
 **Automation and CI**: with no terminal attached, any step that would change the system
 aborts with instructions instead of running silently. Set `CODEMAN_NONINTERACTIVE=1` to

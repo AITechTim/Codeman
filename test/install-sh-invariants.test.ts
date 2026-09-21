@@ -407,3 +407,127 @@ describe('install.sh detect_all_clis and a disabled entry', () => {
     expect(run.stdout).toContain('found=0');
   });
 });
+
+describe('install.sh review fixes for #460', () => {
+  // Each pin here is a finding from the two reviews of PR #460 (the DeepSeek Harness
+  // pass, then the Claude pass), kept as a static guard so the fix cannot quietly rot.
+  const fn = (name: string, until: string) => {
+    const start = SOURCE.indexOf(`${name}() {`);
+    expect(start, `${name}() missing`).toBeGreaterThan(-1);
+    const end = SOURCE.indexOf(until, start);
+    expect(end, `${until} missing after ${name}()`).toBeGreaterThan(start);
+    return SOURCE.slice(start, end);
+  };
+
+  it('keeps an existing password on the flag and env preset paths', () => {
+    // `--lan --service` on a unit that carried a password used to rewrite it without the
+    // password and with the unauthenticated ack; `--tailscale` dropped it the same way.
+    const body = fn('choose_network_binding', 'get_tailscale_path() {');
+    expect(body.match(/BIND_PASSWORD="\$\{CODEMAN_PASSWORD:-\$EXISTING_PASSWORD\}"/g)?.length).toBe(2);
+    expect(body).not.toMatch(/BIND_PASSWORD="\$\{CODEMAN_PASSWORD:-\}"/);
+    // The presets can only keep what was read, so the read comes first.
+    expect(body.indexOf('read_existing_binding')).toBeLessThan(body.indexOf('CODEMAN_HOST:-'));
+  });
+
+  it('composes the hand-start environment in one place', () => {
+    // "Do not start" under a sub-path or a custom port used to print a bare `codeman web`
+    // under URLs that carried both.
+    const hint = fn('start_command_hint', 'export_bind_env() {');
+    const exported = fn('export_bind_env', '# A QR code of the URL');
+    for (const key of [
+      'CODEMAN_HOST',
+      'CODEMAN_PASSWORD',
+      'CODEMAN_ALLOW_UNAUTHENTICATED_NETWORK',
+      'CODEMAN_BASE_URL',
+      'CODEMAN_PORT',
+    ]) {
+      expect(hint, `${key} missing from start_command_hint`).toContain(key);
+      expect(exported, `${key} missing from export_bind_env`).toContain(key);
+    }
+    const done = fn('print_done_screen', '\nupdate() {');
+    expect(done).toContain('$(start_command_hint)');
+    expect(done).not.toMatch(/CODEMAN_HOST=0\.0\.0\.0 codeman web/);
+  });
+
+  it('flips RECONFIGURE for --password and --port', () => {
+    // Neither used to, so on a completed install both took the quiet update path, which
+    // never rewrites the unit: the password never landed and the port stayed at 3000.
+    const parse = fn('parse_flags', '# Sourcing guard');
+    for (const label of ['--password)', '--password=*)', '--port)', '--port=*)']) {
+      const at = parse.indexOf(label);
+      expect(at, `${label} missing`).toBeGreaterThan(-1);
+      expect(parse.slice(at, parse.indexOf(';;', at)), `${label} does not reconfigure`).toContain('RECONFIGURE="1"');
+    }
+  });
+
+  it('ends the sudo keepalive and exports the binding before the exec', () => {
+    // exec skips the EXIT trap, and the keepalive keys on $$, which becomes the server's
+    // pid: it refreshed the sudo timestamp for the server's whole life.
+    const execAt = SOURCE.indexOf('exec node "$INSTALL_DIR/dist/index.js" web');
+    expect(execAt).toBeGreaterThan(-1);
+    const before = SOURCE.slice(SOURCE.lastIndexOf('source "$profile"', execAt), execAt);
+    expect(before).toContain('export_bind_env');
+    expect(before).toContain('stop_background_helpers');
+  });
+
+  it('lets Ctrl+C skip the HTTPS-toggle poll instead of ending the run', () => {
+    const body = fn('ensure_tailnet_https', 'tailnet_https_poll() {');
+    expect(body).toMatch(/trap '[^']*' INT/);
+    expect(body).toContain('trap - INT');
+    expect(fn('tailnet_https_poll', '# Everything Tailscale that needs a human')).toContain('sleep 5 || true');
+  });
+
+  it('asks before removing a LaunchDaemon it never wrote', () => {
+    const body = fn('uninstall', '\nusage() {');
+    const ask = body.indexOf('prompt_yes_no "Remove that LaunchDaemon too');
+    expect(ask).toBeGreaterThan(-1);
+    expect(body.indexOf('sudo rm -f "$daemon_plist"')).toBeGreaterThan(ask);
+  });
+
+  it('re-syncs the unit after `install.sh name` re-adds the mapping, and ends an update on the done screen', () => {
+    const name = fn('setup_name_subcommand', '\nstatus_subcommand() {');
+    expect(name.indexOf('sync_service_base_url')).toBeGreaterThan(name.indexOf('tailscale_choose_mapping'));
+    expect(name.indexOf('sync_service_base_url')).toBeLessThan(name.indexOf('tailscale_apply'));
+    expect(fn('update', '\nuninstall() {')).toContain('print_done_screen "" ""');
+  });
+
+  it('reads the Tailscale state in the preflight without node, and no longer records TS_JOINED_HERE', () => {
+    const preflight = fn('preflight_detect', '\nprint_preflight_summary() {');
+    expect(preflight).toContain('ts_backend_state');
+    expect(preflight).not.toContain('command -v node');
+    expect(fn('ts_backend_state', '\nts_dns_name() {')).toContain('sed -n');
+    expect(SOURCE).not.toContain('TS_JOINED_HERE');
+    expect(CODE).not.toContain('at port 3000');
+  });
+
+  it('drives the kept password and the start line in a real bash', () => {
+    const DRIVER = `
+      set -euo pipefail
+      export CODEMAN_INSTALL_SH_LIB=1
+      . "$1"
+      read_existing_binding() { EXISTING_FOUND=1; EXISTING_HOST=0.0.0.0; EXISTING_PASSWORD=s3cret; EXISTING_ACK=0; EXISTING_BASE_URL=""; }
+      tailscale_prepare() { return 0; }
+      parse_flags $DRIVE_FLAGS
+      choose_network_binding >/dev/null 2>&1
+      echo "host=$BIND_HOST pw=$BIND_PASSWORD ack=$BIND_ACK"
+      BIND_HOST=0.0.0.0; BIND_PASSWORD=x; BIND_ACK=0; BIND_BASE_URL=/codeman; CODEMAN_PORT=4000
+      echo "hint=$(start_command_hint)"
+      BIND_HOST=127.0.0.1; BIND_PASSWORD=""; BIND_BASE_URL=""; CODEMAN_PORT=""
+      echo "bare=$(start_command_hint)"
+    `;
+    const drive = (flags: string) => {
+      const env = { ...process.env, DRIVE_FLAGS: flags };
+      delete env.CODEMAN_PASSWORD;
+      const result = spawnSync('bash', ['-c', DRIVER, 'bash', INSTALL_SH], { encoding: 'utf-8', timeout: 30_000, env });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout;
+    };
+    const lan = drive('--lan');
+    expect(lan).toContain('host=0.0.0.0 pw=s3cret ack=0');
+    expect(lan).toContain(
+      "hint=CODEMAN_HOST=0.0.0.0 CODEMAN_PASSWORD='<your-password>' CODEMAN_BASE_URL=/codeman CODEMAN_PORT=4000 codeman web"
+    );
+    expect(lan).toContain('bare=codeman web');
+    expect(drive('--tailscale')).toContain('host=127.0.0.1 pw=s3cret ack=0');
+  });
+});

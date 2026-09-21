@@ -37,6 +37,20 @@ Verification record for phase 1 (all on the maintainer's box, 2026-09-20):
   absent / logged out / HTTPS toggle off, the rename against a real node (the
   off-rename-re-add order is implemented but only unit-driven), macOS, uninstall. The
   Mac mini and a throwaway VM are the venues; see section 8.
+- **Review fixes (2026-09-21)**, from the two reviews on PR #460 (DeepSeek Harness, then
+  Claude): the done screen's Start line is composed from every non-default value
+  (`start_command_hint`, shared with the exec branch as `export_bind_env`), so "do not
+  start" under a sub-path or a custom port no longer prints a bare `codeman web`; the
+  `--lan`/`--tailscale`/env preset paths keep an existing password instead of rewriting
+  the unit open; `--password`/`--port` flip `RECONFIGURE` so they reach the unit;
+  `install.sh name` re-syncs the unit's base URL after a rename; the sudo keepalive is
+  ended before the `exec` into the foreground server; Ctrl+C in the HTTPS-toggle poll
+  skips Tailscale instead of killing the run; `uninstall` asks before removing a
+  LaunchDaemon it never wrote; a foreign LaunchDaemon gets a restart hint and the done
+  screen stops claiming the new build is running; the preflight summary reads the
+  Tailscale state without node; the LAN security notice uses the configured port; a
+  bare re-run ends on the done screen; a build failure after a rename names the
+  `install.sh tailscale` recovery; `TS_JOINED_HERE` is gone.
 
 Goal, in one sentence: a user runs the one-liner, answers at most three questions, walks
 away during the build, and comes back to `https://<name>.<tailnet>.ts.net` printed with a
@@ -88,7 +102,7 @@ unit, so they cannot simply be merged. Left as-is in this plan (see section 9).
 | Option | Resulting URL | What it needs | Side effects | Verdict |
 | ------ | ------------- | ------------- | ------------ | ------- |
 | **A. Node name** (today) | `https://tnode.tailf80371.ts.net` | `tailscale serve --bg 3000` | none | **Default.** Zero admin-console work, matches the maintainer's prod. |
-| **B. Rename the node** | `https://codeman-tnode.tailf80371.ts.net` | `tailscale set --hostname codeman-<host>` (operator or root) | Renames the machine tailnet-wide: ssh targets, other serve URLs, the admin console entry. Tailscale de-dups a clash as `-1`. The cert follows the new name. | **Opt-in**, default YES only when the installer itself just joined this machine to the tailnet (nobody depends on the old name yet), default NO on a pre-existing node. |
+| **B. Rename the node** | `https://codeman-tnode.tailf80371.ts.net` | `tailscale set --hostname codeman-<host>` (operator or root) | Renames the machine tailnet-wide: ssh targets, other serve URLs, the admin console entry. Tailscale de-dups a clash as `-1`. The cert follows the new name. | **Opt-in, default NO everywhere** (owner decision 2026-09-20: the machine is used for other things, so a bare Enter never renames it). The proposal was YES when the installer itself had just joined the tailnet; rejected. |
 | **C. Tailscale Service** | `https://codeman.tailf80371.ts.net` | tailscale >= 1.86 on the host; the host must have a **tag-based identity** ("You cannot use a device authenticated with a user account as a Service host"); the service is defined in the admin console first; the host is then approved there (or via `autoApprovers.services`). Public beta since 2025-10-28, all plans. | Re-authenticating a personal machine as a tagged node changes its identity (SSH ACLs, user attribution). Known daemon quirk: approval is not picked up until `serve clear` + re-advertise (tailscale/tailscale#18821). | **Detect and hint only** in this round. The maintainer's own node has `Self.Tags: null`, so it could not host one without re-tagging. Worth a real flow once someone with a tagged fleet asks. |
 | **D. Sub-path** | `https://tnode.tailf80371.ts.net/codeman` | `tailscale serve --bg --set-path /codeman 3000` plus `--base-url /codeman` on the server | Codeman runs under a prefix. Hooks are unaffected (they hit the raw port with no prefix, which `rewriteUrl` already tolerates). Serve forwards the prefix unchanged, which is exactly the shape `--base-url` was built for. | **The answer when `:443` root is already taken.** Replaces today's replace-or-nothing prompt. |
 | **E. Second port** | `https://tnode.tailf80371.ts.net:8443` | `tailscale serve --bg --https=8443 3000` | Port in the URL; the beta-preview recipe already uses this. | Fallback when the user rejects D. |
@@ -129,7 +143,7 @@ re-add**.
        Choose [1/2/3] (default 1):
 
   2/3  Name this machine "codeman-tnode" on your tailnet? [y/N]
-       (only shown for option 1; default Y when the installer just joined the tailnet)
+       (only shown for option 1; default no, always)
 
   3/3  Run Codeman as a background service that starts on boot? [Y/n]
 
@@ -226,8 +240,10 @@ The state machine from the previous plan stays; these are the changes.
 1. **Preflight, before the build** (`tailscale_preflight`): installed? -> install
    (Linux: official script; macOS: brew cask, else download link and wait). Logged in? ->
    `tailscale up` with the URL printed prominently and a 5-minute poll. Operator (Linux):
-   grant once under the single sudo session. HTTPS certs: poll instead of ask. Record
-   `TS_JOINED_HERE=1` when this run performed the login: it drives the rename default.
+   grant once under the single sudo session. HTTPS certs: poll instead of ask (Ctrl+C
+   during the poll skips Tailscale for this run rather than ending the installer). The
+   rename default does not depend on whether this run performed the login (decided NO
+   everywhere), so nothing records it.
 2. **Name** (`tailscale_choose_name`, question 2/3): shown only on the Tailscale route.
    Default `codeman-<oshostname>` sanitized to `[a-z0-9-]`, max 63. Applied with
    `ts_cmd_serve set --hostname`, then poll `.Self.DNSName` until it carries the new name
@@ -325,7 +341,7 @@ items never ran on a fresh machine:
 
 1. Tailscale absent, declined -> local-only, done screen shows the retrofit command.
 2. Tailscale absent, accepted -> install, login URL, operator, certs toggle polled, rename
-   default YES, service, serve, URL verified, QR scans on a phone, PWA installs.
+   question shown (default no), service, serve, URL verified, QR scans on a phone, PWA installs.
 3. Tailscale present and logged in on a pre-existing node -> rename default NO, URL is the
    node name, `serve status` gains exactly one entry.
 4. `:443` root occupied -> path option -> `https://<node>/codeman` answers, hooks still
@@ -352,9 +368,9 @@ Services flow if a tagged-fleet user asks for `codeman.<tailnet>.ts.net`.
 
 Decisions for the maintainer:
 
-1. **Rename default.** Proposed: default YES only when this run joined the tailnet,
-   default NO otherwise, never on re-runs. The alternative is always NO with `--name` as
-   the only way in.
+1. **Rename default.** Decided 2026-09-20: always NO; the yes answer, `--name` and
+   `install.sh name` are the ways in. (The proposal was YES only when this run had joined
+   the tailnet, NO otherwise; rejected because the host is used for other things.)
 2. **Name pattern.** `codeman-<hostname>` (proposed; unique per machine, and two Codemans
    on one tailnet stay distinguishable) versus plain `codeman` (nicer once, collides on the
    second install, Tailscale silently appends `-1`).

@@ -121,6 +121,8 @@ jobs:
             [[ "$LAUNCH_CHOICE" == "2" ]]
             check_tailscale() { return 0; }
             ts_status_field() { case "$1" in "s.BackendState") printf Running ;; "s.Self && s.Self.DNSName") printf "box.tail.ts.net." ;; esac; }
+            ts_backend_state() { printf Running; }
+            ts_dns_name() { printf box.tail.ts.net; }
             ts_serve_443_target_port() { printf 8080; }
             ts_serve_find_port_mapping() { :; }
             ts_serve_port_used() { return 1; }
@@ -130,7 +132,17 @@ jobs:
             RENAMED=""; tailscale_rename_node() { RENAMED="$1"; }
             TS_NAME=""; tailscale_choose_name >/dev/null 2>&1
             [[ -z "$RENAMED" ]]
-            echo "bash $BASH_VERSION: question phase (flags, launch default, occupied :443, rename opt-in) ok"
+            # A flag re-run keeps the password the unit already carries (and so
+            # never writes the unauthenticated ack), and the hand-start line the
+            # done screen prints carries every non-default value.
+            read_existing_binding() { EXISTING_FOUND=1; EXISTING_HOST=0.0.0.0; EXISTING_PASSWORD=s3cret; EXISTING_ACK=0; EXISTING_BASE_URL=""; }
+            CODEMAN_HOST=0.0.0.0; CODEMAN_TAILSCALE=0; unset CODEMAN_PASSWORD; BIND_ACK=0
+            choose_network_binding >/dev/null 2>&1
+            [[ "$BIND_PASSWORD" == "s3cret" && "$BIND_ACK" == "0" ]]
+            BIND_HOST=0.0.0.0; BIND_PASSWORD=x; BIND_ACK=0; BIND_BASE_URL=/codeman; CODEMAN_PORT=4000
+            [[ "$(start_command_hint)" == "CODEMAN_HOST=0.0.0.0 CODEMAN_PASSWORD="*" CODEMAN_BASE_URL=/codeman CODEMAN_PORT=4000 codeman web" ]]
+            RECONFIGURE=0; parse_flags --port 4001; [[ "$RECONFIGURE" == "1" ]]
+            echo "bash $BASH_VERSION: question phase (flags, launch default, occupied :443, rename opt-in, kept password, start line) ok"
           '
 
       - name: CLI catalogue artifacts are in sync with stock.ts
