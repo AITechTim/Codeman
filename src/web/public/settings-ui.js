@@ -407,6 +407,7 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsUltracodeFloatingWindows').checked =
       settings.ultracodeFloatingWindows ?? defaults.ultracodeFloatingWindows ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
+    document.getElementById('appSettingsShowSplitButton').checked = settings.showSplitButton ?? defaults.showSplitButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = this.planUsageChipEnabled(settings);
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Phone overview home screen: only meaningful under 600px, so the row is
@@ -2120,6 +2121,7 @@ Object.assign(CodemanApp.prototype, {
       readMyMindEnabled: document.getElementById('appSettingsReadMyMind').checked,
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
+      showSplitButton: document.getElementById('appSettingsShowSplitButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
@@ -2350,6 +2352,10 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: _pul,
       showAttachmentsButton: _ahb,
       showFileViewerButton: _fvb,
+      // Desktop-only header button, per-device, and absent from
+      // SettingsUpdateSchema (.strict()) — sending it 400s the whole PUT
+      // (moving it into displayKeys alone is not the strip; this is).
+      showSplitButton: _ssp,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
       // Copy-on-select. Per-device (clipboard access differs by device and by
@@ -2742,6 +2748,7 @@ Object.assign(CodemanApp.prototype, {
         showUltracodeAgents: false,
         ultracodeFloatingWindows: false,
         showMultiMonitorButton: false,
+        showSplitButton: false,
         // Desktop defaults this ON (see planUsageChipEnabled); handhelds keep it
         // OFF so the phone header stays minimal and the mobile-header-buttons
         // policy guard keeps passing.
@@ -2946,6 +2953,13 @@ Object.assign(CodemanApp.prototype, {
     if (multiMonitorBtn) {
       multiMonitorBtn.classList.toggle('btn-multimonitor--hidden', !showMultiMonitorButton);
     }
+
+    // Split button — hidden by default, and hard-gated to desktop widths
+    // regardless of the setting (window.CodemanSplitPane.SPLIT_PANE_MIN_WIDTH,
+    // matching HOME_SESSIONS_MIN_WIDTH's JS-check + media-query-backstop
+    // pattern — the CSS in styles.css is the backstop, this is the check).
+    const showSplitButton = settings.showSplitButton ?? defaults.showSplitButton ?? false;
+    this._applySplitButtonVisibility?.(showSplitButton);
 
     // Ultracode/Workflow agents launcher — hidden by default; reveal when enabled.
     // Marker class only (base is display:inline-flex !important) so it's auto-excluded
@@ -3363,6 +3377,7 @@ Object.assign(CodemanApp.prototype, {
           'showTabDetachButton',
           'mobileOverviewEnabled',
           'sessionLineageLines',
+          'showSplitButton',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. Drop

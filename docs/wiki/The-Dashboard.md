@@ -116,6 +116,7 @@ The right side of the header. Almost all of these are off until you enable them 
 | Lifecycle Log          | Off                | Session start, exit, and kill audit trail.                                       |
 | Cron ⏰                | Off                | Scheduled jobs.                                                                   |
 | Multi-monitor          | Off, macOS         | Opens a window spanning every display.                                            |
+| Split                  | Off, desktop only  | View a second session beside the active one, with a draggable divider.           |
 | Tunnel indicator       | When a tunnel runs | Cloudflare tunnel status.                                                        |
 | Admin panel            | Multi-user only    | User administration.                                                              |
 
