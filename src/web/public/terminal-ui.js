@@ -4075,8 +4075,9 @@ Object.assign(CodemanApp.prototype, {
       this._localEchoOverlay.suppressBufferDetection();
       this._flushedOffsets?.delete(this.activeSessionId);
       this._flushedTexts?.delete(this.activeSessionId);
-      if (flushed.count > 0) {
-        this.sendInput('\x7f'.repeat(flushed.count)).catch(() => {});
+      const flushedLength = Array.from(flushed.text || '').length;
+      if (flushedLength > 0) {
+        this.sendInput('\x7f'.repeat(flushedLength)).catch(() => {});
       }
     } else {
       // In non-local-echo mode the TUI already owns the editable buffer. Ctrl+U
