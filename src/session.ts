@@ -60,6 +60,7 @@ import {
   type SessionDocker,
   type SessionNameSource,
   type SessionWriteOptions,
+  type PaneExit,
 } from './types.js';
 import { resolveAndClaimOmpSessionId } from './utils/omp-session-resolver.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
@@ -542,6 +543,20 @@ export class Session extends EventEmitter {
   private _mux: TerminalMultiplexer | null = null;
   private _muxSession: MuxSession | null = null;
   private _useMux: boolean = false;
+  /**
+   * The agent in this session's local tmux pane has exited (Ark0N/Codeman#446).
+   * `null` is the UNKNOWN arm of the tri-state and is what {@link setPaneExit}
+   * stores for every session shape the field does not apply to. See
+   * {@link PaneExit} for the shapes and for why an unknown answer must never be
+   * rendered as "alive".
+   */
+  private _paneExit: PaneExit | null = null;
+  /**
+   * This session was rebuilt from the tmux socket rather than from Codeman's
+   * own records, so its `remote`/`docker` metadata is missing rather than known
+   * to be absent. See {@link MuxSession.discovered}.
+   */
+  private _discoveredMuxSession = false;
   // Flag to prevent new timers after session is stopped
   private _isStopped: boolean = false;
 
@@ -718,6 +733,10 @@ export class Session extends EventEmitter {
       lastSubmitAt?: number;
       /** Restored conversation chain, oldest first (see `claudeSessionChain`). */
       claudeSessionChain?: string[];
+      /** Restored agent-exit observation for this session's pane (see `paneExit`). */
+      paneExit?: PaneExit;
+      /** This session was rebuilt from the tmux socket, so its metadata is a guess. */
+      discoveredMuxSession?: boolean;
       /** Restored wall-clock ms of the pane's last output (recovery only; see `_wireActivityAt`). */
       lastActivityAt?: number;
       /** Remote execution metadata for sessions launched through SSH inside local tmux. */
@@ -870,6 +889,15 @@ export class Session extends EventEmitter {
     this._remote = config.remote;
     this._docker = config.docker;
     this._owner = config.owner;
+    this._discoveredMuxSession = config.discoveredMuxSession === true;
+    // Restored so a record that says the agent exited survives a server restart
+    // rather than being blanked by the first persist after boot. It runs here
+    // because the scoping reads `_remote`, `_docker` and the mux fields, all of
+    // which are set by now. It is a claim about a pane this process has not
+    // looked at yet, so every path that starts or re-attaches a pane drops it
+    // (see `_setupOrAttachMuxSession`) and the stats tick replaces it with a
+    // first-hand reading.
+    this.setPaneExit(config.paneExit);
     // Never self-parent: a session pointing at itself would draw a zero-length
     // lineage arc under its own tab. Only reachable via the recovery path, where
     // both the id and the saved parent come from disk.
@@ -1095,6 +1123,71 @@ export class Session extends EventEmitter {
   /** The tmux session name, if the session is running inside a mux */
   get muxName(): string | null {
     return this._muxSession?.muxName ?? null;
+  }
+
+  /**
+   * True when a tmux pane's death would mean THIS session's agent has exited.
+   *
+   * Four shapes fail the test, and each would otherwise publish a death that is
+   * not the agent's. A direct-PTY session owns no pane at all. A remote SSH
+   * session's local pane holds the ssh client, whose death means a transport
+   * drop OR an exit, which is the ambiguity PR #355 was about. A docker case's
+   * local pane holds a `docker exec` into the container's own tmux.
+   *
+   * The fourth is a session rebuilt from the socket. Absent `remote`/`docker`
+   * normally means "this is local", but on a discovered record it only means
+   * "Codeman never found the metadata": the synthetic `restored-<fragment>` id
+   * matches no `state.json` entry, so a remote session rediscovered after
+   * `mux-sessions.json` was lost arrives looking local, and its next transport
+   * drop would be published as an agent exit. Unproven locality fails closed.
+   */
+  private get paneExitApplies(): boolean {
+    if (this._discoveredMuxSession) return false;
+    return this._useMux && this._muxSession !== null && !this._remote && !this._docker;
+  }
+
+  /** What Codeman last observed of this pane's agent, or undefined for UNKNOWN. */
+  get paneExit(): PaneExit | undefined {
+    return this._paneExit ?? undefined;
+  }
+
+  /**
+   * Forget this pane's exit, on both this record and the mux layer's cache.
+   * Every path that starts or relaunches a command in the pane calls it, and
+   * the mux half also invalidates a pane read already in flight.
+   *
+   * It does not persist or broadcast by itself. Each caller is already followed
+   * by the route's or recovery's own persist, and the pane-exit watcher would
+   * reach the same answer within one interval regardless.
+   */
+  private clearPaneExitForNewPane(): void {
+    this.setPaneExit(undefined);
+    if (this._muxSession) this._mux?.clearPaneExit?.(this._muxSession.muxName);
+  }
+
+  /**
+   * Record what the mux layer observed of this pane's agent, and say whether
+   * that changed the answer. The caller persists and broadcasts on a true.
+   *
+   * A session the field does not apply to is forced to UNKNOWN here rather than
+   * at the reporting end, so the rule lives in one place and the mux layer stays
+   * free to report the raw pane reading its own remote-reconnect watcher needs.
+   */
+  setPaneExit(next: PaneExit | undefined): boolean {
+    const resolved = this.paneExitApplies ? (next ?? null) : null;
+    const prev = this._paneExit;
+    if (prev === resolved) return false;
+    if (
+      prev !== null &&
+      resolved !== null &&
+      prev.status === resolved.status &&
+      prev.signal === resolved.signal &&
+      prev.at === resolved.at
+    ) {
+      return false;
+    }
+    this._paneExit = resolved;
+    return true;
   }
 
   /**
@@ -1620,6 +1713,10 @@ export class Session extends EventEmitter {
       // by the constructor: a Codeman restart starts with a fresh breaker so boot
       // recovery can re-attach.
       respawnBlocked: this._respawnBlocked || undefined,
+      // Ark0N/Codeman#446 — the agent in this pane has exited, published here so
+      // it rides the existing `session:updated` broadcast and lands in state.json
+      // through the same persist. `status` and `pid` above stay untouched by it.
+      paneExit: this._paneExit ?? undefined,
       attachmentHistory: this.attachmentHistory.length > 0 ? this.attachmentHistory : undefined,
       lastSubmitAt: this._lastSubmitAt || undefined,
       // Only a chain the CLI's own hooks vouched for is persisted, and only when
@@ -1760,6 +1857,14 @@ export class Session extends EventEmitter {
       }
     }
 
+    // Whatever the last reading said about the OLD command in this pane is now
+    // history: the branch above either respawned the pane or found it alive, and
+    // the branch below creates a new one. The paths that reach here are boot
+    // recovery and an explicit start, NOT a click on an exited tab — the browser
+    // re-attaches only on a null pid, and the premise of Ark0N/Codeman#446 is
+    // that an exited pane keeps its pid. `restartCli()` clears separately.
+    this.clearPaneExitForNewPane();
+
     // Check if we already have a mux session (restored session)
     const isRestored = this._muxSession !== null && !needsNewSession;
     if (isRestored) {
@@ -1844,6 +1949,9 @@ export class Session extends EventEmitter {
       console.error('[Session] reattachRemote: respawnPane failed for', this._muxSession.muxName);
       return false;
     }
+    // No-op for the record (a remote session's field is always UNKNOWN), but the
+    // mux layer's cache is keyed by muxName and this pane now runs a new client.
+    this.clearPaneExitForNewPane();
     console.log('[Session] reattachRemote: reattached remote session', this._muxSession.muxName, 'pid', newPid);
     return true;
   }
@@ -1898,6 +2006,10 @@ export class Session extends EventEmitter {
       return false;
     }
     this._pendingEnvUnsets.clear();
+    // A relaunch in the same pane, so any exit observed of the previous command
+    // is history. Without this the caller's persist-and-broadcast writes the old
+    // exit straight back onto a session that is running again.
+    this.clearPaneExitForNewPane();
     console.log('[Session] restartCli: restarted CLI for', this._muxSession.muxName, 'pid', newPid);
     return true;
   }

@@ -463,6 +463,11 @@ export class WebServer extends EventEmitter {
     this.mux.on('statsUpdated', (sessions) => {
       this.broadcast(SseEvent.MuxStatsUpdated, sessions);
     });
+    // Ark0N/Codeman#446 — a pane read finished. Internal only: the field reaches
+    // the browser on `session:updated`, and no SSE event was added for it.
+    this.mux.on('paneExitsUpdated', () => {
+      this.applyPaneExits();
+    });
 
     // COD-108 — remote-session auto-reconnect. The TmuxManager watcher detects a
     // dead remote pane and emits `remoteSessionDropped`; the session owner (here)
@@ -2455,6 +2460,36 @@ export class WebServer extends EventEmitter {
     this.sse.broadcastSessionStateDebounced(sessionId);
   }
 
+  /**
+   * Fold the latest pane readings into the sessions they belong to
+   * (Ark0N/Codeman#446). A reading that changes a session's answer persists the
+   * record and pushes a `session:updated`, which is how the tab learns; a read
+   * that repeats what the last one said costs nothing.
+   *
+   * The answer is pulled per session from the mux rather than taken off a
+   * broadcast payload. The mux reports the RAW pane reading, which for a remote
+   * or docker session is the death of an ssh client or a `docker exec` rather
+   * than of the agent, so it must not travel to a browser at all;
+   * `Session.setPaneExit()` is where that scoping is applied.
+   *
+   * Nothing here touches `status` or `pid`. `status: 'error'` belongs to the
+   * PTY-exit breaker and makes the browser offer a restart, and a null `pid` is
+   * what makes the browser re-attach and launch a fresh CLI.
+   */
+  private applyPaneExits(): void {
+    const getPaneExit = this.mux.getPaneExit?.bind(this.mux);
+    if (!getPaneExit) return;
+    for (const session of this.sessions.values()) {
+      const muxName = session.muxName;
+      // No pane, so nothing to report — and `setPaneExit()` would force UNKNOWN
+      // for such a session anyway.
+      if (!muxName) continue;
+      if (!session.setPaneExit(getPaneExit(muxName))) continue;
+      this.persistSessionState(session);
+      this.broadcastSessionStateDebounced(session.id);
+    }
+  }
+
   // ========== Web Push ==========
 
   /** Map SSE event names to push notification payloads */
@@ -3336,6 +3371,14 @@ export class WebServer extends EventEmitter {
               // the conversation the CLI was on when the server stopped, which is
               // what a re-attach must point the viewer at instead of the launch id.
               claudeSessionChain: savedState?.claudeSessionChain,
+              // What the previous run last observed of this pane's agent. Carried
+              // over so the first persist after boot does not blank a record that
+              // says the agent exited; the attach below drops it, and the stats
+              // tick replaces it with a first-hand reading.
+              paneExit: savedState?.paneExit,
+              // A record rebuilt from the socket has no provenance, so its
+              // apparent locality is a guess (see `MuxSession.discovered`).
+              discoveredMuxSession: muxSession.discovered,
               // The pane's last output, previous run's value. Without it every
               // restart restamped all sessions "now" (constructor + the attach
               // repaint within the same second), flattening the home screens'
@@ -3543,6 +3586,15 @@ export class WebServer extends EventEmitter {
       // Always start, even with no sessions — new sessions may be created later.
       if ('startMouseModeSync' in this.mux) {
         (this.mux as { startMouseModeSync: (ms?: number) => void }).startMouseModeSync();
+      }
+
+      // Ark0N/Codeman#446 — poll every pane for an exited agent. Always start,
+      // even with no sessions, for the same reason as the two watchers around
+      // it: sessions arrive later. Deliberately NOT folded into the stats
+      // collector above, which the browser arms and disarms with the Monitor
+      // panel and which boot skips entirely when nothing was recovered.
+      if ('startPaneExitWatcher' in this.mux) {
+        (this.mux as { startPaneExitWatcher: (ms?: number) => void }).startPaneExitWatcher();
       }
 
       // COD-108 — start the remote-session auto-reconnect watcher (tmux only).
