@@ -24,23 +24,33 @@
    * created/destroyed pane has no equivalent of.
    */
   function writeChunked(terminal, buffer, isDestroyed) {
-    if (!buffer) return;
+    if (!buffer) return Promise.resolve();
     if (buffer.length <= TERMINAL_CHUNK_SIZE) {
       terminal.write(buffer);
-      return;
+      return Promise.resolve();
     }
-    let offset = 0;
-    const writeNext = () => {
-      if (isDestroyed() || !terminal) return;
-      const chunk = buffer.slice(offset, offset + TERMINAL_CHUNK_SIZE);
-      offset += chunk.length;
-      terminal.write(chunk);
-      if (offset < buffer.length) {
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(writeNext);
-        else setTimeout(writeNext, 16);
-      }
-    };
-    writeNext();
+    // Resolves once the LAST chunk is written (or the pane was destroyed
+    // mid-replay), so _loadBuffer() below can hold its single-flight flag
+    // across the whole replay rather than just the fetch that precedes it.
+    return new Promise((resolve) => {
+      let offset = 0;
+      const writeNext = () => {
+        if (isDestroyed() || !terminal) {
+          resolve();
+          return;
+        }
+        const chunk = buffer.slice(offset, offset + TERMINAL_CHUNK_SIZE);
+        offset += chunk.length;
+        terminal.write(chunk);
+        if (offset < buffer.length) {
+          if (typeof requestAnimationFrame === 'function') requestAnimationFrame(writeNext);
+          else setTimeout(writeNext, 16);
+        } else {
+          resolve();
+        }
+      };
+      writeNext();
+    });
   }
 
   class SplitTerminalPane {
@@ -59,6 +69,9 @@
       this.ws = null;
       this._wsReady = false;
       this._destroyed = false;
+      // Single-flight state for _loadBuffer()/_refreshBuffer() below.
+      this._bufferLoading = false;
+      this._bufferRefreshPending = false;
     }
 
     async connect() {
@@ -212,6 +225,8 @@
       // pane. When Pane B's computed dimensions happened to already match
       // the session's last-known size, Session.resize() (session.ts) skips
       // the resize as a no-op, no repaint fires, and the pane stayed blank.
+      // The await covers the whole chunked replay, not just the fetch, so a
+      // live frame from the socket below can never land in the middle of it.
       await this._loadBuffer();
       if (this._destroyed) return;
 
@@ -236,8 +251,7 @@
             // data was dropped). The primary pane routes this to
             // _onSessionNeedsRefresh (app.js:2990) — Pane B has its own
             // buffer loader for the same reason connect() does.
-            this.terminal.clear();
-            void this._loadBuffer();
+            this._refreshBuffer();
           }
         } catch {
           /* Malformed frame — ignore, matches primary pane's tolerance. */
@@ -280,17 +294,46 @@
     // get one full replay. `fetch` here goes through the global wrapper
     // (constants.js), which already prefixes CodemanBase — unlike the raw
     // WebSocket URL above, which does not.
+    //
+    // Single-flight: the flag is held across the fetch AND the chunked write
+    // (writeChunked resolves after its last chunk), so two replays can never
+    // interleave their chunks into one terminal. A second call while one is
+    // in flight is dropped here; _refreshBuffer() is the caller that queues
+    // a trailing re-run instead.
     async _loadBuffer() {
+      if (this._bufferLoading) return;
+      this._bufferLoading = true;
       try {
         const query = this.sessionMode === 'shell' ? `tail=${TERMINAL_TAIL_SIZE}` : 'full=1';
         const res = await fetch(`/api/sessions/${this.sessionId}/terminal?${query}`);
         const payload = (await res.json())?.data ?? {};
         if (payload.terminalBuffer && this.terminal) {
-          writeChunked(this.terminal, payload.terminalBuffer, () => this._destroyed);
+          await writeChunked(this.terminal, payload.terminalBuffer, () => this._destroyed);
         }
       } catch {
         /* Best-effort — live output still arrives once the socket connects. */
+      } finally {
+        this._bufferLoading = false;
       }
+      if (this._bufferRefreshPending && !this._destroyed) {
+        this._bufferRefreshPending = false;
+        this._refreshBuffer();
+      }
+    }
+
+    // The `{t:'r'}` server-refresh path: clear, then replay. Two refresh
+    // frames in a row used to start two concurrent replays, each clearing
+    // the terminal under the other's chunked write. A refresh that arrives
+    // mid-replay is COALESCED into one trailing re-run rather than ignored:
+    // the in-flight fetch may predate the drop the new frame is reporting,
+    // and no further frame is coming to correct stale content.
+    _refreshBuffer() {
+      if (this._bufferLoading) {
+        this._bufferRefreshPending = true;
+        return;
+      }
+      this.terminal?.clear();
+      void this._loadBuffer();
     }
 
     // Local reflow only — no PTY resize frame. Split out so a divider drag
@@ -330,6 +373,10 @@
       if (this.ws) {
         this.ws.onopen = null;
         this.ws.onmessage = null;
+        // onclose fires asynchronously AFTER close(); without this it ran
+        // its "disconnected" write against a pane already torn down.
+        this.ws.onclose = null;
+        this.ws.onerror = null;
         this.ws.close();
         this.ws = null;
       }
@@ -410,7 +457,7 @@ Object.assign(CodemanApp.prototype, {
             // does exact-string lookup over text nodes, and a session
             // literally named e.g. "Sessions" would otherwise get translated
             // on zh-CN (see the .session-name skip on the pane header below).
-            `<button type="button" class="split-picker-item" data-i18n-skip data-session-id="${escapeHtml(c.id)}" onclick="app.openSplitPane(${escapeHtml(JSON.stringify(c.id))}); app._dismissSplitPicker();">${escapeHtml(c.label)}</button>`
+            `<button type="button" class="split-picker-item" data-i18n-skip onclick="app.openSplitPane(${escapeHtml(JSON.stringify(c.id))}); app._dismissSplitPicker();">${escapeHtml(c.label)}</button>`
         )
         .join('');
     }
@@ -488,6 +535,17 @@ Object.assign(CodemanApp.prototype, {
     // session, each independently claiming PTY dimensions via its own `{t:'z',...}`
     // resize frame. Refuse before creating any DOM or SplitTerminalPane.
     if (sessionId === this.activeSessionId) return;
+    // The picker's own exclusions (buildSplitPickerSessions in constants.js),
+    // re-applied here: the menu can sit open while a listed session's CLI
+    // exits (pid → null) or gets popped out to its own window, and nothing
+    // re-runs the picker filter for a row that already rendered. Same
+    // outcome as the picker gives such a session (not offered, silently):
+    // one with no PTY has nothing reading its pane, so Pane B would show
+    // nothing and drop every keystroke behind a healthy-looking socket, and
+    // a detached session's own window already owns its PTY size.
+    const session = this.sessions.get(sessionId);
+    if (!session || session.pid === null) return;
+    if (this.detachedSessions?.has?.(sessionId)) return;
     if (this._splitPane) this.closeSplitPane();
 
     const wrap = document.querySelector('.terminal-wrap');
@@ -501,7 +559,6 @@ Object.assign(CodemanApp.prototype, {
 
     const paneB = document.createElement('div');
     paneB.className = 'terminal-pane-b';
-    const session = this.sessions.get(sessionId);
     paneB.innerHTML = `
       <div class="terminal-pane-b-header">
         <span class="session-name">${escapeHtml(session?.name || 'Session')}</span>
@@ -540,8 +597,17 @@ Object.assign(CodemanApp.prototype, {
     this._updateSplitButtonState(true);
   },
 
-  closeSplitPane() {
+  closeSplitPane(options = {}) {
     if (!this._splitPane) return;
+    // A split can collapse MID-DRAG (either session ending, the window
+    // narrowing past the gate, a click on Pane B's own tab). The drag's own
+    // onUp is what normally clears `body.split-pane-resizing` (a col-resize
+    // cursor plus user-select:none on EVERY element, styles.css), and it
+    // relied on pointer capture routing pointerup back to a divider this
+    // method detaches below, so a mid-drag collapse left the whole page
+    // locked in resize mode until a reload. Tear the drag down first.
+    this._splitDividerDragTeardown?.();
+    this._splitDividerDragTeardown = null;
     this._splitPane.destroy();
     this._splitPane = null;
     this._splitSessionId = null;
@@ -556,7 +622,13 @@ Object.assign(CodemanApp.prototype, {
     container.remove();
 
     if (this.fitAddon) this.fitAddon.fit();
-    this.sendResize?.(this.activeSessionId, { force: true })?.catch?.(() => {});
+    // The Pane-A-ends branch of the _onSessionDeleted wrapper below collapses the split
+    // while activeSessionId is still the id the server just removed, so a
+    // resize from here would be aimed at a session that no longer exists;
+    // the promoted session gets its own resize from selectSession().
+    if (!options.skipPrimaryResize) {
+      this.sendResize?.(this.activeSessionId, { force: true })?.catch?.(() => {});
+    }
   },
 
   // A click on .btn-split does one of two things — open the picker, or
@@ -578,6 +650,7 @@ Object.assign(CodemanApp.prototype, {
     let dragging = false;
     let dragRaf = null;
     let pendingClientX = null;
+    let capturedPointerId = null;
 
     // Local-only reflow (flexBasis + both panes' xterm fit, no PTY resize
     // frame). Coalesced to one call per animation frame below — a raw
@@ -614,14 +687,25 @@ Object.assign(CodemanApp.prototype, {
       });
     };
 
-    const onUp = (e) => {
+    // Everything pointerdown ARMS, undone in one place: the body-level
+    // cursor/selection lock, the divider's dragging class, pointer capture,
+    // the move/up/cancel listeners and a queued reflow frame. Shared by onUp
+    // (a normal drag end) and by closeSplitPane(), via the teardown handle
+    // stored below, for a split that collapses mid-drag: the pointerup that
+    // would have run onUp is routed by pointer capture to a divider
+    // closeSplitPane() has detached, so it never arrives. Idempotent, since
+    // the teardown runs whether or not a drag is in progress.
+    const endDrag = () => {
       dragging = false;
       divider.classList.remove('dragging');
       document.body.classList.remove('split-pane-resizing');
-      try {
-        divider.releasePointerCapture(e.pointerId);
-      } catch {
-        /* Already released (pointercancel/lostpointercapture beat us here). */
+      if (capturedPointerId !== null) {
+        try {
+          divider.releasePointerCapture(capturedPointerId);
+        } catch {
+          /* Already released (pointercancel/lostpointercapture beat us here). */
+        }
+        capturedPointerId = null;
       }
       divider.removeEventListener('pointermove', onMove);
       divider.removeEventListener('pointerup', onUp);
@@ -629,8 +713,16 @@ Object.assign(CodemanApp.prototype, {
       if (dragRaf) {
         cancelAnimationFrame(dragRaf);
         dragRaf = null;
-        applyDragPercent(pendingClientX);
       }
+    };
+
+    const onUp = () => {
+      // A reflow frame still queued at release carries the final pointer
+      // position; apply it once, synchronously, so the panes end where the
+      // pointer did rather than one frame short.
+      const hadQueuedFrame = dragRaf !== null;
+      endDrag();
+      if (hadQueuedFrame) applyDragPercent(pendingClientX);
       // Send the real PTY resize exactly once here, at drag end, for BOTH
       // panes — never per-move (matching the codebase's established
       // trailing-edge debounce convention, see throttledResize in
@@ -656,6 +748,7 @@ Object.assign(CodemanApp.prototype, {
       document.body.classList.add('split-pane-resizing');
       try {
         divider.setPointerCapture(e.pointerId);
+        capturedPointerId = e.pointerId;
       } catch {
         /* Capture failed — the drag still works via the listeners below. */
       }
@@ -663,6 +756,7 @@ Object.assign(CodemanApp.prototype, {
       divider.addEventListener('pointerup', onUp);
       divider.addEventListener('pointercancel', onUp);
     });
+    this._splitDividerDragTeardown = endDrag;
   },
 });
 
@@ -678,7 +772,11 @@ CodemanApp.prototype._onSessionDeleted = function (data) {
     // acknowledgement rule in CLAUDE.md — only a human opening a session
     // acknowledges it).
     const promoted = this._splitSessionId;
-    this.closeSplitPane();
+    // activeSessionId is still data.id here (the original handler below is
+    // what retires it), so closeSplitPane()'s closing resize would be aimed
+    // at the session the server just removed. Skip it; selectSession() sizes
+    // the promoted session itself.
+    this.closeSplitPane({ skipPrimaryResize: true });
     // Closing Pane A's own tab (closeSession(), app.js) adds data.id to
     // _closingSessions BEFORE awaiting the delete, then owns the follow-up
     // selection itself once the delete lands — same race _onSessionDeleted's
