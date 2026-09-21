@@ -1772,11 +1772,22 @@ export class Session extends EventEmitter {
       // launch seed, so a session whose transcript exists would meet the same
       // `--session-id ... already in use` refusal the respawn just lost to —
       // the recovery of last resort failing for the very reason it was needed.
-      // A genuinely new session has no chain and no transcript, so the pin
-      // resolves to its own id and the command shape is unchanged.
+      // A genuinely new session has no transcript under any of its candidate
+      // ids, so nothing is pinned and its command shape is unchanged.
+      //
+      // `_resumeSessionId` is written alongside, not just the create options:
+      // this branch leaves `isRestored` false, so the block that sets
+      // `_claudeSessionId` below reads that field and would otherwise settle on
+      // `this.id` while the CLI resumes the chain tail. The response viewer,
+      // Read My Mind and the unified-list alias map all read `_claudeSessionId`
+      // until the next first-hand hook, so the two have to name the same
+      // conversation.
       if (needsNewSession) {
         const pinned = (await this._buildRespawnPaneOptionsWithResumePin()).resumeSessionId;
-        if (pinned) options.createSessionOptions.resumeSessionId = pinned;
+        if (pinned) {
+          options.createSessionOptions.resumeSessionId = pinned;
+          this._resumeSessionId = pinned;
+        }
       }
       this._muxSession = await mux.createSession(options.createSessionOptions);
       console.log('[Session] Created mux session:', this._muxSession.muxName);
@@ -1957,8 +1968,11 @@ export class Session extends EventEmitter {
    * declares a `fallback` chain renders `resume || new` once a resume id is
    * set, which is the shape that survives both cases.
    *
-   * Four conditions gate the pin, each protecting against a way of resuming the
-   * WRONG conversation or of making a working relaunch fail.
+   * Three candidates are tried in priority order — the conversation chain's
+   * tail, the launch seed, then the session's own id — and the first one a
+   * transcript backs is pinned. Four conditions gate that walk, each protecting
+   * against a way of resuming the WRONG conversation or of making a working
+   * relaunch fail.
    *
    * ⚠️ **A remote or docker session is never pinned.** Unlike `restartCli()`,
    * whose route refuses both, the dead-pane respawn is reached by every session
@@ -1971,7 +1985,7 @@ export class Session extends EventEmitter {
    * transcript the far side really does hold — both branches fail and the pane
    * dies. `_pinOmpRespawnId()` refuses remote for the same reason.
    *
-   * ⚠️ **The id comes from the conversation CHAIN, not from
+   * ⚠️ **The candidates come from the conversation CHAIN, never from
    * `_claudeSessionId`.** That field holds either a first-hand id from the
    * CLI's own hook payload or a history correlation, which is a guess keyed on
    * the working directory. `_recordClaudeSessionInChain()` refuses a guess
@@ -1979,13 +1993,24 @@ export class Session extends EventEmitter {
    * permanent record", and launching from one would do worse than the display
    * bug that rule exists to prevent: the relaunched CLI would open and WRITE to
    * a conversation that was never this pane's. The chain's tail is the live
-   * conversation and is hook-vouched, so it also outranks the launch seed,
-   * which is written once at construction and never moves off a `/clear`.
+   * conversation and is hook-vouched, so it leads the walk, ahead of the launch
+   * seed, which is written once at construction and never moves off a `/clear`.
    *
-   * ⚠️ **A pin that no transcript backs is dropped.** When the pinned id
-   * differs from the session id, the fallback branch still carries
-   * `--session-id <this.id>`; if the resume finds nothing, that fallback
-   * collides and the pane dies exactly as it did before this pinning existed.
+   * ⚠️ **Every candidate must be backed by a transcript, the session's own id
+   * included, and a candidate that has none is passed over rather than ending
+   * the walk.** A pin that differs from the session id leaves
+   * `--session-id <this.id>` in the fallback branch, so a resume that finds
+   * nothing collides there and the pane dies exactly as it did before this
+   * pinning existed. Pinning `this.id` renders the self-healing
+   * `--resume <id> || --session-id <id>`, which is correct whether or not a
+   * transcript exists, but a pane that has none pays for the shape twice:
+   * claude prints "No conversation found" into the scrollback of a session that
+   * is brand new, and `wrapWithNice()` prefixes only the FIRST branch of the
+   * rendered `a || b`, so the branch that actually runs loses its priority for
+   * the life of the session. Falling off the end of the walk therefore pins
+   * nothing, which is the right answer: with no transcript anywhere there is
+   * nothing for the bare `--session-id <this.id>` to collide with.
+   *
    * The create route pre-validates a resume id for the same reason, though it
    * additionally requires the transcript be substantial — here mere existence
    * is the question, because a one-line transcript still makes `--session-id`
@@ -2002,28 +2027,29 @@ export class Session extends EventEmitter {
   private async _buildRespawnPaneOptionsWithResumePin(): Promise<import('./mux-interface.js').RespawnPaneOptions> {
     const options = this._buildRespawnPaneOptions();
     if (this._remote || this._docker) return options;
-    if (getCli(this.mode)?.launch.chain !== 'fallback') return options;
+    const entry = getCli(this.mode);
+    if (entry?.launch.chain !== 'fallback') return options;
 
+    const resumeIdPattern = entry.launch.params?.resumeId;
+    const configDir = this._claudeConfigDir();
     const chainTail = this._claudeSessionChain[this._claudeSessionChain.length - 1];
-    const pin = chainTail ?? options.resumeSessionId ?? this.id;
-    // A session Codeman DISCOVERED on the socket rather than created carries a
-    // synthetic `restored-<fragment>` id, which fails claude's `uuid` token
-    // pattern. The renderer would silently drop the resume flag and emit the
-    // unpinned command, so say so here rather than letting the caller believe
-    // the pane was pinned. Such a pane keeps the pre-existing behaviour.
-    const resumeIdPattern = getCli(this.mode)?.launch.params?.resumeId;
-    if (resumeIdPattern?.type === 'token' && !matchesPattern(resumeIdPattern.pattern, pin)) {
-      console.log(`[Session] Not pinning resume id ${pin} for relaunch: the CLI cannot accept that id shape`);
+    const candidates = [chainTail, options.resumeSessionId, this.id].filter((v): v is string => !!v);
+    for (const candidate of candidates) {
+      // A session Codeman DISCOVERED on the socket rather than created carries a
+      // synthetic `restored-<fragment>` id, which fails claude's `uuid` token
+      // pattern. The renderer would silently drop the resume flag and emit the
+      // unpinned command, so say so here rather than letting the caller believe
+      // the pane was pinned.
+      if (resumeIdPattern?.type === 'token' && !matchesPattern(resumeIdPattern.pattern, candidate)) {
+        console.log(`[Session] Not pinning resume id ${candidate} for relaunch: the CLI cannot accept that id shape`);
+        continue;
+      }
+      if (!(await claudeTranscriptExists(candidate, configDir))) continue;
+      options.resumeSessionId = candidate;
       return options;
     }
-    // Pinning the session's own id renders the self-healing
-    // `--session-id <id> || --resume <id>`, which needs no transcript to be
-    // correct: it starts fresh when there is none and resumes when there is.
-    if (pin !== this.id && !(await claudeTranscriptExists(pin, this._claudeConfigDir()))) {
-      console.log(`[Session] Not pinning resume id ${pin} for relaunch: no transcript on disk`);
-      return options;
-    }
-    options.resumeSessionId = pin;
+    // Nothing on disk to collide with, so the bare `--session-id <this.id>` the
+    // unpinned options already carry is the correct command.
     return options;
   }
 

@@ -16,6 +16,11 @@
  * conversation worth resuming" judgement; for a relaunch the question is the
  * opposite one — a one-line transcript still makes `--session-id` collide.
  *
+ * ⚠️ A false answer is not the conservative one. Skipping a resume leaves the
+ * relaunch on `--session-id <id>`, which is safe only when no transcript backs
+ * that id either, so a lookup that misses the real config dir turns a
+ * recoverable pane into the collision this module exists to prevent.
+ *
  * @dependencies none
  * @consumedby session (relaunch resume pinning)
  *
@@ -26,15 +31,28 @@ import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-/** `<config dir>/projects`, honouring a session's relocated `CLAUDE_CONFIG_DIR`. */
+/**
+ * `<config dir>/projects`, honouring a session's relocated `CLAUDE_CONFIG_DIR`
+ * (#255) and, failing that, the server process's own.
+ *
+ * ⚠️ The process env is not optional here. A pane inherits the server's
+ * environment through tmux, so on an install that exports `CLAUDE_CONFIG_DIR`
+ * the CLI writes its transcripts there and a lookup under `~/.claude` answers
+ * "no transcript" for every conversation on the host. `claudeCredentialsPath()`
+ * (claude-credentials.ts) and `realClaudeConfigDir()`
+ * (custom-model-injection-apply.ts) resolve the same directory the same way.
+ */
 export function claudeProjectsDir(configDir?: string): string {
-  return join(configDir || join(homedir(), '.claude'), 'projects');
+  const fromEnv = typeof process.env.CLAUDE_CONFIG_DIR === 'string' && process.env.CLAUDE_CONFIG_DIR.trim();
+  return join(configDir || fromEnv || join(homedir(), '.claude'), 'projects');
 }
 
 /**
  * True when a transcript for `conversationId` exists under any project
- * directory. Returns false for a missing projects dir or an unreadable one:
- * the caller's fallback is to skip the resume, which is the safe direction.
+ * directory. Returns false for a missing projects dir or an unreadable one,
+ * which leaves the caller unpinned: safe where nothing else can collide with
+ * the bare `--session-id`, and the reason the caller walks its candidates down
+ * to the session's own id rather than treating one false answer as final.
  */
 export async function claudeTranscriptExists(conversationId: string, configDir?: string): Promise<boolean> {
   if (!conversationId) return false;

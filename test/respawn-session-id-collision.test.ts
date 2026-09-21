@@ -14,9 +14,13 @@
  * WORKING pane whose conversation already has a transcript". That assumption is
  * what these tests refute: a pane whose agent exited has a transcript too.
  *
- * The pin is gated four ways, and most of these tests are about the gates
- * rather than the pin, because each gate stands for a way of resuming the WRONG
- * conversation or of making a working relaunch fail.
+ * The pin walks three candidates — the conversation chain's tail, the launch
+ * seed, then the session's own id — and takes the first one a transcript backs.
+ * Most of these tests are about the four gates on that walk rather than about
+ * the pin, because each gate stands for a way of resuming the WRONG
+ * conversation or of making a working relaunch fail. Two more are about what
+ * the walk does when a candidate misses: it carries on to the next, and pinning
+ * nothing is the right answer only once every candidate has missed.
  *
  * Port: N/A
  */
@@ -27,7 +31,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Session } from '../src/session.js';
 import { getCli } from '../src/config/cli-registry/registry.js';
 import { buildSpawnCommandFromRegistry } from '../src/session-cli-registry-bridge.js';
-import type { MuxSession, RespawnPaneOptions, TerminalMultiplexer } from '../src/mux-interface.js';
+import { claudeTranscriptExists } from '../src/utils/claude-transcript.js';
+import type {
+  CreateSessionOptions,
+  MuxSession,
+  RespawnPaneOptions,
+  TerminalMultiplexer,
+} from '../src/mux-interface.js';
 
 /** Captures the options each respawn is invoked with. */
 function recordingMux() {
@@ -49,6 +59,28 @@ function recordingMux() {
 }
 
 const muxSession = (muxName = 'codeman-aaaa') => ({ muxName, sessionId: 'aaaa' }) as unknown as MuxSession;
+
+/**
+ * A mux whose `respawnPane` fails, which is what sends
+ * `_setupOrAttachMuxSession()` down its create-a-new-session fallback — the
+ * path that has to pin too, since it meets the same refusal the respawn just
+ * lost to.
+ */
+function failingRespawnMux() {
+  const calls: CreateSessionOptions[] = [];
+  const mux = {
+    isAvailable: () => true,
+    muxSessionExists: () => true,
+    isPaneDead: () => true,
+    setAttached: () => {},
+    respawnPane: async () => 0,
+    createSession: async (options: CreateSessionOptions) => {
+      calls.push(options);
+      return muxSession('codeman-recreated');
+    },
+  };
+  return { mux: mux as unknown as TerminalMultiplexer, calls };
+}
 
 const CONVERSATION = 'aaaabbbb-cccc-dddd-eeee-ffff00001111';
 
@@ -146,6 +178,10 @@ describe('pinning a conversation onto a relaunch', () => {
     giveTranscript(CONVERSATION);
     const { mux, calls } = recordingMux();
     const session = localSession({}, mux);
+    // Backed, so the walk reaching it pins it. Without this the session would
+    // land unpinned for want of a transcript rather than for refusing the
+    // guess, and the test would pass while proving nothing.
+    giveTranscript(session.id);
     session.adoptClaudeSessionId(CONVERSATION); // no firstHand flag: a guess
     expect(session.claudeSessionId).toBe(CONVERSATION);
 
@@ -155,16 +191,71 @@ describe('pinning a conversation onto a relaunch', () => {
     expect(calls[0].resumeSessionId).toBe(session.id);
   });
 
-  it('drops a pin that no transcript backs', async () => {
-    // A divergent pin renders `--resume <pin> || --session-id <this.id>`, so a
-    // resume that finds nothing falls back onto the colliding form and the pane
-    // dies exactly as it did before any of this. No transcript, no pin.
+  it('degrades to the session id rather than to the colliding bare command', async () => {
+    // The chain tail is gone from disk but the session's own id is not, which
+    // is every session prompted before its first `/clear`. Dropping the pin
+    // outright hands back `--session-id <this.id>` alone — the very refusal
+    // this whole mechanism removes — so the walk carries on to the next
+    // candidate instead of stopping at the first miss.
     const { mux, calls } = recordingMux();
     const session = localSession({ claudeSessionChain: [CONVERSATION] }, mux);
+    giveTranscript(session.id);
+
+    expect(await session.restartCli()).toBe(true);
+
+    expect(calls[0].resumeSessionId).toBe(session.id);
+  });
+
+  it('pins nothing at all when no candidate has a transcript', async () => {
+    // Falling off the end of the walk is the one case where the bare
+    // `--session-id <this.id>` is right: nothing on disk can collide with it,
+    // and pinning anyway would cost a brand-new pane claude's "No conversation
+    // found" line plus the `nice` priority on the branch that actually runs.
+    // The walk only ever ADDS a pin, so a session launched as a resume keeps
+    // the seed its options already carried — see the custom-model restart
+    // tests, which cover that case.
+    const { mux, calls } = recordingMux();
+    const session = localSession({}, mux);
 
     expect(await session.restartCli()).toBe(true);
 
     expect(calls[0].resumeSessionId).toBeUndefined();
+  });
+
+  it('pins the create-path fallback after a failed respawn', async () => {
+    // The recovery of last resort would otherwise meet the same refusal that
+    // made it the fallback, since the create options were built eagerly from
+    // the unpinned launch seed.
+    giveTranscript(CONVERSATION);
+    const { mux, calls } = failingRespawnMux();
+    const session = localSession({ claudeSessionChain: [CONVERSATION] }, mux);
+
+    await session.startInteractive();
+    try {
+      expect(calls).toHaveLength(1);
+      expect(calls[0].resumeSessionId).toBe(CONVERSATION);
+    } finally {
+      await session.stop();
+    }
+  });
+
+  it('leaves the session naming the conversation the create path resumed', async () => {
+    // That path leaves `isRestored` false, so `_claudeSessionId` is recomputed
+    // from the launch fields and lands on `this.id` unless the pin is written
+    // back to `_resumeSessionId` as well. The response viewer, Read My Mind and
+    // the unified-list alias map read that field until the next first-hand
+    // hook, so a mismatch points all three at a conversation claude never
+    // opened.
+    giveTranscript(CONVERSATION);
+    const { mux } = failingRespawnMux();
+    const session = localSession({ claudeSessionChain: [CONVERSATION] }, mux);
+
+    await session.startInteractive();
+    try {
+      expect(session.claudeSessionId).toBe(CONVERSATION);
+    } finally {
+      await session.stop();
+    }
   });
 
   it('pins nothing for a remote session, whose conversation lives elsewhere', async () => {
@@ -278,5 +369,37 @@ describe('what the pin renders', () => {
     // Codeman found but does not own. The renderer emits the unpinned command,
     // so those panes keep the pre-existing behaviour.
     expect(render('restored-40568a29')).not.toContain('--resume');
+  });
+});
+
+describe('where the transcript lookup reads', () => {
+  it("honours the server process's own CLAUDE_CONFIG_DIR", async () => {
+    // A pane inherits the server environment through tmux, so on an install
+    // that exports this the CLI writes its transcripts there. Reading `~/.claude`
+    // regardless answers "no transcript" for every conversation on the host,
+    // and under the walk above that means the colliding bare command.
+    giveTranscript(CONVERSATION);
+    const before = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      expect(await claudeTranscriptExists(CONVERSATION)).toBe(true);
+    } finally {
+      if (before === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = before;
+    }
+  });
+
+  it("prefers the session's own relocated dir over the process one", async () => {
+    // A session pointed at a separate Claude account (#255) reads its own tree,
+    // not the server's.
+    giveTranscript(CONVERSATION);
+    const before = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = join(configDir, 'nowhere');
+    try {
+      expect(await claudeTranscriptExists(CONVERSATION, configDir)).toBe(true);
+    } finally {
+      if (before === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = before;
+    }
   });
 });
