@@ -720,14 +720,101 @@ Object.assign(CodemanApp.prototype, {
     if (models.length === 1) {
       return this.runCustomModelEntry(mode, endpointId, models[0]);
     }
-    this._openCustomModelPickModal(mode, host);
+    await this._openCustomModelPickModal(mode, host);
   },
 
-  /** Renders the "which model" picker for a (harness, endpoint) pair with more than one discovered model. */
-  _openCustomModelPickModal(mode, host) {
+  /** localStorage key for the last model launched on a given (harness, endpoint) pair — per-device by design, like every other `codeman:*` UI preference, never synced. */
+  _customModelLastUsedKey(mode, endpointId) {
+    return `codeman:customModelLastUsed:${mode}:${endpointId}`;
+  },
+
+  /** Reads the last model chosen for this (harness, endpoint) pair, or null. Never throws — a blocked/full localStorage just means no promotion, not a broken picker. */
+  _getCustomModelLastUsed(mode, endpointId) {
+    try {
+      return localStorage.getItem(this._customModelLastUsedKey(mode, endpointId));
+    } catch {
+      return null;
+    }
+  },
+
+  /** Remembers `modelId` as the last one launched for this (harness, endpoint) pair. */
+  _setCustomModelLastUsed(mode, endpointId, modelId) {
+    try {
+      localStorage.setItem(this._customModelLastUsedKey(mode, endpointId), modelId);
+    } catch {
+      // best-effort — losing the "last used" hint is cosmetic, never worth surfacing
+    }
+  },
+
+  /**
+   * Best-effort lookup of the model llama-swap currently has loaded and ready on this
+   * endpoint, so the picker can offer it first instead of making the user remember what
+   * they picked last time it mattered. Mirrors `_watchLlamaSwapLoading`'s own
+   * `state === 'ready'` check. Returns null for a plain (non-llama-swap) server, an
+   * unreachable endpoint, or a loaded model this host no longer lists as discovered —
+   * never throws, since a failed probe should just skip promotion, not break the picker.
+   *
+   * ⚠️ Client-side bounded to ~800ms via Promise.race, on top of (never instead of) the
+   * route's own 5s server-side timeout (`RUNNING_TIMEOUT_MS`, custom-model-routes.ts) —
+   * a saved endpoint keeps its discovered models cached, so "the box behind this endpoint
+   * is asleep or firewalled" is a normal way to reach this path, not an exotic one, and
+   * the modal must not sit invisible (Run menu already closed, nothing else on screen)
+   * for the full 5s a slow/dead endpoint can take. The losing side of the race is left to
+   * resolve on its own — `.catch(() => null)` only stops an unhandled-rejection warning
+   * when it eventually fails, it never cancels the in-flight fetch.
+   *
+   * `timeoutMs` exists to let a test drive this in milliseconds instead of the real
+   * 800 — same reasoning as `_watchLlamaSwapLoading`'s own `pollIntervalMs`: this code
+   * runs inside a JSDOM window's own realm, whose `setTimeout` is not the one
+   * `vi.useFakeTimers()` patches, so a param is the only way to test the timeout without
+   * actually waiting on it. Real callers never pass it.
+   */
+  async _getCustomModelCurrentlyLoaded(host, timeoutMs = 800) {
+    const probe = this._apiJson(`/api/model-endpoints/${encodeURIComponent(host.id)}/running-status`).catch(
+      () => null
+    );
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
+    const status = await Promise.race([probe, timeout]);
+    if (!status?.isLlamaSwap) return null;
+    const ready = (status.running || []).find((r) => r.state === 'ready' && (host.models || []).includes(r.model));
+    return ready?.model || null;
+  },
+
+  /**
+   * Renders the "which model" picker for a (harness, endpoint) pair with more than one
+   * discovered model. Async since it now awaits the currently-loaded-model probe below,
+   * so a SECOND call (a different custom-model entry clicked while the first one's probe
+   * is still in flight — the probe has its own 5s timeout) must not let the first call's
+   * later-arriving response clobber the second's already-rendered, already-correct modal.
+   * `_customModelPickGeneration` is the same guard-a-mutable-counter pattern
+   * `_watchLlamaSwapLoading` uses for the same reason: every DOM write below, including
+   * `_pendingCustomModelPick` itself, stays deferred until after the await, and a call
+   * that finds a newer generation already claimed bails out untouched rather than only
+   * skipping the model-list write and leaving title/hint/`_pendingCustomModelPick`
+   * inconsistent with what's on screen.
+   */
+  async _openCustomModelPickModal(mode, host) {
     const modal = document.getElementById('customModelPickModal');
     const list = document.getElementById('customModelPickList');
     if (!modal || !list) return;
+    const generation = (this._customModelPickGeneration = (this._customModelPickGeneration || 0) + 1);
+    const isCurrent = () => this._customModelPickGeneration === generation;
+
+    // Whichever model llama-swap actually has loaded right now beats a merely
+    // remembered choice — it's what a launch would attach to with zero wait, while
+    // "last used" might have been swapped out by another session since. Neither
+    // reorders past the top: exactly one model is promoted, everything else keeps
+    // its discovery order.
+    const currentlyLoaded = await this._getCustomModelCurrentlyLoaded(host);
+    if (!isCurrent()) return; // a newer pick opened (and possibly already rendered) while this probe was in flight
+    const lastUsed = currentlyLoaded ? null : this._getCustomModelLastUsed(mode, host.id);
+    const promoted = currentlyLoaded || lastUsed;
+    const models = [...(host.models || [])];
+    if (promoted && models.includes(promoted)) {
+      models.splice(models.indexOf(promoted), 1);
+      models.unshift(promoted);
+    }
+
     this._pendingCustomModelPick = { mode, endpointId: host.id };
     const cliLabel = (window.__codemanCustomModelClis || []).find((c) => c.id === mode)?.label || mode;
     // A static title (translatable by i18n.js's exact-string walker) plus a
@@ -736,13 +823,14 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('customModelPickTitle').textContent = 'Choose a model';
     document.getElementById('customModelPickHint').textContent =
       `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
-    list.innerHTML = (host.models || [])
+    list.innerHTML = models
       .map((m) => {
         const isDefault = m === host.defaultModelId;
+        const tag = m === currentlyLoaded ? 'Currently loaded' : m === lastUsed ? 'Last used' : isDefault ? 'Default' : null;
         const arg = escapeHtml(JSON.stringify(m));
         return `
           <button class="run-mode-option" onclick="app.chooseCustomModelAndRun(${arg})">
-            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${isDefault ? ' <span class="set-scope">Default</span>' : ''}
+            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${tag ? ` <span class="set-scope">${escapeHtml(tag)}</span>` : ''}
           </button>`;
       })
       .join('');
@@ -858,6 +946,12 @@ Object.assign(CodemanApp.prototype, {
    * (Codex, confirmed live) than on claude's own `--resume`-based restart.
    */
   async runCustomModelEntry(mode, endpointId, modelId) {
+    // "Last used" is recorded by each path itself, ONLY once the model is actually
+    // applied — never here, unconditionally, on the mere attempt. A context-window
+    // warning or a swap-conflict question can still say no after this call, and the
+    // context-warning case is the one that bites: declining it means this exact
+    // model cannot work with this CLI at all, so promoting it as "Last used" next
+    // time the picker opens would be actively wrong, not just premature.
     if (mode === 'claude') {
       return this._runCustomModelEntryViaRestart(mode, endpointId, modelId);
     }
@@ -950,7 +1044,15 @@ Object.assign(CodemanApp.prototype, {
       answered = { ...answered, confirmedSwap: true };
       data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, ...answered } });
     }
-    this._lastCustomModelLaunchResult = data?.success !== false ? data?.data : undefined;
+    const launched = data?.success !== false;
+    this._lastCustomModelLaunchResult = launched ? data?.data : undefined;
+    // Only once actually launched, and only for a call that carried a custom-model pick
+    // at all — `_launchQuickStartInstances` runs every quick-start body (custom-model or
+    // not) through this same function, so a plain launch must not fall through here with
+    // an undefined endpointId/modelId that quietly no-ops the (mode, endpointId) key.
+    if (launched && bodyObj.customModel) {
+      this._setCustomModelLastUsed(bodyObj.mode, bodyObj.customModel.endpointId, bodyObj.customModel.modelId);
+    }
     return data;
   },
 
@@ -1077,6 +1179,11 @@ Object.assign(CodemanApp.prototype, {
       });
       return;
     }
+
+    // The apply has actually succeeded and both questions (if asked) are answered
+    // yes — only now is this a real "last used" for the picker's next open, not
+    // before either confirmation had a chance to decline it.
+    this._setCustomModelLastUsed(mode, endpointId, modelId);
 
     // The apply above already succeeded — the session IS pointed at the endpoint — but
     // llama-swap itself may still be unloading the old model and loading this one, which
