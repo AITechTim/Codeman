@@ -15142,11 +15142,31 @@ html:not([data-skin="og"]) {
   color: #061c20;
 }
 .btn-toolbar.btn-run.mode-codex:hover { box-shadow: 0 0 14px -2px rgba(43, 203, 187, 0.45); }
-/* Pi keeps its rose identity on the non-og skins. This rule has to live INSIDE
-   this nested block: the generic `.btn-toolbar.btn-run` above resolves to (0,3,1)
-   here and would otherwise beat the base sheet's (0,3,0) `.mode-pi` pair, which
-   is exactly why gemini's and antigravity's gradients render as generic claude
-   blue on the default skin. */
+/* Gemini, Antigravity, Pi, OMP, Grok and DeepSeek all keep their own identity
+   on the non-og skins. Each rule has to live INSIDE this nested block: the
+   generic `.btn-toolbar.btn-run` above resolves to (0,3,1) here and would
+   otherwise beat the base sheet's (0,3,0) `.mode-<id>` pair — which is exactly
+   what gemini/antigravity/omp did until this fix, rendering as generic claude
+   blue on `daylight-blue`, the actual DEFAULT skin for a fresh install
+   (`index.html`'s pre-paint script), not just a corner case on `og`. */
+.btn-toolbar.btn-run.mode-gemini {
+  background: linear-gradient(135deg, #174ea6, #4f46e5);
+  border-color: #123a7a;
+  color: #dbeafe;
+}
+.btn-toolbar.btn-run.mode-gemini:hover { box-shadow: 0 0 14px -2px rgba(96, 165, 250, 0.45); }
+.btn-toolbar.btn-run.mode-antigravity {
+  background: linear-gradient(135deg, #0e7490, #0891b2);
+  border-color: #0b5566;
+  color: #cffafe;
+}
+.btn-toolbar.btn-run.mode-antigravity:hover { box-shadow: 0 0 14px -2px rgba(34, 211, 238, 0.45); }
+.btn-toolbar.btn-run.mode-omp {
+  background: linear-gradient(135deg, #4f46e5, #6366f1);
+  border-color: #3730a3;
+  color: #e0e7ff;
+}
+.btn-toolbar.btn-run.mode-omp:hover { box-shadow: 0 0 14px -2px rgba(129, 140, 248, 0.45); }
 .btn-toolbar.btn-run.mode-pi {
   background: linear-gradient(135deg, #be185d, #f472b6);
   border-color: #be185d;
