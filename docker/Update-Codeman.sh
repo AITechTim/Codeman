@@ -88,6 +88,53 @@ for override_file in "$override_yml" "$override_yaml"; do
 done
 compose_command=(docker compose --env-file "$env_file" "${compose_files[@]}")
 
+# Same collision guard as Start-Codeman.sh, and load-bearing HERE rather than
+# left to that script's own copy: this script's --no-cache build and its
+# `down`/`down --volumes` (below) both run BEFORE the handoff at the bottom of
+# this file, so Start-Codeman.sh's guard would only fire after the damage this
+# one exists to prevent has already happened. docker-compose.yaml hard-codes
+# `name: codeman`, so a second checkout run without COMPOSE_PROJECT_NAME
+# resolves to the SAME Compose project as any other checkout on the host and
+# operates on ITS containers and volumes — this script's default `down
+# --volumes` makes that worse than Start-Codeman.sh's own targeted refresh,
+# since it clears every named volume the resolved project has, not just the
+# two this script means to. See Start-Codeman.sh's own guard for the full
+# incident this is written against (2026-09-21).
+project_name=$(
+  "${compose_command[@]}" config --format json 2>/dev/null |
+    sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1
+)
+if [[ -n "$project_name" ]]; then
+  # `|| true` on the pipeline's LAST command: under `set -o pipefail`, `grep -v`
+  # exits 1 when nothing survives the filter — the ordinary, no-collision case,
+  # since `docker ps` finds nothing at all on a first-ever deployment or a
+  # single matching (own) working_dir gets filtered out. Without it, that exit
+  # status propagates through the command substitution and `set -e` aborts the
+  # WHOLE script right here, every time, regardless of whether a collision
+  # actually exists — caught only by actually running this end-to-end (a
+  # static text/regex check on the source cannot see it).
+  other_working_dir=$(
+    docker ps -a --filter "label=com.docker.compose.project=$project_name" \
+      --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null |
+      grep -v -F -x -- "$script_dir" | head -n1 || true
+  )
+  if [[ -n "$other_working_dir" ]]; then
+    printf 'Error: Compose project "%s" is already in use by a DIFFERENT checkout:\n' "$project_name" >&2
+    printf '  %s\n' "$other_working_dir" >&2
+    printf 'This checkout is:\n' >&2
+    printf '  %s\n' "$script_dir" >&2
+    printf '\n' >&2
+    printf 'docker-compose.yaml hard-codes `name: %s`, so two checkouts on the same host\n' "$project_name" >&2
+    printf 'collide unless each one sets a distinct COMPOSE_PROJECT_NAME. Continuing would\n' >&2
+    printf 'rebuild and stop the OTHER checkout'"'"'s running container and, by default,\n' >&2
+    printf 'delete ALL of its named volumes.\n' >&2
+    printf '\n' >&2
+    printf 'Fix: export COMPOSE_PROJECT_NAME=<something-unique-to-this-checkout> before\n' >&2
+    printf 'running this script, then retry.\n' >&2
+    exit 1
+  fi
+fi
+
 # Same owner-detection Start-Codeman.sh uses to derive PUID/PGID for its own
 # build — without it, the --no-cache build below gets Compose's untouched
 # default of 1000:1000, and on any host whose appdata owner differs (99:100 on

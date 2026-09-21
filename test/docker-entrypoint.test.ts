@@ -192,6 +192,24 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
     expect(updateScript).not.toMatch(/exec "\$script_dir\/Start-Codeman\.sh"/);
   });
 
+  it('resolves the collision guard BEFORE the --no-cache build and the down, not after', () => {
+    // This script's own build/down run before the handoff to Start-Codeman.sh,
+    // so its copy of the guard has to be early here too - Start-Codeman.sh's
+    // copy alone would only catch the collision after this script's own
+    // destructive calls already ran.
+    const projectName = updateScript.indexOf('project_name=$(');
+    const guard = updateScript.indexOf('other_working_dir=$(');
+    const build = updateScript.indexOf('"${compose_command[@]}" build --no-cache');
+    const down = updateScript.indexOf('"${compose_command[@]}" down');
+    expect(projectName).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(projectName);
+    expect(guard).toBeLessThan(build);
+    expect(guard).toBeLessThan(down);
+    expect(updateScript).toMatch(/label=com\.docker\.compose\.project=\$project_name/);
+    expect(updateScript).toMatch(/\{\{\.Label "com\.docker\.compose\.project\.working_dir"\}\}/);
+    expect(updateScript).toMatch(/grep -v -F -x -- "\$script_dir"/);
+  });
+
   it('clears the named volumes by DEFAULT; --keep-volumes opts out to a plain `down`', () => {
     expect(updateScript).toMatch(/--keep-volumes\)\s*\n\s*keep_volumes=1/);
     expect(updateScript).toMatch(/"\$\{compose_command\[@\]\}" down --volumes/);
@@ -270,7 +288,10 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
     // artifact that has nothing to do with the scripts under test.
     const posix = (p: string) => p.replace(/\\/g, '/');
 
-    function runSmokeTest(args: string[]): { status: number; stderr: string; log: string[] } {
+    function runSmokeTest(
+      args: string[],
+      extraEnv: Record<string, string> = {}
+    ): { status: number; stderr: string; log: string[] } {
       const dir = mkdtempSync(join(tmpdir(), 'codeman-update-smoke-'));
       try {
         const dockerDir = join(dir, 'docker');
@@ -333,9 +354,24 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
           '    exit 0',
           '  fi',
           '  if [[ " $* " == *" config "* && " $* " == *" --format json "* ]]; then',
-          '    echo \'{"name":"codeman"}\'',
+          // Real `docker compose config --format json` pretty-prints, so
+          // `"name"` starts its OWN line rather than sharing one with `{` -
+          // the sed extraction both scripts use anchors on that, and a
+          // compact one-liner here would silently resolve project_name to
+          // empty, exercising neither script's guard the way real Compose
+          // output does.
+          '    printf \'{\\n  "name": "codeman"\\n}\\n\'',
           '    exit 0',
           '  fi',
+          '  exit 0',
+          'fi',
+          // Mirrors the guard's own `docker ps -a --filter ... --format
+          // '{{.Label "com.docker.compose.project.working_dir"}}'` call.
+          // Empty by default (no collision) so the existing smoke tests above
+          // see no output here and proceed exactly as before; a test that
+          // wants to exercise the guard itself sets STUB_PS_WORKING_DIR.
+          'if [[ "$1" == "ps" && -n "${STUB_PS_WORKING_DIR:-}" ]]; then',
+          '  echo "$STUB_PS_WORKING_DIR"',
           '  exit 0',
           'fi',
           'exit 0',
@@ -351,7 +387,7 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
         let stderr = '';
         try {
           execFileSync('bash', [join(dockerDir, 'Update-Codeman.sh'), ...args], {
-            env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CMDLOG: logPath },
+            env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CMDLOG: logPath, ...extraEnv },
             encoding: 'utf-8',
           });
         } catch (err) {
@@ -398,6 +434,18 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
       const downLine = log.find((l) => / down(\s|$)/.test(l));
       expect(downLine).toBeDefined();
       expect(downLine).not.toContain('--volumes');
+    });
+
+    it('refuses BEFORE the --no-cache build when the resolved project belongs to a different checkout', () => {
+      // The whole reason this guard lives here rather than only in
+      // Start-Codeman.sh: this script's own build/down run before the handoff
+      // ever reaches that script's copy of the same check.
+      const { status, stderr, log } = runSmokeTest([], { STUB_PS_WORKING_DIR: '/some/other/checkout/docker' });
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/already in use by a DIFFERENT checkout/);
+      expect(stderr).toContain('/some/other/checkout/docker');
+      expect(log.some((l) => l.includes('build --no-cache'))).toBe(false);
+      expect(log.some((l) => / down(\s|$)/.test(l))).toBe(false);
     });
   });
 });
