@@ -43,23 +43,26 @@ changed, and asks you to run `Start-Codeman.sh` here on the host instead. Detail
 
 ### Major updates
 
-`Start-Codeman.sh` rebuilds the image and clears the build-artefact volumes on
-its own, but only when it detects the checkout's HEAD or `package-lock.json`
-moved — exactly right for an ordinary `git pull`, too conservative when a
-release note (or the updater's own blocker message) calls for starting over.
-For that case, `docker/Update-Codeman.sh` stops the stack, force-rebuilds the
-image with no layer cache, then hands off to `Start-Codeman.sh` for the usual
-start:
+`Start-Codeman.sh` rebuilds the image on every start, but only clears the
+`codeman-node-modules`/`codeman-dist` build-artefact volumes when it detects
+the checkout's HEAD or `package-lock.json` moved — exactly right for an
+ordinary `git pull`, too narrow when a release note (or the updater's own
+blocker message) calls for starting over on a Dockerfile-only change, which
+touches neither. For that case, `docker/Update-Codeman.sh` force-rebuilds the
+image with no layer cache, clears those two volumes, stops the stack, then
+hands off to `Start-Codeman.sh` for the usual start:
 
 ```sh
 bash docker/Update-Codeman.sh
 ```
 
-Add `--volumes` to also clear the `codeman-node-modules`/`codeman-dist`
-volumes — the scripted form of "Resetting the build artefacts" in
+Pass `--keep-volumes` to skip clearing them (safe only if you know the
+rebuilt image's `node_modules`/`dist` did not change) — the scripted default
+is the "Resetting the build artefacts" procedure in
 [`../docs/docker-self-update.md`](../docs/docker-self-update.md). Those two
-are the only named volumes this stack declares; application data and case
-workspaces are host bind mounts and are never touched either way.
+are the only named volumes `docker-compose.yaml` itself declares; a
+`docker-compose.override.yml` could add more, and application data and case
+workspaces are host bind mounts, never touched either way.
 
 ## Local customisation
 

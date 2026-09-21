@@ -8,29 +8,34 @@
 # `.env.example` key. None of those can be applied by a container restarting
 # itself — a restart reuses the existing image and configuration (see "The
 # environment gate" in docs/docker-self-update.md) — so this script does the
-# three things an in-place update cannot: stop the stack, force a real image
-# rebuild with no layer cache, then hand off to Start-Codeman.sh for the same
+# three things an in-place update cannot: force a real image rebuild with no
+# layer cache, stop the stack, then hand off to Start-Codeman.sh for the same
 # careful PUID/PGID, override-file and fingerprint handling every other start
 # goes through.
 #
-# This is the scripted form of "Resetting the build artefacts" in
-# docs/docker-self-update.md (`docker compose down -v`, then
-# `Start-Codeman.sh`), plus the unconditional `--no-cache` a major update
-# warrants: `Start-Codeman.sh` on its own only rebuilds without the cache flag,
-# and only clears the two build-artefact volumes when it detects the checkout's
-# HEAD or `package-lock.json` moved — exactly right for an ordinary `git pull`,
-# too conservative when the ask is "start over, certain of what ships".
+# ⚠️ Build BEFORE stopping the stack, deliberately, same reasoning as
+# Start-Codeman.sh's own build-then-down ordering: the build needs nothing
+# stopped, so a slow --no-cache rebuild costs no downtime, and a build failure
+# (a bad Dockerfile edit, a network blip pulling a base image) leaves the
+# ALREADY-RUNNING stack untouched instead of stopped with nothing to bring it
+# back.
 #
-# Usage: docker/Update-Codeman.sh [--volumes]
-#   --volumes, -v   Also remove the codeman-node-modules/codeman-dist named
-#                   volumes, so the fresh image's own node_modules/dist are
-#                   what actually run instead of sitting unused behind a
-#                   Docker-seeded volume's old content (Docker only seeds a
-#                   named volume from the image while that volume is EMPTY).
-#                   Safe: those two are the ONLY named volumes this stack
-#                   declares (`docker-compose.yaml`) — application data and
-#                   case workspaces are host bind mounts, never touched by
-#                   `docker compose down`, with or without this flag.
+# ⚠️ Clears the codeman-node-modules/codeman-dist named volumes by DEFAULT.
+# Docker seeds a named volume from the image only while that volume is EMPTY,
+# so a rebuilt image's fresh node_modules/dist otherwise sit unused behind a
+# volume's old content and the container comes back up looking unchanged —
+# exactly wrong for a script whose whole point is "be certain of what ships".
+# Start-Codeman.sh only clears them when it detects the checkout's HEAD or
+# `package-lock.json` moved, which is right for its own ordinary-start case but
+# too narrow here: nothing about a Dockerfile-only change (the case that sends
+# people to this script in the first place) touches either of those. Pass
+# --keep-volumes to opt out and reuse whatever is already in them.
+#
+# Usage: docker/Update-Codeman.sh [--keep-volumes]
+#   --keep-volumes   Do not clear codeman-node-modules/codeman-dist. Safe to
+#                    combine with a source change Start-Codeman.sh's own
+#                    detection would have cleared anyway; unsafe if the reason
+#                    you are here is a change to server.Dockerfile alone.
 
 set -euo pipefail
 
@@ -38,15 +43,19 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 env_file="$script_dir/.env"
 compose_file="$script_dir/docker-compose.yaml"
 
-remove_volumes=0
+keep_volumes=0
 for arg in "$@"; do
   case "$arg" in
-    --volumes | -v)
-      remove_volumes=1
+    --keep-volumes)
+      keep_volumes=1
+      ;;
+    --help | -h)
+      printf 'Usage: bash %s [--keep-volumes]\n' "$0"
+      exit 0
       ;;
     *)
       printf 'Error: unrecognised argument: %s\n' "$arg" >&2
-      printf 'Usage: %s [--volumes]\n' "$0" >&2
+      printf 'Usage: bash %s [--keep-volumes]\n' "$0" >&2
       exit 1
       ;;
   esac
@@ -59,10 +68,10 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 # Same override-file discovery as Start-Codeman.sh, and deliberately kept in
-# step with it: a stack started through one script and updated through the
-# other must resolve to the exact same Compose files, or `down` here and `up`
-# there could target different configurations. Compose's own precedence
-# (measured on v5.5.0 with both present: it uses .yml and ignores .yaml).
+# step with it: a stack built here and started there must resolve to the exact
+# same Compose files, or this script's build could target a configuration the
+# handoff's own `up` never actually uses. Compose's own precedence (measured on
+# v5.5.0 with both present: it uses .yml and ignores .yaml).
 override_yml="$script_dir/docker-compose.override.yml"
 override_yaml="$script_dir/docker-compose.override.yaml"
 if [[ -f "$override_yml" && -f "$override_yaml" ]]; then
@@ -79,12 +88,47 @@ for override_file in "$override_yml" "$override_yaml"; do
 done
 compose_command=(docker compose --env-file "$env_file" "${compose_files[@]}")
 
-printf 'Stopping the stack...\n'
-if [[ "$remove_volumes" == '1' ]]; then
-  printf 'Also removing the codeman-node-modules/codeman-dist volumes (--volumes).\n'
-  "${compose_command[@]}" down --volumes
-else
-  "${compose_command[@]}" down
+# Same owner-detection Start-Codeman.sh uses to derive PUID/PGID for its own
+# build — without it, the --no-cache build below gets Compose's untouched
+# default of 1000:1000, and on any host whose appdata owner differs (99:100 on
+# Unraid, per docker/README.md's chown example), Start-Codeman.sh's own
+# correctly-PUID'd build during the handoff then rebuilds those layers with the
+# right values anyway — so the "no cache, certain of what ships" image this
+# script produces is not the one that actually ends up running.
+#
+# Deliberately NOT the same as Start-Codeman.sh's own handling of a MISSING
+# appdata directory (which creates it): this script updates an EXISTING
+# deployment, so a missing appdata path means there is nothing here yet to
+# update, and creating one would just be this script quietly doing
+# Start-Codeman.sh's first-run job worse.
+appdata_path=$(
+  "${compose_command[@]}" config --environment |
+    awk -F= '$1 == "CODEMAN_APPDATA_PATH" { sub(/^[^=]*=/, ""); print; exit }'
+)
+if [[ -z "$appdata_path" || ! -d "$appdata_path" ]]; then
+  printf 'Error: CODEMAN_APPDATA_PATH is not set or does not exist: %s\n' "${appdata_path:-<unset>}" >&2
+  printf 'Run docker/Start-Codeman.sh first to set up a new deployment.\n' >&2
+  exit 1
+fi
+
+# `stat -c` is GNU, `stat -f` is BSD/macOS; the bind source lives on the Docker
+# host, so both need to work. Identical to Start-Codeman.sh's own helper.
+owner_of() {
+  stat -c '%u:%g' -- "$1" 2>/dev/null || stat -f '%u:%g' "$1" 2>/dev/null
+}
+
+if ! owner_ids=$(owner_of "$appdata_path"); then
+  printf 'Error: Cannot determine the owner of CODEMAN_APPDATA_PATH: %s\n' "$appdata_path" >&2
+  exit 1
+fi
+
+export PUID=${owner_ids%%:*}
+export PGID=${owner_ids##*:}
+
+if [[ "$PUID" == '0' ]]; then
+  printf 'Error: CODEMAN_APPDATA_PATH is owned by root: %s\n' "$appdata_path" >&2
+  printf 'Change the directory ownership to the unprivileged account that should run Codeman.\n' >&2
+  exit 1
 fi
 
 # --no-cache, always: a plain `build` reuses cached layers (npm install, apt
@@ -92,17 +136,30 @@ fi
 # frozen at whatever they were the day the cache was populated — exactly wrong
 # for a major update, whose whole point is being certain of what actually
 # ships. `scripts/build-agent-image.mjs` makes the same call for the same
-# reason (see its entry in CLAUDE.md's Additional Commands table).
+# reason (see its entry in CLAUDE.md's Additional Commands table). Runs BEFORE
+# the stack is stopped — see the header comment for why.
 printf 'Building a fresh image (--no-cache)...\n'
 "${compose_command[@]}" build --no-cache
 
-# Start-Codeman.sh does everything a plain `up -d` does not: resolves
-# PUID/PGID from CODEMAN_APPDATA_PATH's owner, pre-creates CODEMAN_CASES_PATH
-# with the right ownership, resolves DOCKER_SOCKET_GID, records the
-# server.Dockerfile/docker-compose.yaml fingerprint the in-app updater's gate
-# reads on every future update, and clears the build-artefact volumes itself
-# if it finds the checkout's source moved since the last start. Reimplementing
-# any of that here would only risk drifting out of step with it — hand off
-# instead, exactly as docs/docker-self-update.md's own reset procedure does.
+printf 'Stopping the stack...\n'
+if [[ "$keep_volumes" == '1' ]]; then
+  "${compose_command[@]}" down
+else
+  printf 'Also clearing the codeman-node-modules/codeman-dist volumes (pass --keep-volumes to skip).\n'
+  "${compose_command[@]}" down --volumes
+fi
+
+# Start-Codeman.sh does everything a plain `up -d` does not: re-derives
+# PUID/PGID, pre-creates CODEMAN_CASES_PATH with the right ownership, resolves
+# DOCKER_SOCKET_GID, records the server.Dockerfile/docker-compose.yaml
+# fingerprint the in-app updater's gate reads on every future update, and
+# starts the (already freshly built) image. Reimplementing any of that here
+# would only risk drifting out of step with it — hand off instead, exactly as
+# docs/docker-self-update.md's own reset procedure does.
+#
+# ⚠️ `bash`, not a bare exec of the path: Start-Codeman.sh is committed
+# non-executable (100644), the same as this script, and is documented
+# everywhere as `bash docker/Start-Codeman.sh` rather than
+# `./docker/Start-Codeman.sh` — execing the bare path fails with EACCES.
 printf 'Handing off to Start-Codeman.sh...\n'
-exec "$script_dir/Start-Codeman.sh"
+exec bash "$script_dir/Start-Codeman.sh"
