@@ -105,6 +105,11 @@ const RUN_MODE_LAUNCH = {
     // sibling Run button sends its bypass switch. The harness has no bypass
     // FLAG, so this rides the `DSH_PERMISSION_MODE` export instead, and the
     // multi-user clamp forces it back down to `workspace-write` server-side.
+    //
+    // `statusReporting` is deliberately LEFT UNSET, i.e. ON: it is what upgrades
+    // this mode from output-stabilization guessing to definitive idle/blocked
+    // hook events (the harness reports to Codeman as its supervisor, see
+    // deepseek-status-shim.ts). Never send `statusReporting: false` from here.
     buildConfig: () => ({ deepSeekConfig: { permissionMode: 'danger-full-access' } }),
   },
 };
@@ -2157,6 +2162,10 @@ Object.assign(CodemanApp.prototype, {
 
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
+      // No `effort` field for ANY entry in RUN_MODE_LAUNCH: effort is
+      // Claude-specific (runClaude() alone sends it, and the backend turns it
+      // into `claude --settings`); none of these CLIs has an /effort. Each of
+      // the eight bodies this launcher replaced carried that rule as a comment.
       const firstSessionId = await this._launchQuickStartInstances(
         caseName,
         tabCount,

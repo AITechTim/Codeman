@@ -82,6 +82,17 @@ const ALLOWED_BRANCHES: Record<string, { count: number; reason: string }> = {
   "session-ui.js::mode === 'deepseek'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
   "session-ui.js::mode === 'omp'": { count: 2, reason: 'button-label ternary + runMode setter validity check' },
 
+  // The docker adopt-preflight status line and the docker link/adopt toast
+  // both list the agent CLIs probed INSIDE the container and leave `shell`
+  // out of that human-readable "found ..." summary (it is always present and
+  // is not an agent CLI). Written as `(m) => m !== 'shell'`, the naming the
+  // original named-variable pattern could not see; the widened pattern
+  // normalizes the `m` to `mode` (see BRANCH_PATTERN below).
+  "session-ui.js::mode !== 'shell'": {
+    count: 2,
+    reason: 'display filter: the "CLIs found inside the container" summaries omit shell, which is not an agent CLI',
+  },
+
   // mobile-overview.js: shell is exempt from the isCliAvailable() gate the
   // same way the toolbar's #runModeMenu exempts it (shell needs no CLI).
   "mobile-overview.js::mode !== 'shell'": {
@@ -94,11 +105,35 @@ const ALLOWED_BRANCHES: Record<string, { count: number; reason: string }> = {
 const IDS = STOCK_CLIS.map((e) => e.id as string);
 const ID_ALT = IDS.join('|');
 
-/** Same four shapes as the backend guard — see its own comment for why all four matter. */
+/**
+ * The backend guard's four shapes (see its own comment for why all four
+ * matter), with ONE deliberate widening on the first.
+ *
+ * The backend pattern accepts a comparison only when its left-hand side is
+ * literally named `mode`, `id` or `agentType`, so both
+ * `const m = this._runMode; if (m === 'codex')` and
+ * `if (this._runMode !== 'gemini')` slip past it, and `session-ui.js` already
+ * uses exactly that naming (`(m) => m !== 'shell'`, twice). The review of
+ * PR #458 surfaced that blind spot, so here the left-hand side is ANY
+ * identifier (`[\w$]+`, the leaf of a member chain), normalized to `mode` in
+ * the allowlist key by `scan()` so a local rename never churns the entries.
+ * Measured over both scanned files before widening: every extra hit was a
+ * genuine mode comparison (the two `m !== 'shell'` filters, allowlisted
+ * above), so the widening added no false positive; a future one gets an
+ * allowlist entry with its reason like any other. The backend guard keeps
+ * its narrower form and is deliberately not changed here.
+ *
+ * Still unseen, and worth knowing: a Yoda comparison (`'codex' === mode`),
+ * and an id list held in a variable (`EXTERNAL.includes(mode)`), since the
+ * third shape needs the literal list inline.
+ */
 const BRANCH_PATTERN = new RegExp(
   [
-    `\\b(?:mode|id|agentType)\\s*[!=]==\\s*'(?:${ID_ALT})'`,
+    // <identifier> === 'codex'  /  <identifier> !== 'codex' (any left-hand identifier, see above)
+    `\\b[\\w$]+\\s*[!=]==\\s*'(?:${ID_ALT})'`,
+    // case 'codex':
     `\\bcase\\s+'(?:${ID_ALT})'\\s*:`,
+    // ['codex', 'gemini'].includes(mode) — the id list IS the branch, wherever `mode` sits
     `'(?:${ID_ALT})'\\s*(?:,\\s*'(?:${ID_ALT})'\\s*)*\\]\\s*\\.includes\\(`,
   ].join('|'),
   'g'
@@ -126,7 +161,10 @@ function scan(): Finding[] {
     lines.forEach((line, i) => {
       BRANCH_PATTERN.lastIndex = 0; // shared /g regex — see utils/regex-patterns.ts
       for (const match of line.matchAll(BRANCH_PATTERN)) {
-        const expression = match[0].replace(/\s+/g, ' ').replace(/^(?:id|agentType)/, 'mode');
+        // Normalize the comparison shape's left-hand identifier (whatever the
+        // local is called: `id`, `agentType`, `m`, `_runMode`) to `mode`; the
+        // lookahead leaves the `case`/`.includes(` shapes untouched.
+        const expression = match[0].replace(/\s+/g, ' ').replace(/^[\w$]+(?=\s*[!=]==)/, 'mode');
         findings.push({ file, expression, line: i + 1, key: `${file}::${expression}` });
       }
     });
@@ -162,6 +200,9 @@ describe('no NEW CLI-id branching in session-ui.js / mobile-overview.js (PR B2)'
       "if (mode !== 'shell' && mode !== 'deepseek') { doSomething(); }",
       "switch (mode) { case 'gemini': return 1; }",
       "if (['codex', 'gemini'].includes(mode)) { doSomething(); }",
+      // The two forms the named-variable pattern was blind to (see BRANCH_PATTERN).
+      "const m = this._runMode; if (m === 'codex') { doSomething(); }",
+      "if (this._runMode !== 'gemini') { doSomething(); }",
     ];
     for (const sample of samples) {
       BRANCH_PATTERN.lastIndex = 0;

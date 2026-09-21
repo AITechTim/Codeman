@@ -1581,9 +1581,17 @@ export class WebServer extends EventEmitter {
     // the /session/:id URL path; this global is a belt-and-suspenders fallback.
     // The id is gated to JSON + <-escaped so it can't break out of the inline
     // <script> (ids are UUIDs in practice, but defense-in-depth is cheap).
+    //
+    // Every `</head>` injection below passes a replacer FUNCTION, never a
+    // replacement STRING: `String.replace` interprets `$&`, `$'`, `` $` `` and
+    // `$<n>` inside a string replacement, so a payload carrying `$'` would splice
+    // the rest of the document (the whole <body>) into the inline script, past
+    // any escaping applied to the payload itself. The custom-model list below
+    // carries a user-settable `label` (clis.json), which is the site that made
+    // this real; the others follow the same rule so the class of bug stays out.
     if (soloSessionId) {
       const safeId = JSON.stringify(soloSessionId).replace(/</g, '\\u003c');
-      html = html.replace('</head>', `<script>window.__CODEMAN_SOLO__=${safeId};</script>\n</head>`);
+      html = html.replace('</head>', () => `<script>window.__CODEMAN_SOLO__=${safeId};</script>\n</head>`);
     }
     // Gesture-control overlay (Phase 5): dashboard only (not solo popups, which
     // have no tab strip). `CODEMAN_GESTURE=1` makes the feature *available* on
@@ -1655,7 +1663,7 @@ export class WebServer extends EventEmitter {
       };
       html = html.replace(
         '</head>',
-        `<script>window.__codemanCliAvailable=${JSON.stringify(available)};</script>\n</head>`
+        () => `<script>window.__codemanCliAvailable=${JSON.stringify(available)};</script>\n</head>`
       );
       // Which run modes the Run-menu picker (docs/custom-model-endpoints-plan.md) may
       // generate an entry for: read generically off the registry's `capabilities`
@@ -1672,16 +1680,19 @@ export class WebServer extends EventEmitter {
       const customModelClisJson = escapeScriptJson(JSON.stringify(customModelClis));
       html = html.replace(
         '</head>',
-        `<script>window.__codemanCustomModelClis=${customModelClisJson};</script>\n</head>`
+        () => `<script>window.__codemanCustomModelClis=${customModelClisJson};</script>\n</head>`
       );
     }
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
-      html = html.replace('</head>', `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
+      html = html.replace('</head>', () => `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
       if (settings.gestureControlEnabled === true) {
         const v = this.gestureBundleVersion();
         // Relative src so the injected `<base href>` resolves it under the mount
         // prefix (a root-absolute `/gesture/...` would escape a sub-path mount).
-        html = html.replace('</head>', `<script type="module" src="gesture/gesture-codeman.js${v}"></script>\n</head>`);
+        html = html.replace(
+          '</head>',
+          () => `<script type="module" src="gesture/gesture-codeman.js${v}"></script>\n</head>`
+        );
       }
     }
     return html;
