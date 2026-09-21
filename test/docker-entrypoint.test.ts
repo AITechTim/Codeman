@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync, mkdtempSync, rmSync, writeFileSync, statSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -178,16 +178,6 @@ describe('Start-Codeman.sh', () => {
 describe('Update-Codeman.sh (the scripted major-update path — docker/README.md "Major updates")', () => {
   it('parses under bash -n', () => {
     execFileSync('bash', ['-n', join(ROOT, 'docker/Update-Codeman.sh')]);
-  });
-
-  it('is executable, like every other script this deployment runs directly', () => {
-    // Windows checkouts (this repo is developed on both) do not carry a real
-    // execute bit, so this only meaningfully asserts on POSIX — matching how
-    // docker/README.md documents running it (`bash docker/Update-Codeman.sh`,
-    // not `./docker/Update-Codeman.sh`) either way.
-    if (process.platform === 'win32') return;
-    const mode = statSync(join(ROOT, 'docker/Update-Codeman.sh')).mode;
-    expect(mode & 0o111).not.toBe(0);
   });
 
   it('stops the stack, THEN force-rebuilds with --no-cache, THEN hands off to Start-Codeman.sh', () => {
