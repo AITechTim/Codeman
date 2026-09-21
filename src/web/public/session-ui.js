@@ -825,12 +825,17 @@ Object.assign(CodemanApp.prototype, {
       `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
     list.innerHTML = models
       .map((m) => {
-        const isDefault = m === host.defaultModelId;
-        const tag = m === currentlyLoaded ? 'Currently loaded' : m === lastUsed ? 'Last used' : isDefault ? 'Default' : null;
+        // Two independent tags, never one exclusive slot: the promotion tag says what
+        // llama-swap (or this device's history) knows about the model, the Default pill
+        // says what the saved endpoint says about it, and on a single-purpose GPU box the
+        // promoted model IS the default more often than not. One slot holding whichever
+        // applied first silently dropped the Default marking for exactly that row.
+        const promotion = m === currentlyLoaded ? 'Currently loaded' : m === lastUsed ? 'Last used' : null;
+        const tags = [promotion, m === host.defaultModelId ? 'Default' : null].filter(Boolean);
         const arg = escapeHtml(JSON.stringify(m));
         return `
           <button class="run-mode-option" onclick="app.chooseCustomModelAndRun(${arg})">
-            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${tag ? ` <span class="set-scope">${escapeHtml(tag)}</span>` : ''}
+            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${tags.map((t) => ` <span class="set-scope">${escapeHtml(t)}</span>`).join('')}
           </button>`;
       })
       .join('');

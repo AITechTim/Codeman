@@ -335,6 +335,67 @@ describe('Custom Model Endpoint Profiles: the "which model" picker', () => {
     expect(buttons[0].textContent).toContain('Currently loaded');
   });
 
+  it('a currently-loaded row that is also the endpoint default shows BOTH tags, as two separate spans', async () => {
+    // The common case on a single-purpose GPU box: the one model that is loaded is the
+    // saved default too. An exclusive tag slot (promotion, else Default) silently dropped
+    // the Default marking for exactly that row.
+    const { win, app } = bootApp({
+      hosts: [
+        {
+          id: 'llama-box',
+          label: 'llama.cpp',
+          baseUrl: 'http://x',
+          models: ['qwen3', 'llama3', 'phi4'],
+          defaultModelId: 'phi4',
+        },
+      ],
+    });
+    const origApiJson = app._apiJson;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/llama-box/running-status') {
+        return { isLlamaSwap: true, running: [{ model: 'phi4', state: 'ready' }] };
+      }
+      return origApiJson(path);
+    };
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    const buttons = [...win.document.getElementById('customModelPickList')!.querySelectorAll('button')];
+    expect(buttons[0].textContent).toContain('phi4');
+    const tags = [...buttons[0].querySelectorAll('.set-scope')].map((el) => el.textContent);
+    expect(tags).toEqual(['Currently loaded', 'Default']);
+    // Rows with neither a promotion nor the default carry no tag at all.
+    expect(buttons[1].querySelectorAll('.set-scope')).toHaveLength(0);
+    expect(buttons[2].querySelectorAll('.set-scope')).toHaveLength(0);
+  });
+
+  it('a "last used" row that is also the endpoint default shows both tags too', async () => {
+    const { win, app } = bootApp({
+      hosts: [
+        {
+          id: 'llama-box',
+          label: 'llama.cpp',
+          baseUrl: 'http://x',
+          models: ['qwen3', 'llama3', 'phi4'],
+          defaultModelId: 'llama3',
+        },
+      ],
+    });
+    const origApiJson = app._apiJson;
+    app._apiJson = async (path: string) => {
+      if (path === '/api/model-endpoints/llama-box/running-status') return { isLlamaSwap: false, running: [] };
+      return origApiJson(path);
+    };
+    win.localStorage.setItem('codeman:customModelLastUsed:claude:llama-box', 'llama3');
+
+    await app.selectCustomModelEntry('claude', 'llama-box');
+
+    const buttons = [...win.document.getElementById('customModelPickList')!.querySelectorAll('button')];
+    expect(buttons[0].textContent).toContain('llama3');
+    const tags = [...buttons[0].querySelectorAll('.set-scope')].map((el) => el.textContent);
+    expect(tags).toEqual(['Last used', 'Default']);
+  });
+
   it('is not fooled by a model llama-swap reports loaded but not yet ready, or one this host no longer lists', async () => {
     const { win, app } = bootApp({
       hosts: [{ id: 'llama-box', label: 'llama.cpp', baseUrl: 'http://x', models: ['qwen3', 'llama3'] }],

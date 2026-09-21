@@ -196,14 +196,20 @@ under your thumb:
 - **"Last used"** — shown only when nothing is currently loaded: the model
   actually launched last for this exact (harness, endpoint) pair, read
   from the per-device `codeman:customModelLastUsed:<mode>:<endpointId>`
-  localStorage key. Written by `runCustomModelEntry` /
-  `_quickStartWithCustomModelConfirm` only once the model is actually
-  applied, never on the mere click — declining the context-window warning
-  means this exact model cannot work with this CLI at all, so promoting it
-  next time would be actively wrong, not just premature.
+  localStorage key. Written by `_runCustomModelEntryViaRestart` (claude)
+  and `_quickStartWithCustomModelConfirm` (every one-shot launch; the
+  `runCustomModelEntry` entry point itself only dispatches between the
+  two) only once the model is actually applied, never on the mere click —
+  declining the context-window warning means this exact model cannot work
+  with this CLI at all, so promoting it next time would be actively wrong,
+  not just premature.
 
-Neither tag reorders anything past that one promoted row, and both defer
-to "Default" when neither applies.
+Neither tag reorders anything past that one promoted row. The "Default"
+pill is a separate span, not a third value of the same slot: a promoted
+row that is also the endpoint's `defaultModelId` shows both tags (on a
+single-purpose GPU box that is the common case, and an exclusive slot
+silently dropped the Default marking for exactly that row), and a row
+with neither promotion nor default shows no tag at all.
 
 **How the launch itself applies the endpoint depends on the harness.** For
 opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP (`runCustomModelEntry` →
