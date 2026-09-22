@@ -1673,6 +1673,45 @@ function sanitizeDiagEntry(msg) {
     .slice(0, DIAG_ENTRY_MAX_CHARS);
 }
 
+// ── Recovering a dropped output frame ──────────────────────────────────────
+//
+// `_onSessionTerminal` drops an incoming frame when the app-owned render queues
+// already hold 128KB, which is the right call — the alternative is an unbounded
+// backlog — but a hole in a TUI byte stream is a desynced cursor, and a desynced
+// cursor is muffled text (issue #464). So the drop is only half of it: the
+// recovery has to actually happen.
+//
+// ⚠️ It used to be a fire-and-forget timer. `_onSessionNeedsRefresh` opens with
+// four early returns, and two of them — a buffer load in flight, a refresh
+// already owning this session — are MOST likely to be true during exactly the
+// output burst that caused the drop. The timer nulled itself before the call,
+// so a skipped refresh lost the recovery silently and the dropped bytes were
+// never replayed.
+//
+// Bounded, because every reason the refresh can be skipped is transient
+// contention that clears in seconds, and a permanently failing refresh must not
+// become a forever-loop against the API. Giving up after the cap leaves exactly
+// the garbled frames the old code left, so the floor is no worse than before.
+const DROP_RECOVERY_DELAY_MS = 2000;
+const DROP_RECOVERY_MAX_ATTEMPTS = 5;
+
+/**
+ * Should a dropped-output recovery run again?
+ *
+ * @param {{repainted: boolean, attempt: number, stillActive: boolean}} state
+ *   `repainted` — whether `_onSessionNeedsRefresh` actually rewrote the buffer.
+ *   `attempt`   — how many have already run, zero-based.
+ *   `stillActive` — whether the dropped session is still the one on screen.
+ * @returns {boolean}
+ */
+function shouldRetryDroppedOutputRecovery({ repainted, attempt, stillActive }) {
+  // Switched away: `selectSession` repaints from the server on its own, so a
+  // retry here would be a second replay of a buffer that is about to be written.
+  if (!stillActive) return false;
+  if (repainted) return false;
+  return attempt + 1 < DROP_RECOVERY_MAX_ATTEMPTS;
+}
+
 // ── Terminal geometry: xterm and the PTY must never disagree ───────────────
 //
 // Issue #464 ("text gets muffled"). Claude Code's TUI repaints by wrapping its
@@ -1758,6 +1797,11 @@ if (typeof window !== 'undefined') {
     FETCH_DEADLINE_MAX_MS,
   };
   window.CodemanDiag = { sanitizeDiagEntry, DIAG_ENTRY_MAX_CHARS };
+  window.CodemanDroppedOutput = {
+    shouldRetryDroppedOutputRecovery,
+    DROP_RECOVERY_DELAY_MS,
+    DROP_RECOVERY_MAX_ATTEMPTS,
+  };
   window.CodemanTerminalGeometry = {
     clampTerminalDimensions,
     terminalGeometryAgrees,
