@@ -530,7 +530,21 @@ const CODEX: CliEntry = {
     // `Working (2m 49s • esc to interrupt)` above it while a turn runs. It animates no
     // braille spinner, and it never prints `esc to interrupt` at rest, so that phrase
     // alone separates a running turn from an idle one.
-    workDetect: { promptGlyph: '›', workingLine: '[Ee]sc to interrupt' },
+    // Codex pins a row of its own while a background terminal it started is still
+    // running: `  1 background terminal running · /ps to view · /stop to close`. Unlike
+    // Claude's footer chip that row sits ABOVE the composer, which puts it third from the
+    // bottom once the status line and the composer are counted, hence `watchingLines`.
+    // The ` · /ps to view` tail is the anchor: it is CLI chrome, it names a slash command
+    // that only the CLI can offer, and without it a bare count in the transcript would do.
+    // Measured against a live codex-cli 0.154.0 pane on 2026-09-22: the row appears when
+    // the terminal starts, follows the composer down as the conversation grows, and is
+    // gone after `/stop`.
+    workDetect: {
+      promptGlyph: '›',
+      workingLine: '[Ee]sc to interrupt',
+      watchingLine: String.raw`(\d+ background terminals?) running · /ps to view`,
+      watchingLines: 4,
+    },
     transcript: 'codex-rollout',
     altScreen: 'strip-full',
     echo: { policy: 'predict', anchor: { kind: 'cursor' }, predictProfile: 'codex' },

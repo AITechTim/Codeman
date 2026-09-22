@@ -36,8 +36,8 @@ interface CliEntry {
   launch: CliLaunch; // the structured argv template
   env: CliEnv; // exports, tmux setenv keys, the env-override allowlist
   capabilities: CliCapabilities; // what every call site reads instead of the id
-  //   .workDetect?: { promptGlyph, workingLine, watchingLine? } — how this CLI's pane
-  //   shows work, and how it shows work it started in the background
+  //   .workDetect?: { promptGlyph, workingLine, watchingLine?, watchingLines? } — how
+  //   this CLI's pane shows work, and how it shows work it started in the background
   overlays: CliOverlays; // remote-SSH / Docker pane commands, credential store
 }
 ```
@@ -57,14 +57,24 @@ into `Session.watching`, and an idle prompt from such a session opens already ac
 so a pane waiting for its own background work never raises an alert a human cannot answer.
 Group 1 is the label, and a CLI that declares no pattern reports no background work.
 
+Two CLIs declare such a row today, and they put it in different places. Claude writes its
+chip on the last row of the screen, so it keeps the default window of `WATCHING_TAIL_LINES`
+rows and anchors on the `·` its footer joins items with. Codex pins
+`1 background terminal running · /ps to view · /stop to close` ABOVE its composer, which
+puts the row third from the bottom once the status line and the composer are counted, so its
+entry declares `watchingLines: 4` and anchors on the ` · /ps to view` tail. Both were
+measured against live panes rather than read out of a binary, which is the standard for
+adding a third.
+
 That label is the one value in the registry that an AGENT can influence, because it comes off
 the agent's own screen. Two things keep it honest, and both belong to whoever adds a pattern
-for a new CLI. `watchingLabel()` in `session-activity.ts` searches only the last
-`WATCHING_TAIL_LINES` rows, which is the part of the screen the CLI draws rather than the
-agent, and the pattern itself anchors on the separator that CLI's footer uses to join its
-items. Without both, an agent could silence its own idle alert by printing `· 1 monitor ·`
-into its output. The label is also ANSI-stripped and length-capped at the source, since it
-ends up on a badge and in an approval card.
+for a new CLI. `watchingLabel()` in `session-activity.ts` searches only the last few
+non-blank rows, which is the part of the screen the CLI draws rather than the agent, and the
+pattern anchors on chrome only that CLI can produce. Without both, an agent could silence its
+own idle alert by printing the words into its output. Keep the window as small as the layout
+allows, since every row it adds is another row the agent may be able to write. The label is
+also ANSI-stripped and length-capped at the source, since it ends up on a badge and in an
+approval card.
 
 ### Three capabilities that must stay independent
 

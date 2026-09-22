@@ -318,6 +318,9 @@ const capabilitiesSchema = z
             'watchingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
           )
           .optional(),
+        // Bounded hard: this is how far up the screen a config file may push the search,
+        // and every row it adds is one more row the agent itself may be able to write.
+        watchingLines: z.number().int().min(1).max(8).optional(),
       })
       .strict()
       .optional(),

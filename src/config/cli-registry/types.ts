@@ -345,13 +345,23 @@ export interface CliCapabilities {
     /** Source of a regex matching the status line this CLI draws while a turn runs. */
     workingLine: string;
     /**
-     * Source of a regex matching the chip this CLI draws at the foot of its screen while
-     * work it started in the background is still running, e.g. Claude's `· 1 monitor ·`.
-     * Capture group 1 is the label Codeman shows, and the whole match stands in when the
-     * pattern declares no group. A CLI that omits this reports no background work, which
-     * is what every CLI did before the field existed.
+     * Source of a regex matching the row this CLI draws while work it started in the
+     * background is still running, e.g. Claude's `· 1 monitor ·` footer chip or Codex's
+     * `1 background terminal running · /ps to view`. Capture group 1 is the label Codeman
+     * shows, and the whole match stands in when the pattern declares no group. A CLI that
+     * omits this reports no background work, which is what every CLI did before the field
+     * existed.
      */
     watchingLine?: string;
+    /**
+     * How many rows at the FOOT of the screen that row can appear in, counting non-blank
+     * rows only. Claude writes its chip on the last row and keeps the default; Codex pins
+     * its own above the composer, which puts it third from the bottom, so it declares
+     * more. Keep each number as small as that CLI's layout allows: every extra row is
+     * another row an agent might be able to write, and the label is what silences an
+     * alert. See `watchingLabel()` in `session-activity.ts`.
+     */
+    watchingLines?: number;
   };
   /** No direct-PTY fallback: the CLI must run inside tmux (secrets ride tmux setenv). */
   requiresMux: boolean;

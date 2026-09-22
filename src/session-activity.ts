@@ -95,18 +95,20 @@ export function isPaneQuiet(lastActivityAt: number, now: number, silenceMs: numb
 }
 
 /**
- * How many lines at the foot of a pane capture may hold the background-work chip.
+ * How many rows at the foot of a pane capture may hold the background-work row, for a
+ * CLI that declares no number of its own (`capabilities.workDetect.watchingLines`).
  *
- * Claude Code draws that chip on the last row of the screen. The row above it is the
- * status line, which a user's own `statusLine` command writes, and two lines is what
+ * Claude Code draws its chip on the LAST row of the screen. The row above it is the
+ * status line, which a user's own `statusLine` command writes, and two rows is what
  * covers the chip wherever a trailing blank or a one-line notice pushes it up by one.
+ * Codex pins its row above the composer instead and declares four.
  *
  * ⚠️ The ceiling is the security boundary, not a tidiness measure. The label is
- * PANE-DERIVED, so everything on that screen above the footer is text an agent wrote
- * itself, and an agent that printed `· 1 monitor ·` into its own output would silence
- * its own idle alert. Keep the window at the footer, keep each CLI's pattern anchored
- * on the separator its footer actually uses, and never widen this to a whole-pane
- * search.
+ * PANE-DERIVED, and everything on that screen above the CLI's own chrome is text the
+ * agent wrote itself, so an agent that printed `· 1 monitor ·` into its output would
+ * silence its own idle alert. Keep each CLI's window as small as its layout allows,
+ * keep its pattern anchored on chrome only that CLI can draw, and never widen either to
+ * a whole-pane search.
  */
 export const WATCHING_TAIL_LINES = 2;
 
@@ -122,20 +124,27 @@ export const MAX_WATCHING_LABEL_CHARS = 40;
  * entry (`capabilities.workDetect.watchingLine`); group 1 is the label when the pattern
  * declares one, and the whole match stands in when it does not.
  *
- * Each candidate line is tested on its own, bottom row first, so a pattern can anchor
- * itself with `^` or `$` against a single row rather than against a joined block. The
- * answer is stripped of ANSI and capped, because it ends up on a badge and in an
- * approval card.
+ * Each candidate row is tested on its own, bottom row first, so a pattern can anchor
+ * itself with `^` or `$` against a single row rather than against a joined block. Blank
+ * rows are dropped before the window is taken, because a CLI that leaves a blank line
+ * between its chrome rows would otherwise spend the window on nothing. The answer is
+ * stripped of ANSI and capped, because it ends up on a badge and in an approval card.
  *
+ * @param tailLines how many non-blank rows from the bottom to look at, defaulting to
+ *   `WATCHING_TAIL_LINES`; a CLI declares its own when its row is not the last one
  * @returns the label, or null when the pane shows no background work
  */
-export function watchingLabel(paneText: string | null | undefined, pattern: RegExp): string | null {
+export function watchingLabel(
+  paneText: string | null | undefined,
+  pattern: RegExp,
+  tailLines: number = WATCHING_TAIL_LINES
+): string | null {
   if (!paneText) return null;
   const lines = stripAnsi(paneText)
     .split('\n')
     .map((line) => line.trimEnd())
     .filter((line) => line !== '');
-  for (const line of lines.slice(-WATCHING_TAIL_LINES).reverse()) {
+  for (const line of lines.slice(-Math.max(1, tailLines)).reverse()) {
     // A pattern compiled by compileVersionRegex() never carries the `g` flag, but a
     // caller reaching in from a test or a config reload might, and a stale lastIndex
     // would make the same screen match every other call.

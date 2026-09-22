@@ -22,8 +22,40 @@ import {
   IDLE_SILENCE_MS,
 } from '../src/session-activity.js';
 
-/** The registry's own pattern for Claude, which is what every consumer runs. */
+/** The registry's own patterns, which are what every consumer runs. */
 const CLAUDE_WATCHING = compileVersionRegex(getCli('claude')!.capabilities.workDetect!.watchingLine!)!;
+const CODEX_WATCHING = compileVersionRegex(getCli('codex')!.capabilities.workDetect!.watchingLine!)!;
+const CODEX_TAIL = getCli('codex')!.capabilities.workDetect!.watchingLines!;
+
+/**
+ * The foot of a Codex pane, verbatim (codex-cli 0.154.0, 2026-09-22). Codex does not
+ * write on its last row: the status line is there, the composer above it, and the
+ * background-terminal row above that, which is why codex declares its own window.
+ */
+const CODEX_STATUS =
+  '  gpt-5.6-sol medium · Context 98% left · ~/codeman-cases/codex-probe · 5h 99% left · weekly 94% left';
+const CODEX_WITH_TERMINAL = [
+  '• OK',
+  '',
+  '  1 background terminal running · /ps to view · /stop to close',
+  '',
+  '',
+  '› Ask Codex to do anything',
+  '',
+  CODEX_STATUS,
+  '',
+].join('\n');
+const CODEX_STOPPED = [
+  '• OK',
+  '',
+  '• Stopping all background terminals.',
+  '',
+  '',
+  '› Ask Codex to do anything',
+  '',
+  CODEX_STATUS,
+  '',
+].join('\n');
 
 /** The bottom of a Claude pane: composer, the user's status line, the footer row. */
 function pane(footer: string, body = ''): string {
@@ -72,10 +104,13 @@ function withFakePane(screen: string | (() => string), mode: 'claude' | 'codex' 
   } as ConstructorParameters<typeof Session>[0]);
 }
 
+/** Codex's own composer repaint, the frame that arms its idle confirmation. */
+const CODEX_COMPOSER_REPAINT = '\x1b[31;1H\x1b[38;5;246m›\xa0\x1b[39m\x1b[0m';
+
 /** Run one turn and let it end, which is when the probe reads the screen. */
-function runAndSettle(session: Session): void {
+function runAndSettle(session: Session, repaint: string = COMPOSER_REPAINT): void {
   for (let i = 0; i < 3; i++) {
-    feed(session, COMPOSER_REPAINT);
+    feed(session, repaint);
     vi.advanceTimersByTime(1000);
   }
   vi.advanceTimersByTime(IDLE_SILENCE_MS + 2000);
@@ -205,20 +240,33 @@ describe('Session.watching', () => {
     expect(session.watching).toBe('1 monitor');
   });
 
-  it('reports nothing for a CLI whose footer nobody has characterised', () => {
+  it('reads Codex own row, three up from the bottom of its screen', () => {
     vi.useFakeTimers();
-    expect(getCli('codex')?.capabilities.workDetect?.watchingLine).toBeUndefined();
-    // Codex draws its own composer glyph, so this session settles the same way; what it
-    // must not do is read Claude's footer on a screen that is not Claude's.
-    const session = withFakePane(WITH_MONITOR, 'codex');
+    const session = withFakePane(CODEX_WITH_TERMINAL, 'codex');
+    runAndSettle(session, CODEX_COMPOSER_REPAINT);
+    expect(session.status).toBe('idle');
+    expect(session.watching).toBe('1 background terminal');
+  });
 
-    for (let i = 0; i < 3; i++) {
-      feed(session, '\x1b[31;1H\x1b[38;5;246m›\xa0\x1b[39m\x1b[0m');
-      vi.advanceTimersByTime(1000);
-    }
-    vi.advanceTimersByTime(IDLE_SILENCE_MS + 2000);
-
+  it('reports nothing for a CLI whose screen nobody has characterised', () => {
+    vi.useFakeTimers();
+    expect(getCli('gemini')?.capabilities.workDetect).toBeUndefined();
+    const session = withFakePane(WITH_MONITOR, 'gemini');
+    runAndSettle(session);
     expect(session.watching).toBeNull();
+  });
+
+  it('never reads another CLI screen', () => {
+    vi.useFakeTimers();
+    // Each pattern is anchored on chrome its own CLI draws, so neither can fire on the
+    // other's pane. A shared fallback would have both reading a screen nobody measured.
+    const codexOnClaudeScreen = withFakePane(WITH_MONITOR, 'codex');
+    runAndSettle(codexOnClaudeScreen, CODEX_COMPOSER_REPAINT);
+    expect(codexOnClaudeScreen.watching).toBeNull();
+
+    const claudeOnCodexScreen = withFakePane(CODEX_WITH_TERMINAL, 'claude');
+    runAndSettle(claudeOnCodexScreen);
+    expect(claudeOnCodexScreen.watching).toBeNull();
   });
 
   it('rides along on the payload every session surface reads', () => {
@@ -227,6 +275,35 @@ describe('Session.watching', () => {
     runAndSettle(session);
 
     expect(session.toLightDetailedState().watching).toBe('1 shell');
+  });
+});
+
+describe('the row Codex draws', () => {
+  it('reads the label, and only while a terminal is running', () => {
+    expect(watchingLabel(CODEX_WITH_TERMINAL, CODEX_WATCHING, CODEX_TAIL)).toBe('1 background terminal');
+    expect(watchingLabel(CODEX_STOPPED, CODEX_WATCHING, CODEX_TAIL)).toBeNull();
+  });
+
+  it('counts terminals', () => {
+    const three = CODEX_WITH_TERMINAL.replace('1 background terminal running', '3 background terminals running');
+    expect(watchingLabel(three, CODEX_WATCHING, CODEX_TAIL)).toBe('3 background terminals');
+  });
+
+  it('needs the window Codex declares: its row is not the last one', () => {
+    // Pins WHY `watchingLines` exists. Claude's default of two rows reaches the status
+    // line and the composer, and Codex's row sits one further up.
+    expect(watchingLabel(CODEX_WITH_TERMINAL, CODEX_WATCHING, 2)).toBeNull();
+    expect(CODEX_TAIL).toBeGreaterThanOrEqual(3);
+  });
+
+  it('refuses the same words in the transcript, which is the injection guard', () => {
+    // ` · /ps to view` is chrome: only the CLI offers that slash command. Without the
+    // anchor an agent could print the sentence and silence itself.
+    const claim = CODEX_STOPPED.replace(
+      '• Stopping all background terminals.',
+      '• I left 1 background terminal running for you.'
+    );
+    expect(watchingLabel(claim, CODEX_WATCHING, CODEX_TAIL)).toBeNull();
   });
 });
 

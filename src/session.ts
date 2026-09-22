@@ -2760,7 +2760,9 @@ export class Session extends EventEmitter {
     // Called only from the probe, and only with what a capture returned: `null` is
     // "the screen could not be read", which is not evidence that nothing is running.
     if (!pattern || paneText === null) return;
-    this._watching = watchingLabel(paneText, pattern);
+    // How far up the screen this CLI's row can sit is its own business: Claude writes on
+    // the last row, Codex pins one above its composer. Both stay at the foot.
+    this._watching = watchingLabel(paneText, pattern, getCli(this.mode)?.capabilities.workDetect?.watchingLines);
   }
 
   /**
