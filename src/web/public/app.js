@@ -7063,8 +7063,16 @@ class CodemanApp {
       // still holding its previous content is stale, not empty, and stacking a
       // notice on top of readable output is worse than the staleness.
       if (clearedBeforeFresh && this.terminal) {
+        // Three short lines, none over 25 columns, because the narrowest
+        // terminal this app will render is the 40-column floor and a notice
+        // that wraps there leaves a lone '.' on a line of its own — measured at
+        // 320px, where a single 52-character sentence did exactly that.
+        // Each line is one fact: what failed, that the session is still alive,
+        // and what to do. The last says RELOAD rather than "reopen the tab",
+        // because `selectSession` early-returns when the session is already
+        // active, so clicking the tab you are already on retries nothing.
         this.terminal.write(
-          '\r\n\x1b[2m  Could not load this session\u2019s history. Live output continues below.\x1b[0m\r\n'
+          '\r\n\x1b[2m  History did not load.\r\n  Live output continues.\r\n  Reload to try again.\x1b[0m\r\n'
         );
       }
       // ⚠️ CLEAR, not 'failed'. `_setTerminalLoadState` only marks the TAB, and
