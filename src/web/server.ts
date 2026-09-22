@@ -3373,8 +3373,9 @@ export class WebServer extends EventEmitter {
               claudeSessionChain: savedState?.claudeSessionChain,
               // What the previous run last observed of this pane's agent. Carried
               // over so the first persist after boot does not blank a record that
-              // says the agent exited; the attach below drops it, and the stats
-              // tick replaces it with a first-hand reading.
+              // says the agent exited; the attach below drops it, and the
+              // pane-exit watcher's own tick replaces it with a first-hand
+              // reading (not the stats collector — see `startPaneExitWatcher`).
               paneExit: savedState?.paneExit,
               // A record rebuilt from the socket has no provenance, so its
               // apparent locality is a guess (see `MuxSession.discovered`).

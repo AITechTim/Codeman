@@ -2458,18 +2458,23 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
    `error` is the PTY-exit breaker's value and makes the browser offer a restart
    — so this is a rendering rule only, and it matches `.tab-status.ended`.
 
-   ⚠ The two alert classes are excluded BY HAND rather than by cascade, the same
-   way the rich-rail dot rules below do it: a dot turning red or yellow because
-   a session is blocked on a human outranks "the agent exited", and this
-   selector is specific enough (0,5,0) to have beaten those (0,3,0) rules
-   otherwise. The spinner ring is a pseudo-element the skin blocks cannot reach,
-   so it needs hiding explicitly rather than by unsetting the animation. */
-.session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status {
+   ⚠ Three states are excluded BY HAND rather than by cascade, the same way the
+   rich-rail dot rules below do it: a dot turning red or yellow because a
+   session is blocked on a human outranks "the agent exited", and this selector
+   is specific enough (0,5,0) to have beaten those (0,3,0) rules otherwise. The
+   third is `.tab-status.error` (0,2,0), which is the PTY-exit breaker's state
+   and the one the browser answers with a "restart it?" confirm — the same
+   argument that protects the two alert classes, and it reaches the dot rather
+   than the tab, which is why the `:not()` sits on `.tab-status` here and on
+   `.session-tab` there. The spinner ring is a pseudo-element the skin blocks
+   cannot reach, so it needs hiding explicitly rather than by unsetting the
+   animation. */
+.session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status:not(.error) {
   background: var(--text-muted);
   opacity: 0.5;
   animation: none;
 }
-.session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status::after {
+.session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status:not(.error)::after {
   display: none;
 }
 
@@ -18511,7 +18516,7 @@ html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail
 html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
   .tab-rail
   .session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle)
-  .tab-status {
+  .tab-status:not(.error) {
   background: var(--text-muted);
   opacity: 0.5;
   box-shadow: none;

@@ -157,8 +157,9 @@ const DEFAULT_STATS_INTERVAL_MS = 2000;
  * How often the pane-exit watcher re-reads every pane on the socket. The
  * watcher owns this cadence: it does NOT ride `startStatsCollection()`, whose
  * lifetime a browser panel controls (see {@link TmuxManager.startPaneExitWatcher}).
- * Matched to the stats cadence above because both cost one batched tmux read,
- * and kept well under EXEC_TIMEOUT_MS so a normal read finishes inside a tick.
+ * Matched to the stats cadence above because both cost one batched tmux read.
+ * ⚠ It does NOT bound a read: EXEC_TIMEOUT_MS is 5000 ms, so a slow read can
+ * outlive two ticks, which is exactly why `paneExitReadInFlight` exists.
  */
 const DEFAULT_PANE_EXIT_INTERVAL_MS = 2000;
 
@@ -3079,9 +3080,13 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * polls rather than probing per session.
    *
    * A failed or empty probe leaves the previous answers ALONE rather than
-   * clearing them. An empty read is "tmux did not answer", and clearing on it
-   * would turn a transient failure into a silent retraction of a death Codeman
-   * had already observed. A NON-empty read is different: `list-panes -a` lists
+   * clearing them, because the two cannot be told apart: the command ends in
+   * `|| true`, so a tmux that errored and a socket with genuinely no panes both
+   * arrive as empty output. Treating that as "tmux did not answer" is the
+   * conservative reading — clearing on it would turn a transient failure into a
+   * silent retraction of a death Codeman had already observed, and the cost of
+   * being wrong the other way is one stale entry for a socket that no longer
+   * has the pane. A NON-empty read is different: `list-panes -a` lists
    * every pane on the socket, so it is authoritative and {@link applyPaneExits}
    * prunes against it.
    *
@@ -3096,8 +3101,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * command in a pane calls {@link clearPaneExit} itself.
    */
   async refreshPaneExits(now: number = Date.now()): Promise<void> {
-    if (IS_TEST_MODE) return;
-    // Nothing on this socket could answer, so do not exec tmux to find that
+    // Nothing on this socket could answer, so do not read tmux to find that
     // out. See `hasObservablePaneSession`: the watcher above still ticks.
     if (!hasObservablePaneSession(this.sessions.values())) return;
     if (this.paneExitReadInFlight) return;
@@ -3106,18 +3110,7 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     this.paneExitReadInFlight = true;
     let rows: PaneRow[];
     try {
-      // execAsync, not execSync: this runs on a 2000 ms timer, and a synchronous
-      // exec freezes the port while the process stays alive (see the
-      // event-loop-monitor note in CLAUDE.md). The three `isPaneDead()` callers
-      // stay synchronous because each is answering one request right then.
-      const { stdout } = await execAsync(`${this.tmux()} list-panes -a -F '${PANE_LIST_FORMAT}' 2>/dev/null || true`, {
-        encoding: 'utf-8',
-        timeout: EXEC_TIMEOUT_MS,
-      });
-      rows = parsePaneRows(stdout.trim());
-    } catch (err) {
-      console.error('[TmuxManager] Failed to read pane exit state:', err);
-      return;
+      rows = await this.readPaneRows();
     } finally {
       this.paneExitReadInFlight = false;
     }
@@ -3128,6 +3121,37 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
     if (generation !== this.paneExitGeneration) return;
 
     this.applyPaneExits(derivePaneExits(rows, now));
+  }
+
+  /**
+   * Read every pane on the socket. The ONLY part of the pane-exit watcher that
+   * touches tmux, which is what lets a test subclass drive the guards in
+   * {@link refreshPaneExits} — the in-flight suppression, the generation
+   * check, the empty-read retraction rule and the read gate — against rows it
+   * chooses. Split out for the reason `runRemoteReconnectTick` is: a guard no
+   * test can reach is a guard that can be deleted without anything failing.
+   *
+   * A failed read answers with NO rows, which the caller treats as "tmux did
+   * not answer" and which therefore retracts nothing.
+   */
+  protected async readPaneRows(): Promise<PaneRow[]> {
+    // The test-mode gate lives HERE rather than at the top of the tick, so that
+    // what tests cannot do is spawn a process, not exercise the bookkeeping.
+    if (IS_TEST_MODE) return [];
+    try {
+      // execAsync, not execSync: this runs on a 2000 ms timer, and a synchronous
+      // exec freezes the port while the process stays alive (see the
+      // event-loop-monitor note in CLAUDE.md). The three `isPaneDead()` callers
+      // stay synchronous because each is answering one request right then.
+      const { stdout } = await execAsync(`${this.tmux()} list-panes -a -F '${PANE_LIST_FORMAT}' 2>/dev/null || true`, {
+        encoding: 'utf-8',
+        timeout: EXEC_TIMEOUT_MS,
+      });
+      return parsePaneRows(stdout.trim());
+    } catch (err) {
+      console.error('[TmuxManager] Failed to read pane exit state:', err);
+      return [];
+    }
   }
 
   /**
@@ -3190,7 +3214,9 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
       clearInterval(this.paneExitInterval);
     }
     this.paneExitInterval = setInterval(() => {
-      if (IS_TEST_MODE) return;
+      // No IS_TEST_MODE guard: `readPaneRows()` is the only thing that would
+      // spawn a process and it refuses under test, so a test can drive this
+      // whole loop with fake timers instead of being locked out of it.
       void this.refreshPaneExits()
         .then(() => this.emit('paneExitsUpdated'))
         .catch((err) => console.error('[TmuxManager] Pane exit watcher error:', err));

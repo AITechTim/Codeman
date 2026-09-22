@@ -17,9 +17,11 @@ import {
   parsePaneRows,
   derivePaneExits,
   hasObservablePaneSession,
+  type PaneRow,
   resolveActivePaneTarget,
 } from '../src/tmux-manager.js';
 import { execSync, exec } from 'node:child_process';
+import type { MuxSession } from '../src/mux-interface.js';
 
 // ============================================================================
 // Unit Tests (mocked)
@@ -1119,6 +1121,124 @@ describe('TmuxManager pane-exit bookkeeping', () => {
     manager.applyPaneExits(derivePaneExits(parsePaneRows('codeman-aaaa|100|1|0|'), NOW));
     manager.clearPaneExit('codeman-aaaa');
     expect(manager.getPaneExit('codeman-aaaa')).toBeUndefined();
+  });
+});
+
+describe('the pane-exit watcher tick', () => {
+  // Every guard in `refreshPaneExits()` used to be unreachable: the method
+  // began with `if (IS_TEST_MODE) return;`, so deleting the generation check,
+  // the in-flight suppression, the empty-read rule or the read gate left the
+  // whole suite green. The tmux read now sits alone in `readPaneRows()`, which
+  // a subclass can answer for.
+  const NOW = 1_700_000_000_000;
+
+  class TestManager extends TmuxManager {
+    rows: PaneRow[] = [];
+    reads = 0;
+    /** While true, a read parks until releaseAll(), so a test can hold one in flight. */
+    hold = false;
+    private pending: (() => void)[] = [];
+
+    protected override async readPaneRows(): Promise<PaneRow[]> {
+      this.reads++;
+      // Every parked read is tracked, not just the latest: with the in-flight
+      // guard removed a second one starts, and a harness that could release
+      // only the last would deadlock instead of failing.
+      if (this.hold) await new Promise<void>((resolve) => this.pending.push(resolve));
+      return this.rows;
+    }
+
+    releaseAll(): void {
+      this.hold = false;
+      for (const resolve of this.pending.splice(0)) resolve();
+    }
+  }
+
+  const localSession = (sessionId = 's1'): MuxSession =>
+    ({
+      sessionId,
+      muxName: `codeman-${sessionId}`,
+      pid: 100,
+      createdAt: 0,
+      workingDir: '/tmp',
+      mode: 'claude',
+      attached: true,
+    }) as MuxSession;
+
+  const withLocalSession = () => {
+    const manager = new TestManager();
+    manager.registerSession(localSession());
+    return manager;
+  };
+
+  it('does not read tmux when no session could answer', async () => {
+    const manager = new TestManager();
+    await manager.refreshPaneExits(NOW);
+    expect(manager.reads).toBe(0);
+  });
+
+  it('reads tmux once a local session exists', async () => {
+    const manager = withLocalSession();
+    manager.rows = parsePaneRows('codeman-s1|100|1|0|');
+    await manager.refreshPaneExits(NOW);
+    expect(manager.reads).toBe(1);
+    expect(manager.getPaneExit('codeman-s1')).toEqual({ status: 0, at: NOW });
+  });
+
+  it('suppresses a second read while one is still in flight', async () => {
+    // EXEC_TIMEOUT_MS is 5000 against a 2000 ms tick, so a slow read outlives
+    // two ticks; without this the older one can resolve last and win.
+    const manager = withLocalSession();
+    manager.hold = true;
+    const first = manager.refreshPaneExits(NOW);
+    const second = manager.refreshPaneExits(NOW);
+    const reads = manager.reads;
+    manager.releaseAll();
+    await Promise.all([first, second]);
+    expect(reads).toBe(1);
+  });
+
+  it('retracts nothing when the read comes back empty', async () => {
+    // An empty read is "tmux did not answer". Retracting there would turn a
+    // transient failure into a silent denial of a death already observed.
+    const manager = withLocalSession();
+    manager.rows = parsePaneRows('codeman-s1|100|1|137|');
+    await manager.refreshPaneExits(NOW);
+    manager.rows = [];
+    await manager.refreshPaneExits(NOW + 2000);
+    expect(manager.getPaneExit('codeman-s1')).toEqual({ status: 137, at: NOW });
+  });
+
+  it('discards a read that started before the pane was cleared', async () => {
+    // The guard that stops an in-flight read from republishing a death over
+    // the pane that has just replaced it.
+    const manager = withLocalSession();
+    manager.rows = parsePaneRows('codeman-s1|100|1|0|');
+    manager.hold = true;
+    const pending = manager.refreshPaneExits(NOW);
+    manager.clearPaneExit('codeman-s1');
+    manager.releaseAll();
+    await pending;
+    expect(manager.getPaneExit('codeman-s1')).toBeUndefined();
+  });
+
+  it('announces each tick so the server can publish it', async () => {
+    // Losing this emit, or the server's own startPaneExitWatcher() call,
+    // disables the whole feature with nothing failing.
+    vi.useFakeTimers();
+    try {
+      const manager = withLocalSession();
+      manager.rows = parsePaneRows('codeman-s1|100|1||9');
+      const updates: number[] = [];
+      manager.on('paneExitsUpdated', () => updates.push(1));
+      manager.startPaneExitWatcher(10);
+      await vi.advanceTimersByTimeAsync(25);
+      manager.stopPaneExitWatcher();
+      expect(updates.length).toBeGreaterThan(0);
+      expect(manager.getPaneExit('codeman-s1')).toMatchObject({ signal: 9 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

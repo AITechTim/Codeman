@@ -148,37 +148,47 @@ describe('what colour the status dot ends up', () => {
    * a real engine answers, which is what makes a rule moved up the file or a
    * selector given one more class fail here.
    *
-   * ⚠ Rules inside an at-rule are skipped, so this describes a desktop-width
-   * tab strip with motion allowed. jsdom reports a custom property unresolved,
-   * so the expected values are the `var(--x)` tokens the stylesheet writes.
+   * ⚠ In styles.css the rules inside an at-rule are skipped, so the desktop
+   * cases describe a wide viewport with motion allowed. mobile.css is loaded
+   * separately for the phone cases, and there its @media blocks are FLATTENED
+   * rather than skipped, because that file is phone-and-tablet-only and its
+   * whole content sits inside them. jsdom reports a custom property
+   * unresolved, so the expected values are the `var(--x)` tokens the
+   * stylesheets write.
    */
-  const css = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
-
-  const dotRules: string[] = [];
-  postcss.parse(css).walkRules((rule) => {
-    if (!rule.selector.includes('.tab-status')) return;
-    const parents: string[] = [];
-    let insideAtRule = false;
-    for (let p = rule.parent; p && p.type !== 'root'; p = p.parent) {
-      if (p.type === 'rule') parents.unshift(p.selector);
-      else insideAtRule = true;
-    }
-    if (insideAtRule) return;
-    const decls: string[] = [];
-    rule.each((node) => {
-      if (node.type === 'decl') decls.push(`${node.prop}: ${node.value}${node.important ? ' !important' : ''};`);
+  const readRules = (file: string, flattenMedia: boolean): string[] => {
+    const out: string[] = [];
+    postcss.parse(readFileSync(resolve(import.meta.dirname, `../src/web/public/${file}`), 'utf8')).walkRules((rule) => {
+      if (!rule.selector.includes('.tab-status')) return;
+      const parents: string[] = [];
+      let insideAtRule = false;
+      for (let p = rule.parent; p && p.type !== 'root'; p = p.parent) {
+        if (p.type === 'rule') parents.unshift(p.selector);
+        else insideAtRule = true;
+      }
+      if (insideAtRule && !flattenMedia) return;
+      const decls: string[] = [];
+      rule.each((node) => {
+        if (node.type === 'decl') decls.push(`${node.prop}: ${node.value}${node.important ? ' !important' : ''};`);
+      });
+      if (decls.length === 0) return;
+      const selectors = rule.selectors.map((sel) => (parents.length ? `${parents.join(' ')} ${sel}` : sel));
+      out.push(`${selectors.join(',')} { ${decls.join(' ')} }`);
     });
-    if (decls.length === 0) return;
-    const selectors = rule.selectors.map((sel) => (parents.length ? `${parents.join(' ')} ${sel}` : sel));
-    dotRules.push(`${selectors.join(',')} { ${decls.join(' ')} }`);
-  });
+    return out;
+  };
+
+  const dotRules = readRules('styles.css', false);
+  // index.html loads mobile.css after styles.css, so it goes last here too.
+  const phoneRules = [...dotRules, ...readRules('mobile.css', true)];
 
   /** Paint the dot of one tab and read back what the cascade decided. */
-  const dot = (opts: { tab: string; dotState?: string; rail?: boolean }) => {
+  const dot = (opts: { tab: string; dotState?: string; rail?: boolean; phone?: boolean }) => {
     const railAttrs = opts.rail ? ` data-tab-orientation="vertical" data-tab-rail-detail="rich"` : '';
     const container = opts.rail ? 'tab-rail' : 'session-tabs';
+    const rules = opts.phone ? phoneRules : dotRules;
     const dom = new JSDOM(
-      `<!DOCTYPE html><html${railAttrs}><head><style>${dotRules.join('\n')}</style></head><body>` +
+      `<!DOCTYPE html><html${railAttrs}><head><style>${rules.join('\n')}</style></head><body>` +
         `<div class="${container}"><div class="session-tab ${opts.tab}">` +
         `<span id="dot" class="tab-status ${opts.dotState ?? 'idle'}"></span></div></div></body></html>`
     );
@@ -238,6 +248,37 @@ describe('what colour the status dot ends up', () => {
       boxShadow: 'none',
     });
     expect(dot({ tab: 'tab-agent-exited tab-state-idle', rail: true }).background).toBe('var(--text-muted)');
+  });
+
+  it('leaves an errored dot red, which is the state that offers a restart', () => {
+    // `status: 'error'` is the PTY-exit breaker's value and the browser answers
+    // it with a "restart it?" confirm, so it is a needs-you colour by the same
+    // argument that protects the two alert classes. Reachable when a restart of
+    // a dead pane keeps failing: the breaker trips while the pane stays dead.
+    expect(dot({ tab: 'tab-agent-exited', dotState: 'error' }).background).toBe('var(--red)');
+  });
+
+  it('mutes the dot on a phone, glow and all', () => {
+    // mobile.css enlarges the working dot to 9px and gives it a green glow with
+    // !important, and `status` stays `busy` for a pane whose agent died
+    // mid-turn — so without a phone-side rule this renders a grey dot wearing a
+    // green halo beside a badge reading "exited".
+    expect(dot({ tab: 'tab-agent-exited', dotState: 'busy', phone: true })).toMatchObject({
+      background: 'var(--text-muted)',
+      boxShadow: 'none',
+    });
+  });
+
+  it('keeps an alert red on a phone as well', () => {
+    expect(dot({ tab: 'tab-agent-exited tab-alert-action', dotState: 'busy', phone: true }).background).toBe(
+      'var(--red)'
+    );
+  });
+
+  it('finds the phone rules it is meant to be resolving', () => {
+    // Same self-guard as the desktop one: if mobile.css stopped contributing
+    // rules, every phone case above would pass against the desktop cascade.
+    expect(phoneRules.length).toBeGreaterThan(dotRules.length);
   });
 
   it('still keeps an alert red on the rich tab rail', () => {

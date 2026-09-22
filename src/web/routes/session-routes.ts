@@ -1583,6 +1583,12 @@ export function registerSessionRoutes(
         name: session.name,
         mode: session.mode,
       });
+      // Persist, not just broadcast. Starting a command in the pane changes
+      // `pid` and retracts any `paneExit` (Ark0N/Codeman#446), and the pane-exit
+      // watcher cannot write that retraction to disk for us: its next tick finds
+      // the in-memory field already cleared, reports no change and persists
+      // nothing, so `state.json` would keep saying the agent had exited.
+      ctx.persistSessionState(session);
       ctx.broadcast(SseEvent.SessionInteractive, { id });
       ctx.broadcast(SseEvent.SessionUpdated, { session: ctx.getSessionStateWithRespawn(session) });
 
@@ -1612,6 +1618,9 @@ export function registerSessionRoutes(
         name: session.name,
         mode: 'shell',
       });
+      // Persist for the same reason /interactive does: a started pane retracts
+      // `paneExit`, and the watcher's next tick cannot write that retraction.
+      ctx.persistSessionState(session);
       ctx.broadcast(SseEvent.SessionInteractive, { id, mode: 'shell' });
       ctx.broadcast(SseEvent.SessionUpdated, { session: ctx.getSessionStateWithRespawn(session) });
       return {};

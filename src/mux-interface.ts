@@ -65,6 +65,13 @@ export interface MuxSession {
    * arrives with no `remote`/`docker` metadata and looks local. Anything that
    * would be WRONG about such a session rather than merely vague must fail
    * closed on this flag.
+   *
+   * ⚠ It is PERMANENT, not merely true for the boot that rediscovered the
+   * session: `saveSessions()` serializes the whole record to
+   * `mux-sessions.json` and `loadSessions()` restores it, so a genuinely local
+   * session rediscovered once stays opted out of everything keyed on this for
+   * the life of that record. That is the safe direction to fail, and it costs
+   * only the guess Codeman is declining to make.
    */
   discovered?: boolean;
 }

@@ -694,6 +694,22 @@ html.mobile-init .file-browser-panel {
     display: none;
   }
 
+  /* The exited-agent mute, a third time, for the phone (Ark0N/Codeman#446).
+     The rule above enlarges the working dot and gives it a green glow with
+     !important, and `status` deliberately stays `busy` for a pane whose agent
+     died mid-turn — so without this a phone renders a 9px grey dot still
+     wearing the green halo, beside a badge reading "exited". Measured; the
+     desktop rules cannot reach it, since they declare no box-shadow and lose
+     to !important anyway. !important here for the reason the glow needs it:
+     the skin block in styles.css outranks any plain class rule in this file.
+     ⚠ The alert classes and the error state are excluded exactly as they are
+     on desktop — a colour that means "this needs you" outranks "it exited". */
+  .session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status:not(.error) {
+    background: var(--text-muted) !important;
+    box-shadow: none !important;
+    opacity: 0.5;
+  }
+
   /* Truncate tab names more aggressively on mobile */
   .session-tab .tab-name {
     max-width: 50px;

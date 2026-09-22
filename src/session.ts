@@ -895,8 +895,9 @@ export class Session extends EventEmitter {
     // because the scoping reads `_remote`, `_docker` and the mux fields, all of
     // which are set by now. It is a claim about a pane this process has not
     // looked at yet, so every path that starts or re-attaches a pane drops it
-    // (see `_setupOrAttachMuxSession`) and the stats tick replaces it with a
-    // first-hand reading.
+    // (see `_setupOrAttachMuxSession`) and the pane-exit watcher's own tick
+    // replaces it with a first-hand reading. NOT the stats collector, which a
+    // browser panel arms and disarms — see `startPaneExitWatcher`.
     this.setPaneExit(config.paneExit);
     // Never self-parent: a session pointing at itself would draw a zero-length
     // lineage arc under its own tab. Only reachable via the recovery path, where
@@ -1156,9 +1157,13 @@ export class Session extends EventEmitter {
    * Every path that starts or relaunches a command in the pane calls it, and
    * the mux half also invalidates a pane read already in flight.
    *
-   * It does not persist or broadcast by itself. Each caller is already followed
-   * by the route's or recovery's own persist, and the pane-exit watcher would
-   * reach the same answer within one interval regardless.
+   * It does not persist or broadcast by itself; the caller owns both. ⚠ That
+   * caller MUST persist, and the pane-exit watcher is not a fallback for it:
+   * the watcher's next tick reads UNKNOWN, finds this field already cleared,
+   * reports no change and therefore writes nothing, so a caller that only
+   * broadcasts leaves `state.json` saying the agent exited for as long as the
+   * session stays quiet. `/interactive` and `/shell` did exactly that until
+   * Ark0N/Codeman#446 review; both now persist on their success path.
    */
   private clearPaneExitForNewPane(): void {
     this.setPaneExit(undefined);
