@@ -345,6 +345,29 @@ export interface CliCapabilities {
     /** Source of a regex matching the status line this CLI draws while a turn runs. */
     workingLine: string;
   };
+  /**
+   * How many columns this CLI indents its transcript body by, so a copy taken from its
+   * pane can drop that much and paste flush. Claude Code indents two and puts its own
+   * markers in those columns.
+   *
+   * ⚠ DECLARED rather than measured off the pane, and two measured attempts are why.
+   * Asking whether the pane painted real spaces across the unused part of each row
+   * separates a TUI from a shell perfectly where it fires and never over-stripped; it
+   * is also a function of pane WIDTH, because that padding exists only while a
+   * rendered line stops short of the CLI's own layout width and Claude Code's prose
+   * wraps to fill it. On one live transcript the share of padded rows ran 44%, 6%, 6%,
+   * 7% and 87% at 123, 160, 198, 235 and 298 columns, so at any ordinary window size
+   * the strip silently did nothing. Taking the narrowest indent on the surrounding
+   * rows instead fires at every width and over-strips on roughly 1% of selections,
+   * because a file listing inside the transcript can be the narrowest thing on screen.
+   *
+   * A declared width can do neither. The strip is the lesser of this and what every
+   * selected line shares, so a block can only ever shift as a unit, and it can never
+   * shift further than the CLI itself says its gutter is.
+   *
+   * Absent means no strip at all, the same fail-safe direction `workDetect` takes.
+   */
+  transcriptGutter?: number;
   /** No direct-PTY fallback: the CLI must run inside tmux (secrets ride tmux setenv). */
   requiresMux: boolean;
   /**

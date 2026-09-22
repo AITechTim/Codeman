@@ -4191,7 +4191,67 @@ Object.assign(CodemanApp.prototype, {
     if (this.terminal?._core?._selectionService?._activeSelectionMode === 3) return raw;
     const clean = window.CodemanCopySelection?.clean;
     if (!clean) return raw;
-    return clean(raw);
+    const range = this._normalisedSelectionRange();
+    return clean(raw, {
+      margin: this._activeCliGutterColumns(),
+      firstLinePartial: !!range && range.start.x > 0,
+    });
+  },
+
+  /**
+   * xterm's selection range with its two ends in reading order.
+   *
+   * `getSelectionPosition()` reports `start` and `end` as the two ends of the
+   * drag, and on xterm 6.0 it already hands back the earlier one first: it
+   * reads `_selectionService.selectionStart`, whose getter returns the model's
+   * `finalSelectionStart`, and that swaps the pair for a reversed selection.
+   * A real upward mouse drag through chromium confirms it. The ordering here
+   * is a guard rather than a fix. One layer down the same model exposes the
+   * UNNORMALISED fields under the same two names, and a reversed pair would
+   * make the row window below run backwards and collapse, which would report
+   * no margin at all for every upward drag in a deep buffer.
+   */
+  _normalisedSelectionRange() {
+    const range = this.terminal?.getSelectionPosition?.();
+    if (!range?.start || !range?.end) return null;
+    const { start, end } = range;
+    const reversed = end.y < start.y || (end.y === start.y && end.x < start.x);
+    return reversed ? { start: end, end: start } : { start, end };
+  },
+
+  /**
+   * How many columns to take off a copy from the active session's pane: the
+   * transcript gutter its CLI declares, or 0 when it declares none.
+   *
+   * ⚠️ Read from `window.__codemanTranscriptGutter`, the map the server derives
+   * from the `transcriptGutter` CAPABILITY at render time — never an id literal
+   * here, which is the registry's standing rule and is also what lets a CLI that
+   * declares a gutter later work with no change to this file.
+   *
+   * ⚠️ DECLARED rather than measured off the buffer, and two measured versions
+   * are why. Asking whether the pane painted spaces across the unused part of
+   * each row separates a TUI from a shell perfectly where it fires and never
+   * over-stripped, but it is a function of pane WIDTH, since that padding exists
+   * only while a rendered line stops short of the CLI's own layout width and
+   * Claude Code's prose wraps to fill it: the share of padded rows on one live
+   * transcript ran 44%, 6%, 6%, 7% and 87% at 123, 160, 198, 235 and 298
+   * columns, so the strip did nothing at any ordinary window size. Taking the
+   * narrowest indent on the rows around the selection instead fires at every
+   * width and over-strips on about 1% of them, because a file listing inside the
+   * transcript can be the narrowest thing on screen. A declared width does
+   * neither, and it reads no buffer rows at all on a path that runs on every
+   * Ctrl+C.
+   *
+   * A missing map means no session gets a strip, the same direction an
+   * unmeasured CLI takes by declaring nothing.
+   */
+  _activeCliGutterColumns() {
+    if (!this._copyStripMarginEnabled()) return 0;
+    const byMode = window.__codemanTranscriptGutter;
+    if (!byMode || typeof byMode !== 'object') return 0;
+    const mode = this.sessions?.get(this.activeSessionId)?.mode;
+    const columns = mode ? byMode[mode] : 0;
+    return Number.isInteger(columns) && columns > 0 ? columns : 0;
   },
 
   // Copy the current terminal selection. Goes through _copyText (Clipboard API,
@@ -4224,6 +4284,26 @@ Object.assign(CodemanApp.prototype, {
     // is the CJK-aware focus router, not xterm's raw focus().
     this.terminal.focus();
     return ok;
+  },
+
+  /**
+   * Whether this device wants the pane's left margin off the clipboard
+   * (`copyStripMargin`, per-device, default ON).
+   *
+   * Read here rather than mirrored into a field, for the same reason
+   * `_autoCopySelectionEnabled` is: there is then no apply-path a future
+   * settings save can forget to call, and the toggle takes effect on the next
+   * selection instead of the next reload. ⚠️ The test is `!== false`, not
+   * `=== true`: this one defaults ON, and the desktop branch of
+   * getDefaultSettings returns {} and leans on the read sites for defaults, so
+   * a device that has never opened App Settings has no stored value at all.
+   */
+  _copyStripMarginEnabled() {
+    try {
+      return this.loadAppSettingsFromStorage?.()?.copyStripMargin !== false;
+    } catch {
+      return true;
+    }
   },
 
   /**

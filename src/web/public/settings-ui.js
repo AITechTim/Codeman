@@ -446,6 +446,8 @@ Object.assign(CodemanApp.prototype, {
     // overwrites the system clipboard on a gesture the user may have meant only as
     // a way to read, so it is opt-in rather than a default anyone has to discover.
     document.getElementById('appSettingsAutoCopySelection').checked = settings.autoCopySelection === true;
+    // Default ON, so an absent key reads as enabled rather than as off.
+    document.getElementById('appSettingsCopyStripMargin').checked = settings.copyStripMargin !== false;
     document.getElementById('appSettingsTerminalFont').value = settings.terminalFontFamily || '';
     this.populateTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight'), settings.terminalFontWeight);
     this.populateTerminalFontWeight(
@@ -2137,6 +2139,7 @@ Object.assign(CodemanApp.prototype, {
       tunnelEnabled: document.getElementById('appSettingsTunnelEnabled').checked,
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
       autoCopySelection: document.getElementById('appSettingsAutoCopySelection').checked,
+      copyStripMargin: document.getElementById('appSettingsCopyStripMargin').checked,
       terminalFontFamily: document.getElementById('appSettingsTerminalFont').value.trim(),
       terminalFontWeight: this.readTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight')),
       terminalFontWeightBold: this.readTerminalFontWeight(
@@ -2363,6 +2366,10 @@ Object.assign(CodemanApp.prototype, {
       // and absent from SettingsUpdateSchema (.strict()), so sending it would
       // 400 the whole settings PUT.
       autoCopySelection: _acs,
+      // What the clipboard gets is a property of what this device is looking
+      // at, and the key is absent from SettingsUpdateSchema (.strict()), so
+      // sending it would 400 the whole settings PUT.
+      copyStripMargin: _csm,
       // Per-device by nature (the font must exist on the device) and absent
       // from SettingsUpdateSchema (.strict()) — sending it would 400 the PUT.
       terminalFontFamily: _tff,
@@ -3372,7 +3379,7 @@ Object.assign(CodemanApp.prototype, {
           'terminalFontFamily', 'terminalFontWeight', 'terminalFontWeightBold',
           'language',
           'terminalWheelLocalScrollback',
-          'autoCopySelection',
+          'autoCopySelection', 'copyStripMargin',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',

@@ -294,6 +294,23 @@ const capabilitiesSchema = z
     effort: z.boolean(),
     agentSkillInjection: z.boolean(),
     statusLineTelemetry: z.boolean(),
+    // How many columns this CLI indents its transcript body by, so a copy can take
+    // that much off the clipboard. Bounded, because it is the whole strip: a copy
+    // never removes more than this, nor more than every selected line shares.
+    //
+    // ⚠ DECLARED, not measured off the pane, and two measured attempts are why.
+    // Asking whether the pane painted spaces across the unused part of each row
+    // separates a TUI from a shell perfectly where it fires and never
+    // over-stripped, but it is a function of pane WIDTH: that padding exists
+    // only while a rendered line stops short of the CLI's own layout width, and
+    // Claude Code's prose wraps to fill it — the share of padded rows on one
+    // live transcript ran 44%, 6%, 6%, 7% and 87% at 123, 160, 198, 235 and 298
+    // columns, so the strip did nothing at any ordinary size. Taking the
+    // narrowest indent on screen instead fires everywhere and over-strips, since
+    // a file listing inside the transcript can be the narrowest thing on it.
+    // A declared width cannot do either. Absent means no strip, so a CLI whose
+    // transcript layout nobody has measured is never touched.
+    transcriptGutter: z.number().int().min(1).max(8).optional(),
     workDetect: z
       .object({
         promptGlyph: z.string().min(1).max(8),

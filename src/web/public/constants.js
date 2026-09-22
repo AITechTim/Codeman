@@ -774,6 +774,8 @@ function resolveTerminalFontWeights(settings) {
  */
 const AUTO_COPY_MAX_CHARS = 1_000_000;
 
+
+
 /**
  * What an auto-copy attempt should do at the end of a selection gesture.
  *
@@ -819,36 +821,32 @@ function decideAutoCopy({ enabled, text, lastCopied, pending } = {}) {
 // _selectTouchSelectionLine already treats those cells as padding. This is that
 // same rule for the mouse and keyboard paths, which never had it.
 //
-// ⚠ Trailing padding ONLY. A shared LEADING indent is deliberately left alone,
-// and this note is here so the idea is not re-derived: it was built, measured
-// and dropped before merge. Removing the longest leading run every selected row
-// shares looks like the mirror image of the trailing trim and is not, because
-// no native terminal does it and the transform cannot tell a TUI's margin from
-// content that is genuinely indented. Measured over 401 445 three-row windows
-// across 1 010 tracked files in this repo, it fired on 73% of them: 92% inside
-// a YAML workflow, 76% over `git log` output, 48% in a TypeScript source file.
-// No width threshold separates the two, because they are the same widths: a
-// live Claude Code pane's own margins measure 2 and 5 columns while the most
-// common non-TUI shared run is 4, sitting between them.
+// A LEADING margin is stripped too, but only the one the CLI in the pane
+// DECLARES as its transcript gutter, passed in as `options.margin`. Called with
+// no options this trims trailing padding and nothing else, which is what keeps
+// every caller that has no declared gutter on the old behaviour.
 //
-// The asymmetry that settles it is in the failure modes. A wrong trailing trim
+// ⚠ The failure modes are not symmetrical, and that asymmetry sets how much
+// evidence a leading strip has to show before it fires. A wrong trailing trim
 // costs nothing. A wrong dedent silently deletes information that was on the
 // screen, with no signal to the user and nothing in the clipboard to hint at
 // it, and it is wrong on `git log` bodies, on indented code read out of `cat`
 // (semantic in Python), on `git diff` context rows where the leading space is
 // the marker, and on stack traces.
 //
-// ⚠ It also cannot be made consistent cheaply. Whether the first row joins the
-// measurement depended on the mousedown COLUMN, which the user never sees, so
-// one block of three rows produced three different clipboard results; and the
-// flag read `getSelectionPosition().start`, which is the mousedown anchor that
-// xterm never normalises, so dragging UP through a block read it off the bottom
-// row. If it is ever revisited, the one qualification that measured clean is
-// painted trailing padding (a full-screen TUI writes real spaces across every
-// row; a shell pane leaves those cells never-written, so xterm trims them):
-// zero false positives over all 401 445 windows. It still mangles a `git log`
-// body sitting inside an agent's own gutter, which is why it was not taken now.
-function cleanCopiedSelection(text) {
+// ⚠ The declared gutter is a CEILING, not the answer. The strip is the lesser
+// of it and the run every selected line shares, so a block can only ever shift
+// as a unit: the relative structure inside a selection survives by
+// construction, and a selection reaching column 0 loses nothing at all.
+//
+// ⚠ Deriving the width from the text instead is what fails, twice over. The
+// selection's own shared indent cannot tell a margin from content, because a
+// three-row window of nested YAML shares an indent for the same reason a margin
+// does — it fired on 73% of ordinary indented text. Taking the narrowest indent
+// on the surrounding rows fails more quietly: a file listing inside the
+// transcript can be the narrowest thing on screen, which over-stripped about 1%
+// of selections across six pane widths.
+function cleanCopiedSelection(text, options) {
   if (typeof text !== 'string' || !text) return '';
   // Split on \n and leave any \r in place: xterm joins rows with \r\n on
   // Windows, and the clipboard should keep the endings xterm chose.
@@ -868,7 +866,36 @@ function cleanCopiedSelection(text) {
     while (cut > 0 && (line[cut - 1] === ' ' || line[cut - 1] === '\t')) cut--;
     return cut === end ? line : line.slice(0, cut) + line.slice(end);
   };
-  return text.split('\n').map(trimEnd).join('\n');
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) lines[i] = trimEnd(lines[i]);
+
+  const margin = Math.max(0, Math.trunc(Number(options?.margin) || 0));
+  if (!margin) return lines.join('\n');
+
+  // The first line of a selection that began mid-row carries no margin — the
+  // mousedown cut it off — so it neither votes on the shared indent nor gets
+  // stripped. This is the ONE thing the mousedown column still decides, and it
+  // decides it for that line alone. Whether the rest of the block is dedented
+  // no longer depends on where the click landed, which is what made the same
+  // three rows produce three different clipboard results before.
+  const from = options?.firstLinePartial === true ? 1 : 0;
+
+  // The pane's margin is a ceiling, not the answer. Strip the narrower of it
+  // and what every selected line shares, so the block shifts as a unit and no
+  // line can lose indentation another line keeps.
+  let shared = margin;
+  for (let i = from; i < lines.length && shared > 0; i++) {
+    const line = lines[i];
+    if (!line || line === '\r') continue; // a padding-only row, already trimmed away
+    let run = 0;
+    while (run < line.length && line[run] === ' ') run++;
+    if (run < shared) shared = run;
+  }
+  if (!shared) return lines.join('\n');
+  for (let i = from; i < lines.length; i++) {
+    if (lines[i] && lines[i] !== '\r') lines[i] = lines[i].slice(shared);
+  }
+  return lines.join('\n');
 }
 
 if (typeof window !== 'undefined') {

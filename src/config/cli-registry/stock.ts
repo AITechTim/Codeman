@@ -200,6 +200,10 @@ const CLAUDE: CliEntry = {
   },
   capabilities: {
     external: false,
+    // Claude indents its transcript body two columns and puts its own ●/✻/❯ markers
+    // in them, so a copy can drop two and paste flush. The only entry that declares
+    // this, because it is the only one whose gutter has been measured.
+    transcriptGutter: 2,
     // The historical hard-coded pair, now stated as data. `workingLine` matches both the
     // `✻ Actualizing… (39s · ↓ 2.0k tokens)` status line and the bare `esc to interrupt`
     // footer, because tmux repaints partially and only one of the two may land in a chunk.
@@ -519,6 +523,12 @@ const CODEX: CliEntry = {
     // braille spinner, and it never prints `esc to interrupt` at rest, so that phrase
     // alone separates a running turn from an idle one.
     workDetect: { promptGlyph: '›', workingLine: '[Ee]sc to interrupt' },
+    // Two columns, like claude's, measured on a live 0.154.0 answer: the `•`/`›`/`⚠`
+    // markers sit in the gutter, prose continuations sit at 2, and a nested YAML block
+    // the model wrote rendered at 2/4/6/8 for its own 0/2/4/6. Replayed at 100, 120,
+    // 160, 198, 235 and 282 columns the indents were 0, 2, 4, 6 and 8 at every one,
+    // never 1, so the width is not a function of the pane.
+    transcriptGutter: 2,
     transcript: 'codex-rollout',
     altScreen: 'strip-full',
     echo: { policy: 'predict', anchor: { kind: 'cursor' }, predictProfile: 'codex' },
