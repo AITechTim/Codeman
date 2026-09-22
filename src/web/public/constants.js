@@ -1673,6 +1673,69 @@ function sanitizeDiagEntry(msg) {
     .slice(0, DIAG_ENTRY_MAX_CHARS);
 }
 
+// ── Terminal geometry: xterm and the PTY must never disagree ───────────────
+//
+// Issue #464 ("text gets muffled"). Claude Code's TUI repaints by wrapping its
+// frame at the width the PTY reported and walking the cursor up that many
+// ROWS. So a browser terminal whose width differs from the PTY's makes every
+// repaint arithmetic wrong: a logical line occupies more physical rows than
+// Ink counted, `eraseLines(n)` clears too few of them, and the new frame paints
+// over rows that were never erased. Measured against a real xterm — a PTY
+// believing 120 columns against a 62-column terminal renders each wrapped line
+// twice, and a shorter replacement line leaves the tail of the old one behind.
+// That is exactly the doubled rows and half-overwritten prose in the report.
+//
+// The floor exists because a PTY a handful of columns wide makes any CLI wrap
+// every word; it is NOT a display preference, so the browser terminal has to
+// honour it too. Three separate call sites used to fit xterm to the RAW
+// proposal and report the CLAMPED one, which is how the two drifted apart with
+// nothing to notice: resize is write-only, so nobody could see the disagreement.
+const TERMINAL_MIN_COLS = 40;
+const TERMINAL_MIN_ROWS = 10;
+
+/**
+ * The geometry to apply AND report — there is only ever one answer to both.
+ * @param {{cols: number, rows: number}|null|undefined} proposed
+ * @returns {{cols: number, rows: number}|null}
+ */
+function clampTerminalDimensions(proposed) {
+  if (!proposed || !Number.isFinite(proposed.cols) || !Number.isFinite(proposed.rows)) return null;
+  return {
+    cols: Math.max(Math.trunc(proposed.cols), TERMINAL_MIN_COLS),
+    rows: Math.max(Math.trunc(proposed.rows), TERMINAL_MIN_ROWS),
+  };
+}
+
+/** Whether two geometries are the same screen. Either being absent is a mismatch. */
+function terminalGeometryAgrees(a, b) {
+  return !!a && !!b && a.cols === b.cols && a.rows === b.rows;
+}
+
+/**
+ * What to do when the server reports the PTY's real geometry.
+ *
+ * The server is the authority: it owns the PTY the CLI is drawing for, and it
+ * can refuse a resize outright (`Session.resize` ignores small-viewport
+ * requests while a desktop connection holds an active sizing claim) without
+ * the asking client ever being told. A terminal that keeps its own shape after
+ * such a refusal renders garbage; one that adopts the PTY's shape renders the
+ * truth, and may simply be wider than the screen can show.
+ *
+ * Correct-and-reachable beats correct-and-clipped beats garbled, so a pane
+ * wider than the viewport also earns horizontal reach — see `.pty-oversized`.
+ *
+ * @param {{cols: number, rows: number}|null} local - what xterm currently holds
+ * @param {{cols: number, rows: number}|null} pty - what the server just reported
+ * @returns {{adopt: boolean, oversized: boolean}}
+ */
+function reconcilePtyGeometry(local, pty) {
+  if (!pty || !Number.isFinite(pty.cols) || !Number.isFinite(pty.rows)) {
+    return { adopt: false, oversized: false };
+  }
+  if (terminalGeometryAgrees(local, pty)) return { adopt: false, oversized: false };
+  return { adopt: true, oversized: !!local && pty.cols > local.cols };
+}
+
 if (typeof window !== 'undefined') {
   window.CodemanHistoryFormat = { formatHistoryBytes, computeHistoryTruncationNotice, computeRewriteScrollLine };
   window.CodemanFilePaths = { absoluteFilePathPattern, previewsInFileViewer, FILE_PREVIEW_EXTENSIONS };
@@ -1690,4 +1753,11 @@ if (typeof window !== 'undefined') {
     FETCH_DEADLINE_MAX_MS,
   };
   window.CodemanDiag = { sanitizeDiagEntry, DIAG_ENTRY_MAX_CHARS };
+  window.CodemanTerminalGeometry = {
+    clampTerminalDimensions,
+    terminalGeometryAgrees,
+    reconcilePtyGeometry,
+    TERMINAL_MIN_COLS,
+    TERMINAL_MIN_ROWS,
+  };
 }

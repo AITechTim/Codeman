@@ -587,12 +587,12 @@ Object.assign(CodemanApp.prototype, {
     if (isMobileSafari) {
       // Wait for layout, then fit multiple times to ensure proper sizing
       requestAnimationFrame(() => {
-        this.fitAddon.fit();
+        this.syncTerminalGeometry();
         // Double-check after another frame
-        requestAnimationFrame(() => this.fitAddon.fit());
+        requestAnimationFrame(() => this.syncTerminalGeometry());
       });
     } else {
-      this.fitAddon.fit();
+      this.syncTerminalGeometry();
     }
     // Whenever that first fit runs — on this line, or a frame or two later on
     // the mobile-Safari branch above — it measures whatever font the browser has
@@ -999,10 +999,6 @@ Object.assign(CodemanApp.prototype, {
     this._resizeTimeout = null;
     this._lastResizeDims = null;
 
-    // Minimum terminal dimensions to prevent vertical text wrapping
-    const MIN_COLS = 40;
-    const MIN_ROWS = 10;
-
     const throttledResize = () => {
       if (this._tabRailResizeOwnsObserver) return;
       // Trailing-edge debounce: ALL resize work (fit + clear + SIGWINCH) happens
@@ -1022,10 +1018,6 @@ Object.assign(CodemanApp.prototype, {
       }
       this._resizeTimeout = setTimeout(() => {
         this._resizeTimeout = null;
-        // Fit xterm.js to final container dimensions
-        if (this.fitAddon) {
-          this.fitAddon.fit();
-        }
         // Flush any stale flicker buffer before clearing viewport
         if (this.flickerFilterBuffer) {
           if (this.flickerFilterTimeout) {
@@ -1034,24 +1026,35 @@ Object.assign(CodemanApp.prototype, {
           }
           this.flushFlickerBuffer();
         }
-        // Skip server resize while mobile keyboard is visible — sending SIGWINCH
-        // causes Ink to re-render at the new row count, garbling terminal output.
-        // Local fit() still runs so xterm knows the viewport size for scrolling.
+        // Hold the PTY's shape while the virtual keyboard is up: a SIGWINCH per
+        // step of the OS animation makes Ink re-render at a row count that is
+        // about to change again, and shifts the accessory toolbar mid-typing.
+        // KeyboardHandler's settle timer sends ONE resize once the animation
+        // stops (`_sendTerminalResize`), so the PTY is not left stale.
         const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
         // Same yield as sendResize: never resize a PTY whose session is showing
         // in its own window. Dragging the dashboard's border must not reshape it.
         const detachedElsewhere = !this.isSoloWindow && this.detachedSessions?.has(this.activeSessionId);
-        if (this.activeSessionId && !keyboardUp && !detachedElsewhere) {
-          const dims = this.fitAddon.proposeDimensions();
-          // Enforce minimum dimensions to prevent layout issues
-          const cols = dims ? Math.max(dims.cols, MIN_COLS) : MIN_COLS;
-          const rows = dims ? Math.max(dims.rows, MIN_ROWS) : MIN_ROWS;
+        // ⚠️ Whether to fit is the SAME question as whether to send (issue #464).
+        // This block used to fit unconditionally and skip only the SIGWINCH,
+        // which is the one combination that cannot be right: it moves xterm to
+        // a shape the PTY is never told about, and Claude Code computes its
+        // repaints from the shape it was told. Withhold both, or neither —
+        // a reflow nothing is rendering for buys nothing and costs correctness.
+        const dims = this.activeSessionId && !keyboardUp && !detachedElsewhere ? this.syncTerminalGeometry() : null;
+        // ⚠️ A null measurement is NOT a reason to report the floor. It used to
+        // fall back to a bare 40x10, which tells the PTY a shape nothing measured
+        // and xterm does not hold — the write-only guess this whole change exists
+        // to remove. An unmeasurable terminal has nothing to say; the next
+        // resize event says it.
+        if (dims) {
+          const { cols, rows } = dims;
           // Only send resize if dimensions actually changed
           if (!this._lastResizeDims || cols !== this._lastResizeDims.cols || rows !== this._lastResizeDims.rows) {
             // Clear viewport + scrollback ONLY when dimensions actually change.
-            // fitAddon.fit() reflows content: lines at old width may wrap to more rows,
-            // pushing overflow into scrollback. Ink's cursor-up count is based on the
-            // pre-reflow line count, so ghost renders accumulate in scrollback.
+            // syncTerminalGeometry() reflowed content: lines at old width may wrap to
+            // more rows, pushing overflow into scrollback. Ink's cursor-up count is
+            // based on the pre-reflow line count, so ghost renders accumulate there.
             // Fix: \x1b[3J (Erase Saved Lines) clears scrollback reflow debris,
             // then \x1b[H\x1b[2J clears the viewport for a clean Ink redraw.
             // IMPORTANT: Only clear when we're actually sending SIGWINCH (dims changed).
@@ -3380,11 +3383,13 @@ Object.assign(CodemanApp.prototype, {
    * is validated against xterm 6.x and CANNOT be covered by the CI gate:
    * `_renderService` is only constructed by `Terminal.open()`, which needs a
    * real DOM, and the gate runs in node. `test/xterm-private-api.test.ts` pins
-   * the dependency RANGE instead, so a major bump fails there and sends someone
-   * to re-check this by hand; `test/terminal-resilience.test.ts` covers the
-   * decision half. If the path ever goes stale the watchdog silently stops
-   * healing — that is the failure mode to watch for, and why the range guard
-   * exists at all.
+   * the RESOLVED lockfile version instead, so ANY bump fails there — not only a
+   * major — and sends someone to re-check this by hand; the declared `^6.0.0`
+   * range was the wrong assertion in both directions, since 6.4.0 could rename a
+   * private field while resolving inside it. `test/terminal-resilience.test.ts`
+   * covers the decision half. If the path ever goes stale the watchdog silently
+   * stops healing — that is the failure mode to watch for, and why the version
+   * guard exists at all.
    */
   _startRenderLivenessWatchdog() {
     this._stopRenderLivenessWatchdog();
@@ -5232,7 +5237,7 @@ Object.assign(CodemanApp.prototype, {
   setFontSize(size) {
     this.terminal.options.fontSize = size;
     document.getElementById('fontSizeDisplay').textContent = size;
-    this.fitAddon.fit();
+    this._refitAfterCellSizeChange();
     localStorage.setItem('codeman-font-size', size);
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
@@ -5261,9 +5266,9 @@ Object.assign(CodemanApp.prototype, {
     // without needing a tab switch. The fit below still runs, so the terminal
     // is never left unfitted if the wait is slow.
     this._terminalFontReady = this._awaitTerminalFont().then(() => {
-      if (this.terminal?.options?.fontFamily === resolved) this.fitAddon?.fit();
+      if (this.terminal?.options?.fontFamily === resolved) this._refitAfterCellSizeChange();
     });
-    this.fitAddon?.fit();
+    this._refitAfterCellSizeChange();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
     if (this._splitPane?.terminal) {
@@ -5306,9 +5311,9 @@ Object.assign(CodemanApp.prototype, {
     // rasterized yet. Re-arm the wait and fit again once it settles; the fit
     // below still runs, so the terminal is never left unfitted.
     this._terminalFontReady = this._awaitTerminalFont().then(() => {
-      if (this.terminal?.options?.fontWeight === fontWeight) this.fitAddon?.fit();
+      if (this.terminal?.options?.fontWeight === fontWeight) this._refitAfterCellSizeChange();
     });
-    this.fitAddon?.fit();
+    this._refitAfterCellSizeChange();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
     for (const [, entry] of this.teammateTerminals || []) {
@@ -5399,19 +5404,95 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * Get terminal dimensions with minimum enforcement.
-   * Prevents extremely narrow terminals that cause vertical text wrapping.
+   * The geometry this terminal would report right now, floors applied.
+   * Reads only — `syncTerminalGeometry()` is what makes it true of xterm.
    * @returns {{cols: number, rows: number}|null}
    */
   getTerminalDimensions() {
-    const MIN_COLS = 40;
-    const MIN_ROWS = 10;
-    const dims = this.fitAddon?.proposeDimensions();
+    // Never throws. `proposeDimensions()` reads a rendered element and throws
+    // on a terminal that has been disposed or detached mid-resize, which is an
+    // ordinary outcome on a tab switch — and this is called from the settle
+    // timer and the resize observer, where an exception takes the rest of the
+    // callback (the padding fit, the scroll restore, the SIGWINCH) with it.
+    try {
+      return window.CodemanTerminalGeometry.clampTerminalDimensions(this.fitAddon?.proposeDimensions());
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * Fit xterm to its container and return the geometry that was APPLIED.
+   *
+   * ⚠️ THE ONLY function that may change the terminal's size, and the only
+   * source of the numbers sent to the server. `fitAddon.fit()` on its own is
+   * not enough and the gap is issue #464: fit() resizes xterm to
+   * `proposeDimensions()` RAW, while every server-facing path reported those
+   * dimensions floored at 40x10. Whenever the floor bit — a phone with the
+   * keyboard up routinely proposes under ten rows — the PTY was told one shape
+   * and xterm held another, and Claude Code then computed every repaint for a
+   * screen that did not exist. See the note in constants.js for what that
+   * renders as, and why the floor is not negotiable at either end.
+   *
+   * Three call sites each used to do their own fit-then-clamp
+   * (`throttledResize`, `sendResize`, KeyboardHandler's one-shot), which is
+   * three chances to disagree; two of them also re-read `proposeDimensions()`
+   * after the fit, so a container that moved in between — `_shrinkPaddingToFit`
+   * runs exactly there — changed the answer without touching xterm.
+   *
+   * The second resize only happens when the floor actually bites, so the
+   * ordinary path still reflows once, as before.
+   *
+   * @returns {{cols: number, rows: number}|null} null when the terminal cannot be measured
+   */
+  syncTerminalGeometry() {
+    if (!this.fitAddon || !this.terminal) return null;
+    try {
+      this.fitAddon.fit();
+    } catch {
+      /* a disposed or unattached terminal cannot be fitted; fall through to the read */
+    }
+    const dims = this.getTerminalDimensions();
     if (!dims) return null;
-    return {
-      cols: Math.max(dims.cols, MIN_COLS),
-      rows: Math.max(dims.rows, MIN_ROWS),
-    };
+    return this._resizeTerminalTo(dims) ? dims : null;
+  },
+
+  /**
+   * Re-measure after something changed the CELL size, and tell the server.
+   *
+   * ⚠️ A font change is a geometry change. Bigger glyphs mean fewer columns in
+   * the same box, and the PTY is drawing for a column count nobody updated:
+   * `setFontSize`, `setFontFamily` and `setFontWeight` all refitted the terminal
+   * and sent NOTHING, so raising the font on a phone could drop the browser
+   * below the columns the CLI was still wrapping at until some unrelated resize
+   * event happened along. That is issue #464 reached through the font menu.
+   *
+   * With no session there is no PTY to tell, and a session detached into its own
+   * window is not this terminal's to resize — `sendResize` makes that call, and
+   * fits as its first synchronous step, so this never fits twice.
+   */
+  _refitAfterCellSizeChange() {
+    if (this.activeSessionId) {
+      this.sendResize(this.activeSessionId)?.catch?.(() => {});
+      return;
+    }
+    this.syncTerminalGeometry();
+  },
+
+  /**
+   * Make xterm exactly `dims`. Idempotent, and never throws at a caller — a
+   * terminal disposed mid-resize is an ordinary outcome on a tab switch.
+   * @returns {{cols: number, rows: number}|null} the applied geometry
+   */
+  _resizeTerminalTo(dims) {
+    if (!this.terminal || !dims) return null;
+    if (this.terminal.cols === dims.cols && this.terminal.rows === dims.rows) return dims;
+    try {
+      this.terminal.resize(dims.cols, dims.rows);
+      return dims;
+    } catch {
+      return null;
+    }
   },
 
   /**
@@ -5421,21 +5502,25 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Promise<boolean>} Whether dimensions changed from the last send
    */
   async sendResize(sessionId, options = {}) {
-    // Fit terminal to container before reading dimensions — ensures local
-    // terminal size matches what we report to the server PTY.
-    if (this.fitAddon) this.fitAddon.fit();
     // One PTY cannot hold two sizes. A detached session is owned by its own
     // window, and the dashboard's terminal is narrower than that window because
     // the session rail takes width the popup does not have — so both sizing it
     // makes the CLI draw frames that fit neither, which garbles the popup. The
     // dashboard yields; the solo window sizes what it alone displays.
     // (_maybeRefetchFullHistory already stands aside for the same reason.)
-    // ⚠️ AFTER the fit, never before: the local reflow keeps the dashboard's own
-    // xterm right, and only the SERVER write is the dashboard's to withhold —
-    // the mobile-keyboard guard below draws exactly this line. tab-rail-resize
-    // performs its one settle-time refit through this call and has no fallback.
+    // ⚠️ BEFORE the fit, never after. This used to fit first and withhold only
+    // the server write, on the reasoning that the local reflow keeps the
+    // dashboard's own xterm right. It does not: it leaves this xterm at a shape
+    // the PTY was never told about, which is the #464 divergence exactly — and
+    // the popup that DOES own the PTY is drawing for its own width, so the
+    // dashboard's reflow is to a size nothing is rendering for. Withholding the
+    // resize means withholding all of it. tab-rail-resize performs its one
+    // settle-time refit through this call and has no fallback, which is correct:
+    // a pane it does not own is not its to refit either.
     if (!this.isSoloWindow && this.detachedSessions?.has(sessionId)) return false;
-    const dims = this.getTerminalDimensions();
+    // Fit, floor, and apply in one step so the numbers below are the numbers
+    // xterm is actually holding.
+    const dims = this.syncTerminalGeometry();
     if (!dims) return false;
     // Did the dimensions actually change since the last resize we sent? Callers
     // use this to skip work (e.g. the post-resize TUI-redraw settle) when no
@@ -5468,12 +5553,79 @@ Object.assign(CodemanApp.prototype, {
     }
     const body = { ...dims, viewportType };
     if (options.force) body.force = true;
-    await fetch(`/api/sessions/${sessionId}/resize`, {
+    const res = await fetch(`/api/sessions/${sessionId}/resize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    // Same report the WS path gets as a {"t":"zc"} frame. An older server
+    // answers `{}`, which reconciles to a no-op rather than throwing.
+    try {
+      const applied = (await res.json())?.data ?? {};
+      this._onPtyGeometryReport(sessionId, applied.cols, applied.rows);
+    } catch {
+      /* a body that is not JSON tells us nothing about the PTY; keep our own geometry */
+    }
     return changed;
+  },
+
+  /**
+   * Adopt the geometry the server says the PTY actually has.
+   *
+   * ⚠️ The server is the authority and this client is not always obeyed.
+   * `Session.resize` declines a small-viewport request outright while a desktop
+   * connection holds an active sizing claim, and says nothing — resize was
+   * write-only until #464. A terminal that keeps its own shape after such a
+   * refusal does not render "too narrow", it renders GARBLED: Claude Code wraps
+   * its frame at the width it was told and walks the cursor up that many rows,
+   * so a mismatch makes its erase count come out short and each repaint paints
+   * over rows it never cleared. Measured against a real xterm — a PTY believing
+   * 120 columns against a 62-column terminal draws every wrapped line twice.
+   *
+   * Adopting can leave the pane wider than the viewport, and the container is
+   * `overflow: hidden`, so `.pty-oversized` grants horizontal reach for exactly
+   * as long as the mismatch lasts. Correct-and-reachable beats correct-and-
+   * clipped beats garbled; nothing here is worth trapping content behind.
+   *
+   * Self-resolving: `_startMobileResizeRetry` re-sends this device's dimensions
+   * on a timer, so the pane comes back to this screen once the desktop goes
+   * idle, and the next report clears the class and the notice with it.
+   */
+  _onPtyGeometryReport(sessionId, cols, rows) {
+    if (!this.terminal || sessionId !== this.activeSessionId) return;
+    const local = { cols: this.terminal.cols, rows: this.terminal.rows };
+    const { adopt, oversized } = window.CodemanTerminalGeometry.reconcilePtyGeometry(local, { cols, rows });
+    if (!adopt) {
+      this._setPtyOversized(false);
+      return;
+    }
+    if (!this._resizeTerminalTo({ cols, rows })) return;
+    // The numbers we would report next are now the PTY's, not the container's:
+    // without this the dedupe in throttledResize/sendResize compares against a
+    // request that was refused and suppresses the retry that recovers the pane.
+    this._lastResizeDims = { cols, rows };
+    this._setPtyOversized(oversized);
+  },
+
+  /**
+   * Let the reader reach a pane wider than their screen, and say why once.
+   *
+   * Chrome for a condition that is not happening is clutter, so both the scroll
+   * affordance and the notice exist only while the mismatch does. The notice is
+   * once per transition, not per report: reports arrive on every resize, and a
+   * toast that repeats is noise about a situation the reader can already see.
+   */
+  _setPtyOversized(oversized) {
+    const container = document.getElementById('terminalContainer');
+    if (container) container.classList.toggle('pty-oversized', !!oversized);
+    if (oversized === this._ptyOversized) return;
+    this._ptyOversized = oversized;
+    if (oversized) {
+      // 53 characters: measured at one line on a 430px phone. The longer
+      // wording wrapped to two, which is a lot of the terminal to cover for a
+      // notice about a condition that resolves itself.
+      this.showToast('Another device is setting the width — scroll sideways', 'info');
+    }
   },
 
   /**

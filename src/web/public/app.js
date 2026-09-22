@@ -73,10 +73,15 @@ const _crashDiag = {
     // the storage quota and silently kill every later breadcrumb. Flatten and
     // cap. CodemanDiag is loaded before app.js, but guard anyway — a
     // diagnostic that can throw is worse than no diagnostic.
-    const flat =
-      typeof CodemanDiag !== 'undefined' && CodemanDiag.sanitizeDiagEntry
-        ? CodemanDiag.sanitizeDiagEntry(msg)
-        : String(msg == null ? '' : msg).replace(/[\r\n\u2028\u2029]+/g, ' ').slice(0, 300);
+    // Bound to a local FIRST: `CodemanDiag?.x` still throws a ReferenceError
+    // when the identifier was never declared, and this is the one function in
+    // the app that must never throw.
+    const diag = typeof CodemanDiag !== 'undefined' ? CodemanDiag : null;
+    const flat = diag?.sanitizeDiagEntry
+      ? diag.sanitizeDiagEntry(msg)
+      : String(msg == null ? '' : msg)
+          .replace(/[\r\n\u2028\u2029]+/g, ' ')
+          .slice(0, diag?.DIAG_ENTRY_MAX_CHARS ?? 300);
     const entry = `${new Date().toISOString().slice(11,23)} ${flat}`;
     this._entries.push(entry);
     if (this._entries.length > this._maxEntries) this._entries.shift();
@@ -2451,8 +2456,14 @@ class CodemanApp {
       // placeholder beats a messy screen dump there.
       const sessionMode = this.sessions.get(this.activeSessionId)?.mode || 'claude';
       if (!lastResponse && (sessionMode === 'claude' || sessionMode === 'shell')) {
-        const termRes = await fetch(`/api/sessions/${this.activeSessionId}/terminal`);
-        const termData = (await termRes.json())?.data ?? {};
+        // The no-param form is capped only by `terminalBufferMaxBytes` (32MB by
+        // default), so it is the largest body the frontend asks for anywhere —
+        // it gets the full-history budget, not the tail one.
+        const termCapture = await this._fetchTerminalCapture(
+          `/api/sessions/${this.activeSessionId}/terminal`,
+          { full: true }
+        );
+        const termData = termCapture.json?.data ?? {};
         if (termData.terminalBuffer) {
           lastResponse = this._cleanTerminalBuffer(termData.terminalBuffer);
         }
@@ -2711,6 +2722,13 @@ class CodemanApp {
         // terminal sat at the bottom of a just-rewritten buffer, so the next
         // flush would scroll back down and undo the restore above.
         this._syncStickyScrollBaseline();
+        // ⚠️ HERE, not in the `finally`. The marker means "this session lost
+        // output", and only a repaint that actually happened settles it. Clearing
+        // on every exit meant a reconcile that threw — or hit the new fetch
+        // deadline, which is the flaky-link case the marker exists for — dropped
+        // the gap silently, and nothing ever retried it. Left set, the next
+        // ws.onopen has another go.
+        this._markTerminalBufferReconciled(sessionId);
         // Re-position local echo overlay at new prompt location
         this._localEchoOverlay?.rerender();
         // Resize PTY to match actual browser dimensions (critical for OpenCode
@@ -2723,11 +2741,6 @@ class CodemanApp {
       console.error('needsRefresh reload failed:', err);
     } finally {
       if (this._terminalRefreshOwner === refreshOwner) this._terminalRefreshOwner = null;
-      // Any completed reload for this session IS the reconcile, whoever asked
-      // for it — handleInit's SSE-reconnect branch and selectSession both land
-      // here or do the same work. Leaving the marker set would make the next
-      // ws.onopen replay the whole buffer a second time.
-      this._markTerminalBufferReconciled(sessionId);
     }
   }
 
@@ -2752,7 +2765,10 @@ class CodemanApp {
 
       // Fetch buffer, clear terminal, write buffer, resize (no Ctrl+L needed)
       try {
-        const capture = await this._fetchTerminalCapture(`/api/sessions/${data.id}/terminal`);
+        // No-param capture: `terminalBufferMaxBytes` (32MB) is its only ceiling,
+        // so it needs the full-history budget. Defaulting to the tail budget
+        // gave the largest payload the smallest deadline.
+        const capture = await this._fetchTerminalCapture(`/api/sessions/${data.id}/terminal`, { full: true });
         const headersReceivedAt = capture.headersAt;
         const termData = capture.json?.data ?? {};
 
@@ -3087,7 +3103,11 @@ class CodemanApp {
         // Only after an unintentional close — a first connect has no gap, and
         // refetching there would duplicate the buffer selectSession just wrote.
         if (this._wsOutputGapSession === sessionId) {
-          this._wsOutputGapSession = null;
+          // NOT cleared here. `_onSessionNeedsRefresh` clears it once it has
+          // actually repainted; a reconcile that fails or is skipped (a buffer
+          // load already in flight, a tab switch) leaves the marker set so the
+          // next open retries. Re-entry is safe: `_terminalRefreshOwner` makes
+          // a second reconcile for the same session a no-op.
           _crashDiag.log(`WS REOPEN: reconciling output gap for ${sessionId}`);
           // Fire-and-forget: this is recovery, and a failure here must not stop
           // the socket coming up. _onSessionNeedsRefresh already guards against
@@ -3116,6 +3136,10 @@ class CodemanApp {
           // Input ACK — the server applied (or deduped) this seq; drop it from
           // the durable queue so it can never be re-delivered/lost.
           this._onWsInputAck(msg.seq, msg);
+        } else if (msg.t === 'zc') {
+          // Resize confirm — the geometry the PTY actually holds, which is not
+          // always the one this client asked for (issue #464).
+          this._onPtyGeometryReport(sessionId, msg.c, msg.r);
         }
       } catch {
         // Ignore malformed messages
@@ -6482,11 +6506,14 @@ class CodemanApp {
     // For that just-created-session case we flush (not discard) queued SSE events.
     let bufferWasEmpty = false;
     let cacheResetAndParseMs = 0;
+    // Hoisted out of the try: the catch needs to know whether the pane was
+    // blanked before the fetch, because only then is there nothing on screen.
+    let clearedBeforeFresh = false;
     try {
       // Fit terminal to container BEFORE writing any buffer data.
       // If the browser was resized while viewing another session, the terminal
       // canvas may be at stale dimensions — content would render at wrong width.
-      if (this.fitAddon) this.fitAddon.fit();
+      this.syncTerminalGeometry();
 
       // Also push the new dimensions to the PTY. Without this, codex/codeman
       // sees the size that was set the last time the throttled resize handler
@@ -6563,7 +6590,8 @@ class CodemanApp {
       // blank and rewrites with fresh data. Skip the cache and write the fresh
       // buffer once for a single clean transition.
       const cachedBuffer = this.terminalBufferCache.get(sessionId);
-      let clearedBeforeFresh = false;
+      // `clearedBeforeFresh` is declared above the try, because the catch reads
+      // it — re-declaring it here would shadow that and silently break it.
       if (cachedBuffer && !sessionIsBusy && !restoredSnapshot && session?.mode !== 'shell') {
         _crashDiag.log(`CACHE_WRITE: ${(cachedBuffer.length/1024).toFixed(0)}KB`);
         this._setTerminalLoadState(sessionId, selectGen, 'replaying');
@@ -6612,12 +6640,26 @@ class CodemanApp {
       const useFullHistory = session?.mode !== 'shell' && !this._fullHistoryLoaded.has(sessionId);
       if (useFullHistory) this._fullHistoryLoaded.add(sessionId);
       const fetchStartedAt = performance.now();
-      const capture = await this._fetchTerminalCapture(
-        useFullHistory
-          ? `/api/sessions/${sessionId}/terminal?full=1`
-          : `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`,
-        { full: useFullHistory }
-      );
+      const tailUrl = `/api/sessions/${sessionId}/terminal?tail=${TERMINAL_TAIL_SIZE}`;
+      let capture;
+      try {
+        capture = await this._fetchTerminalCapture(
+          useFullHistory ? `/api/sessions/${sessionId}/terminal?full=1` : tailUrl,
+          { full: useFullHistory }
+        );
+      } catch (err) {
+        // The deadline made a slow link reachable for the first time, and the
+        // pane was already blanked above — so an abort here used to leave a
+        // black rectangle, discard the queued live output, and never reach
+        // `_connectWs`. Degrade to the bounded tail instead: less history, but
+        // a working tab. Only for the full-history pull; the tail has nothing
+        // smaller to fall back to, and a second failure is the honest floor.
+        if (err?.name !== 'AbortError' || !useFullHistory) throw err;
+        _crashDiag.log('FULL CAPTURE ABORTED → tail');
+        // It never loaded, so the next select must be allowed to try again.
+        this._fullHistoryLoaded.delete(sessionId);
+        capture = await this._fetchTerminalCapture(tailUrl);
+      }
       const headersReceivedAt = capture.headersAt;
       if (this._isStaleSelect(selectGen)) {
         this._clearTerminalLoadState(sessionId, selectGen);
@@ -6819,17 +6861,28 @@ class CodemanApp {
       // and, because it goes through `forceReload`, a dropped and reopened
       // WebSocket plus a deleted xterm snapshot.
       //
-      // That equality is the signature of a CLAMP rather than a race.
-      // `getTerminalDimensions()` floors at 40x10 while `fitAddon.fit()` does
-      // not, so a terminal narrower than 40 columns or shorter than 10 rows
-      // reports a pane permanently bigger than itself, and every select would
-      // retry without ever converging. A race never produces this equality: its
-      // whole premise is that the pane was still at the size we asked it to
-      // leave. The other non-converging case, `Session.resize` declining a
-      // small viewport while a desktop claim is live, does not produce it
-      // either — that pane sits at the DESKTOP's size — so it still costs the
-      // one capped attempt, and stopping it needs the pane-ownership policy
-      // this does not touch.
+      // A race never produces this equality: its whole premise is that the pane
+      // was still at the size we asked it to leave. So the equality means the
+      // pane already IS what we asked for and a retry would capture the same
+      // frame twice.
+      //
+      // ⚠️ This used to also be the signature of a CLAMP, and that is now fixed
+      // at the source rather than worked around here (issue #464).
+      // `getTerminalDimensions()` floors at 40x10 while `fitAddon.fit()` did
+      // not, so a terminal under 40 columns or 10 rows reported a pane
+      // permanently bigger than itself and every select retried without ever
+      // converging. `syncTerminalGeometry()` now applies that floor to xterm as
+      // well, so the browser terminal IS the size it reports and the clamp can
+      // no longer manufacture a mismatch — which also means the repair below is
+      // reached only by cases it can actually repair.
+      //
+      // The other non-converging case, `Session.resize` declining a small
+      // viewport while a desktop claim is live, does not produce this equality
+      // either — that pane sits at the DESKTOP's size. It no longer needs
+      // repairing from here: the server reports the geometry the PTY actually
+      // holds ({"t":"zc"} / the resize response) and `_onPtyGeometryReport`
+      // adopts it, so the terminal matches the pane that is being drawn instead
+      // of replaying against one that never existed.
       const captureMatchesRequestedSize =
         !!dimsAfterLoad && data.captureCols === dimsAfterLoad.cols && data.captureRows === dimsAfterLoad.rows;
 
@@ -6996,8 +7049,29 @@ class CodemanApp {
     } catch (err) {
       if (this._isLoadingBuffer) this._finishBufferLoad(bufferLoadOwner);
       this._restoringFlushedState = false;
-      this._setTerminalLoadState(sessionId, selectGen, 'failed');
       console.error('Failed to load session terminal:', err);
+      if (this._isStaleSelect(selectGen)) {
+        this._clearTerminalLoadState(sessionId, selectGen);
+        return;
+      }
+      // The history did not load. That is not a reason to leave the tab dead:
+      // ⚠️ the socket is what carries LIVE output, and it is opened at the end
+      // of the happy path, so bailing here left the session mute until the user
+      // switched away and back.
+      this._connectWs(sessionId);
+      // Only when the pane was blanked for a replay that never came. A pane
+      // still holding its previous content is stale, not empty, and stacking a
+      // notice on top of readable output is worse than the staleness.
+      if (clearedBeforeFresh && this.terminal) {
+        this.terminal.write(
+          '\r\n\x1b[2m  Could not load this session\u2019s history. Live output continues below.\x1b[0m\r\n'
+        );
+      }
+      // ⚠️ CLEAR, not 'failed'. `_setTerminalLoadState` only marks the TAB, and
+      // nothing ever cleared it on this path — so the tab kept its spinner and
+      // `aria-busy="true"` forever, telling every reader and every screen reader
+      // that a load was still running when it had already given up.
+      this._clearTerminalLoadState(sessionId, selectGen);
     }
   }
 

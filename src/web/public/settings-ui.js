@@ -3097,7 +3097,7 @@ Object.assign(CodemanApp.prototype, {
     const changed = orientationChanged || previousDetail !== detail || previousSort !== sort;
     if (orientationChanged) {
       this.updateTabOverflowMode?.();
-      if (!settleRailWidth) this.fitAddon?.fit();
+      if (!settleRailWidth) this.syncTerminalGeometry?.();
     }
     // applyTabWrapSettings() is the ONE owner of tabs-show-folder and is
     // rail-aware, so it has to run AFTER the two attributes above — the

@@ -3780,6 +3780,22 @@ export class Session extends EventEmitter {
   private _ptyRows = 40;
 
   /**
+   * The geometry the CLI is actually drawing for.
+   *
+   * Exposed because `resize()` can decline a request outright (arbitration
+   * below) and the asking client has no other way to find out: a browser
+   * terminal that keeps a shape the PTY refused renders garbled output rather
+   * than wrong-sized output, because Claude Code's repaints are computed from
+   * the width it was told (issue #464). Both transports report these back.
+   */
+  get ptyCols(): number {
+    return this._ptyCols;
+  }
+  get ptyRows(): number {
+    return this._ptyRows;
+  }
+
+  /**
    * Live WebSocket connections that have announced a desktop viewport for this
    * session. While at least one is registered, small-viewport (mobile/tablet)
    * resizes are ignored so a phone glancing at the session can't reflow the
@@ -3864,6 +3880,10 @@ export class Session extends EventEmitter {
     }
     if (isSmallViewport && this._desktopSizeClaims.size > 0) {
       if (Date.now() - this._lastDesktopActivityAt < Session.DESKTOP_CLAIM_IDLE_MS) {
+        // Declined. The caller is told nothing here on purpose — the decision
+        // belongs to the session, not the socket — but the caller MUST report
+        // `ptyCols`/`ptyRows` back afterwards so the asking client can adopt
+        // the shape it did not get. Both transports do; see issue #464.
         return;
       }
       this._mobileSizeOverride = true;

@@ -227,6 +227,50 @@ describe('terminal capture deadline covers the response body', () => {
     expect(body).toContain('return { json, headers: res.headers, headersAt };');
   });
 
+  // Nothing in the gate pinned the invariant this PR exists to establish, which
+  // is the same drift it is fixing: a clear()+reset() pair reads as obviously
+  // equivalent to the queued RIS and is exactly what someone tidies back in.
+  it('_resetTerminalForReplay is a queued write and nothing else', () => {
+    const app = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    const start = app.indexOf('_resetTerminalForReplay() {');
+    expect(start, 'helper not found — renamed?').toBeGreaterThan(-1);
+    const body = app.slice(start, app.indexOf('\n  }', start));
+    // RIS, queued through write() so it lands after any bytes already parsing.
+    expect(body).toContain("this.terminal.write('\\x1bc')");
+    expect(
+      body,
+      'reset()/clear() are SYNCHRONOUS and skip the write queue, so bytes queued ' +
+        'before them are parsed after and fuse into the snapshot written next'
+    ).not.toMatch(/\.(reset|clear)\(\)/);
+  });
+
+  it('every replay path clears through that helper, never by hand', () => {
+    const app = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+    // The three paths that blank the terminal before rewriting it from a capture.
+    for (const site of ['_onSessionNeedsRefresh(event = {}) {', 'async _onSessionClearTerminal(data) {']) {
+      const start = app.indexOf(site);
+      expect(start, `${site} not found — renamed?`).toBeGreaterThan(-1);
+      const body = app.slice(start, start + 4000);
+      expect(body, `${site} must clear via _resetTerminalForReplay`).toContain('this._resetTerminalForReplay()');
+      expect(body, `${site} hand-rolled a clear again`).not.toContain('this.terminal.clear()');
+    }
+    // And the PAIR appears nowhere in the frontend. A lone `clear()` before
+    // `showWelcome()` is fine — nothing is written after it, so there is nothing
+    // for stray bytes to fuse into. `clear()` immediately followed by `reset()`
+    // is the signature of someone blanking the terminal to rewrite it, which is
+    // precisely the case that has to be queued instead.
+    const pair = /\.clear\(\);\s*\n\s*this\.terminal\.reset\(\)/;
+    for (const rel of [
+      'src/web/public/app.js',
+      'src/web/public/panels-ui.js',
+      'src/web/public/terminal-ui.js',
+      'src/web/public/session-ui.js',
+    ]) {
+      const src = readFileSync(resolve(import.meta.dirname, '..', rel), 'utf8');
+      expect(src, `${rel} blanks the terminal with clear()+reset() — use _resetTerminalForReplay()`).not.toMatch(pair);
+    }
+  });
+
   it('returns the parsed envelope and headers on a healthy response', async () => {
     const { url, close } = await serve((res) => {
       res.writeHead(200, { 'Content-Type': 'application/json', 'server-timing': 'db;dur=12' });

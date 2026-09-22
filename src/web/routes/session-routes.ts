@@ -2115,7 +2115,12 @@ export function registerSessionRoutes(
     const session = findSessionOrFail(ctx, id, req);
 
     session.resize(cols, rows, { viewportType, force });
-    return {};
+    // Answer with the geometry the PTY ACTUALLY holds, which is not always the
+    // one asked for: `Session.resize` declines small-viewport requests while a
+    // desktop connection holds an active sizing claim. A browser terminal left
+    // at a shape the PTY refused renders garbled output, not merely wrong-sized
+    // output, so the client adopts these (issue #464).
+    return { cols: session.ptyCols, rows: session.ptyRows };
   });
 
   // ========== Get Last Response (from transcript JSONL) ==========
