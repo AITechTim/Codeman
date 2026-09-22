@@ -98,19 +98,21 @@ export function isPaneQuiet(lastActivityAt: number, now: number, silenceMs: numb
  * How many rows at the foot of a pane capture may hold the background-work row, for a
  * CLI that declares no number of its own (`capabilities.workDetect.watchingLines`).
  *
- * Claude Code draws its chip on the LAST row of the screen. The row above it is the
- * status line, which a user's own `statusLine` command writes, and two rows is what
- * covers the chip wherever a trailing blank or a one-line notice pushes it up by one.
- * Codex pins its row above the composer instead and declares four.
+ * One, because the tightest window is the right default and Claude Code needs no more:
+ * it draws its chip on the LAST row of the screen. Blank rows are dropped before the
+ * window is taken, so a trailing blank costs nothing, and a CLI that ever prints a row
+ * BELOW its chip loses the badge rather than gaining a hole.
  *
- * ⚠️ The ceiling is the security boundary, not a tidiness measure. The label is
- * PANE-DERIVED, and everything on that screen above the CLI's own chrome is text the
- * agent wrote itself, so an agent that printed `· 1 monitor ·` into its output would
- * silence its own idle alert. Keep each CLI's window as small as its layout allows,
- * keep its pattern anchored on chrome only that CLI can draw, and never widen either to
- * a whole-pane search.
+ * ⚠️ The size of this window is a trust boundary, not a tidiness measure, and the row
+ * it excludes first is the one that taught us so: Claude's status line sits directly
+ * above the footer, its content comes from a `statusLine` command, and a session running
+ * with permissions bypassed can write that command into `.claude/settings.json` in its
+ * own workspace. A window of two therefore let an agent print `· 1 monitor ·` onto a row
+ * of its own and silence its own idle alert. Every row added here is another row
+ * somebody may be able to write, so widen this only for a CLI whose layout forces it,
+ * and never to a whole-pane search.
  */
-export const WATCHING_TAIL_LINES = 2;
+export const WATCHING_TAIL_LINES = 1;
 
 /** Longest label a badge will carry. A footer chip is a handful of words. */
 export const MAX_WATCHING_LABEL_CHARS = 40;

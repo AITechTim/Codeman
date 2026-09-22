@@ -58,23 +58,33 @@ so a pane waiting for its own background work never raises an alert a human cann
 Group 1 is the label, and a CLI that declares no pattern reports no background work.
 
 Two CLIs declare such a row today, and they put it in different places. Claude writes its
-chip on the last row of the screen, so it keeps the default window of `WATCHING_TAIL_LINES`
-rows and anchors on the `·` its footer joins items with. Codex pins
+chip on the last row of the screen, so it keeps the default one-row window and anchors on
+the `·` its footer joins items with. Codex pins
 `1 background terminal running · /ps to view · /stop to close` ABOVE its composer, which
 puts the row third from the bottom once the status line and the composer are counted, so its
-entry declares `watchingLines: 4` and anchors on the ` · /ps to view` tail. Both were
-measured against live panes rather than read out of a binary, which is the standard for
-adding a third.
+entry declares `watchingLines: 3` and matches that row end to end. Both were measured
+against live panes rather than read out of a binary, which is the standard for adding a
+third.
 
 That label is the one value in the registry that an AGENT can influence, because it comes off
 the agent's own screen. Two things keep it honest, and both belong to whoever adds a pattern
 for a new CLI. `watchingLabel()` in `session-activity.ts` searches only the last few
-non-blank rows, which is the part of the screen the CLI draws rather than the agent, and the
-pattern anchors on chrome only that CLI can produce. Without both, an agent could silence its
-own idle alert by printing the words into its output. Keep the window as small as the layout
-allows, since every row it adds is another row the agent may be able to write. The label is
-also ANSI-stripped and length-capped at the source, since it ends up on a badge and in an
-approval card.
+non-blank rows, which should be the part of the screen the CLI draws rather than the agent,
+and the pattern should anchor on chrome only that CLI can produce. Keep the window as small
+as the layout allows, since every row it adds is another row the agent may be able to write.
+The label is also ANSI-stripped and length-capped at the source, and every interpolation of
+it into markup goes through `escapeHtml()`, since it ends up on a badge and in an approval
+card.
+
+The two shipped entries do not sit equally well behind that rule, and the difference decides
+what a pattern is allowed to do. Claude's chip is the last row, so its one-row window holds
+nothing the agent can write — not even the status line above it, whose command a session
+running with permissions bypassed can write into its own `.claude/settings.json`. Codex's row
+shares its slot with the last row of the transcript whenever no terminal is running, so a
+message ending in that exact line is matched. What keeps that harmless is `hooks: 'none'`: no
+hook event from a codex session reaches the approvals inbox, so a forged label costs a wrong
+badge and cannot silence an alert. Before giving a CLI both hook signals and a pattern, make
+sure its row is one the agent cannot write.
 
 ### Three capabilities that must stay independent
 

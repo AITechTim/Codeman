@@ -773,7 +773,12 @@ Object.assign(CodemanApp.prototype, {
     badge.className = base + ' ' + base + '--watching';
     badge.setAttribute('data-i18n-skip', '');
     badge.textContent = WATCHING_BADGE_TEXT;
+    // The label rides in BOTH, because a tooltip is desktop-only: a phone has no hover
+    // target, and a screen reader gets the one word either way. This is the surface the
+    // badge was built for first, so "watching" with no way to learn what would be the
+    // wrong place to save a line.
     badge.title = watchingBadgeTitle(label);
+    badge.setAttribute('aria-label', watchingBadgeTitle(label));
     return badge;
   },
 

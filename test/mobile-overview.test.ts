@@ -19,8 +19,11 @@ function fakeElement(): any {
     type: '',
     dataset: {},
     style: {},
+    attrs: {} as Record<string, string>,
     children: [] as any[],
-    setAttribute() {},
+    setAttribute(name: string, value: string) {
+      el.attrs[name] = value;
+    },
     appendChild(child: any) {
       el.children.push(child);
       return child;
@@ -514,13 +517,16 @@ describe('mobile overview watching badge', () => {
     expect(model.needsYou[0].watching).toBe('2 shells');
   });
 
-  it('says one word and puts the detail in the tooltip', () => {
+  it('says one word and puts the detail where every surface can reach it', () => {
     const app = loadOverviewApp();
     const badge = app._buildWatchingBadge('1 monitor', 'mobile-overview-pill');
 
     expect(badge.className).toBe('mobile-overview-pill mobile-overview-pill--watching');
     expect(badge.textContent).toBe('watching');
     expect(badge.title).toBe('Still running in the background: 1 monitor');
+    // A phone has no hover target and a screen reader reads neither the class nor the
+    // tooltip, so the label has to be here too or this surface says only "watching".
+    expect(badge.attrs['aria-label']).toBe('Still running in the background: 1 monitor');
   });
 
   it('takes the pill class of whichever surface asks for it', () => {

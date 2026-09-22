@@ -97,6 +97,24 @@ describe('watching badge on a rich session row', () => {
     );
   });
 
+  it('escapes the label everywhere it reaches markup', () => {
+    // `watching` is pane-derived and a config-supplied pattern decides what its capture
+    // group holds, so every interpolation of it into HTML has to go through escapeHtml().
+    // The row is installed with innerHTML, which makes an unescaped quote in that
+    // attribute an injection rather than a cosmetic bug.
+    expect(app).toContain('${richRow.createdAt}:${escapeHtml(richRow.watching)}"');
+    expect(app).not.toContain('${richRow.createdAt}:${richRow.watching}"');
+  });
+
+  it('words the tooltip exactly as the phone overview does', () => {
+    // Both files build this sentence themselves, deliberately, so that a stale cached
+    // module still renders a complete row. Substring-matching the prefix would let the
+    // two drift; the whole sentence is what has to agree.
+    const overview = readFileSync(resolve(publicDir, 'mobile-overview.js'), 'utf8');
+    expect(overview).toContain("'Still running in the background: ' + label");
+    expect(app).toContain('`Still running in the background: ${row.watching}`');
+  });
+
   it('colours it with the accent, never with the two colours that mean a human is needed', () => {
     const rule = styles.slice(styles.indexOf('.tab-pill--watching'));
     const block = rule.slice(0, rule.indexOf('}'));

@@ -82,6 +82,7 @@ import {
   isSustainedActivity,
   isPaneQuiet,
   watchingLabel,
+  WATCHING_TAIL_LINES,
   IDLE_RECHECK_MS,
   PANE_PROBE_MIN_INTERVAL_MS,
   PANE_PROBE_RECHECK_MS,
@@ -517,6 +518,8 @@ export class Session extends EventEmitter {
   private _workingLineRe: RegExp | undefined = undefined;
   /** Lazily compiled `capabilities.workDetect.watchingLine`. See _watchingLinePattern(). */
   private _watchingLineRe: RegExp | null | undefined = undefined;
+  /** Resolved with the pattern above: how many rows at the foot of the screen to search. */
+  private _watchingWindow = WATCHING_TAIL_LINES;
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
@@ -2760,9 +2763,7 @@ export class Session extends EventEmitter {
     // Called only from the probe, and only with what a capture returned: `null` is
     // "the screen could not be read", which is not evidence that nothing is running.
     if (!pattern || paneText === null) return;
-    // How far up the screen this CLI's row can sit is its own business: Claude writes on
-    // the last row, Codex pins one above its composer. Both stay at the foot.
-    this._watching = watchingLabel(paneText, pattern, getCli(this.mode)?.capabilities.workDetect?.watchingLines);
+    this._watching = watchingLabel(paneText, pattern, this._watchingWindow);
   }
 
   /**
@@ -2773,8 +2774,13 @@ export class Session extends EventEmitter {
    */
   private _watchingLinePattern(): RegExp | null {
     if (this._watchingLineRe === undefined) {
-      const src = getCli(this.mode)?.capabilities.workDetect?.watchingLine;
-      this._watchingLineRe = src ? compileVersionRegex(src) : null;
+      // The pattern and the window it runs over are one decision, so they are resolved
+      // together: how far up the screen a CLI's row can sit is as much a property of its
+      // layout as the row itself. Claude writes on the last row and keeps the default,
+      // Codex pins one above its composer and declares more.
+      const detect = getCli(this.mode)?.capabilities.workDetect;
+      this._watchingLineRe = detect?.watchingLine ? compileVersionRegex(detect.watchingLine) : null;
+      this._watchingWindow = detect?.watchingLines ?? WATCHING_TAIL_LINES;
     }
     return this._watchingLineRe;
   }

@@ -211,12 +211,15 @@ const CLAUDE: CliEntry = {
       // the CLI's own words for each kind of background task, and group 1 is the one
       // Codeman badges the session with. Verified against a live 2.1.278 pane on
       // 2026-09-21.
-      // ⚠️ The leading `·` is an anchor, not decoration. This pattern runs over the foot
-      // of the screen, which is the one part of it the AGENT does not write, and the
-      // separator is what keeps it on the footer's own item list. An agent that could get
-      // a bare `1 monitor` matched would silence its own idle alert by printing it. A
-      // footer that ever carries the chip as its only item therefore reports no watching
-      // rather than opening that door. See `watchingLabel()` in `session-activity.ts`.
+      // ⚠️ Two things keep an agent from writing its own label here, and both matter.
+      // The footer is the LAST row, so the default one-row window (`WATCHING_TAIL_LINES`)
+      // holds nothing but Ink's own chrome — in particular it leaves out the status line
+      // directly above, whose content comes from a `statusLine` command a bypassed
+      // session can write into its own `.claude/settings.json`. And the leading `·` keeps
+      // the match on the footer's own item list rather than on any text that happens to
+      // carry a count. A footer that ever drew the chip as its only item would report no
+      // watching rather than open that door. See `watchingLabel()` in
+      // `session-activity.ts`.
       watchingLine: String.raw`·\s*(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?|Artifact comment monitors?))`,
     },
     requiresMux: false,
@@ -534,16 +537,24 @@ const CODEX: CliEntry = {
     // running: `  1 background terminal running · /ps to view · /stop to close`. Unlike
     // Claude's footer chip that row sits ABOVE the composer, which puts it third from the
     // bottom once the status line and the composer are counted, hence `watchingLines`.
-    // The ` · /ps to view` tail is the anchor: it is CLI chrome, it names a slash command
-    // that only the CLI can offer, and without it a bare count in the transcript would do.
     // Measured against a live codex-cli 0.154.0 pane on 2026-09-22: the row appears when
     // the terminal starts, follows the composer down as the conversation grows, and is
     // gone after `/stop`.
+    // ⚠️ This entry CANNOT promise what Claude's does, and the difference is Codex's
+    // layout rather than its pattern. The third row from the bottom is the chip only
+    // while a terminal runs; with none running it is the last row of the transcript,
+    // which the agent writes. Matching the complete row raises the bar — an assistant
+    // message has to end with this exact line, to the character — but nothing here makes
+    // forging it impossible, so do not read the Claude comment above as applying here.
+    // What contains it is that codex declares `hooks: 'none'`: no hook event from a codex
+    // session ever reaches `notePrompt()`, so there is no idle item to pre-acknowledge
+    // and a forged label costs a wrong badge and nothing else. A CLI that gains hook
+    // signals must not keep a pattern this soft.
     workDetect: {
       promptGlyph: '›',
       workingLine: '[Ee]sc to interrupt',
-      watchingLine: String.raw`(\d+ background terminals?) running · /ps to view`,
-      watchingLines: 4,
+      watchingLine: String.raw`^\s{0,4}(\d+ background terminals?) running · /ps to view · /stop to close$`,
+      watchingLines: 3,
     },
     transcript: 'codex-rollout',
     altScreen: 'strip-full',

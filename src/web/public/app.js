@@ -4662,6 +4662,10 @@ class CodemanApp {
     const prev = tab.dataset.tabState;
     // The since ANCHOR moves without the state changing (each new turn re-stamps
     // lastSubmitAt), so key the compare on both.
+    // Unescaped on purpose, and it still matches the attribute the initial render wrote:
+    // that one goes through escapeHtml() because it is interpolated into markup, and the
+    // browser hands the decoded string back through `dataset`. `watching` is the only
+    // pane-derived value in this signature, which is why it is the only one escaped there.
     const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`;
     if (tab.dataset.tabMetaSig === sig) return;
     tab.dataset.tabMetaSig = sig;
@@ -5281,7 +5285,7 @@ class CodemanApp {
       const richMeta = this._sidebarRichMetaHTML(richRow);
       const richClass = richRow ? ` tab-state-${richRow.state}` : '';
       const richData = richRow
-        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}:${richRow.watching}"`
+        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}:${escapeHtml(richRow.watching)}"`
         : '';
 
       const inlineSessionActions = this.shouldInlineSessionActions();

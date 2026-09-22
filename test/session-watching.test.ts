@@ -167,6 +167,26 @@ describe('watchingLabel', () => {
     expect(watchingLabel(`${chip}\n${below}\n`, CLAUDE_WATCHING)).toBeNull();
   });
 
+  it('refuses a chip on the row above the footer, which the agent can write', () => {
+    // The status line is one row up, its text comes from a `statusLine` command, and a
+    // session running with permissions bypassed can write that command into
+    // `.claude/settings.json` in its own workspace. The window is what keeps that row
+    // out, so this is the test that would fail if somebody widened it.
+    const forged = pane('⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents').replace(
+      '  ~/innovi/gtd-board [main] Opus 5 ctx: 11%',
+      '  ~/innovi/gtd-board [main] Opus 5 ctx: 11% · 1 monitor'
+    );
+    expect(watchingLabel(forged, CLAUDE_WATCHING)).toBeNull();
+    // And with the window widened by one, the same screen does match — which is the
+    // whole reason the default is one row.
+    expect(watchingLabel(forged, CLAUDE_WATCHING, 2)).toBe('1 monitor');
+  });
+
+  it('keeps Claude on the default window, because its chip is the last row', () => {
+    expect(getCli('claude')?.capabilities.workDetect?.watchingLines).toBeUndefined();
+    expect(WATCHING_TAIL_LINES).toBe(1);
+  });
+
   it('refuses a label the footer did not separate, which is the injection guard', () => {
     // The pattern anchors on the `·` the footer joins its items with. Without that
     // anchor an agent could silence its own idle alert by printing the words, since the
@@ -296,14 +316,34 @@ describe('the row Codex draws', () => {
     expect(CODEX_TAIL).toBeGreaterThanOrEqual(3);
   });
 
-  it('refuses the same words in the transcript, which is the injection guard', () => {
-    // ` · /ps to view` is chrome: only the CLI offers that slash command. Without the
-    // anchor an agent could print the sentence and silence itself.
-    const claim = CODEX_STOPPED.replace(
+  it('refuses a mention that is not the whole row', () => {
+    // The pattern matches Codex's row end to end, so prose about background terminals —
+    // including prose quoting part of the row — is not enough.
+    for (const line of [
+      '• I left 1 background terminal running for you.',
+      '  1 background terminal running · /ps to view',
+      '  see: 1 background terminal running · /ps to view · /stop to close',
+    ]) {
+      const claim = CODEX_STOPPED.replace('• Stopping all background terminals.', line);
+      expect(watchingLabel(claim, CODEX_WATCHING, CODEX_TAIL)).toBeNull();
+    }
+  });
+
+  it('CAN be forged by Codex own output, and is contained by Codex having no hooks', () => {
+    // Codex's row is third from the bottom only while a terminal runs; with none running
+    // that slot is the last row of the transcript, which the agent writes. Matching the
+    // complete row raises the bar but closes nothing, so this test states the limitation
+    // rather than a protection the code does not have.
+    const forged = CODEX_STOPPED.replace(
       '• Stopping all background terminals.',
-      '• I left 1 background terminal running for you.'
+      '  1 background terminal running · /ps to view · /stop to close'
     );
-    expect(watchingLabel(claim, CODEX_WATCHING, CODEX_TAIL)).toBeNull();
+    expect(watchingLabel(forged, CODEX_WATCHING, CODEX_TAIL)).toBe('1 background terminal');
+
+    // What makes that cost a wrong badge and nothing more: no hook event from a codex
+    // session reaches the approvals inbox, so there is no idle item to pre-acknowledge
+    // and no alert to silence. A CLI that gains hook signals needs a harder anchor first.
+    expect(getCli('codex')?.capabilities.hooks).toBe('none');
   });
 });
 

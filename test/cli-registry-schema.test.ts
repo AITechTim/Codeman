@@ -148,6 +148,16 @@ describe('workDetect.workingLine is guarded like every other config regex', () =
     }
   });
 
+  it('refuses a window with no pattern to bound', () => {
+    expectRejected((e) => {
+      (e.capabilities as Record<string, unknown>).workDetect = {
+        promptGlyph: '>',
+        workingLine: 'working',
+        watchingLines: 3,
+      };
+    }, 'a window with nothing to search is a typo whose failure is otherwise silent');
+  });
+
   it('accepts every shipped watchingLine', () => {
     for (const entry of STOCK_CLIS) {
       const src = entry.capabilities.workDetect?.watchingLine;
