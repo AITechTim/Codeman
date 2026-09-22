@@ -16,6 +16,7 @@ import {
   formatPaneSnapshot,
   parsePaneRows,
   derivePaneExits,
+  hasObservablePaneSession,
   resolveActivePaneTarget,
 } from '../src/tmux-manager.js';
 import { execSync, exec } from 'node:child_process';
@@ -1119,4 +1120,58 @@ describe('TmuxManager pane-exit bookkeeping', () => {
     manager.clearPaneExit('codeman-aaaa');
     expect(manager.getPaneExit('codeman-aaaa')).toBeUndefined();
   });
+});
+
+describe('hasObservablePaneSession', () => {
+  // The pane-exit watcher is always-on, so a tick with nothing to observe is
+  // the normal case on an instance running only remote or Docker work. This
+  // predicate is what keeps that tick from exec'ing tmux to find out.
+  const base = {
+    sessionId: 's1',
+    muxName: 'codeman-aaaa',
+    pid: 100,
+    createdAt: 0,
+    workingDir: '/tmp',
+    mode: 'claude' as const,
+    attached: true,
+  };
+
+  it('says no for an empty manager', () => {
+    expect(hasObservablePaneSession([])).toBe(false);
+  });
+
+  it('says yes for a local session, which is the whole reason the watcher runs', () => {
+    expect(hasObservablePaneSession([base])).toBe(true);
+  });
+
+  it('says no for a remote session, whose local pane holds the ssh client', () => {
+    expect(hasObservablePaneSession([{ ...base, remote: { host: 'box', user: 'me' } }])).toBe(false);
+  });
+
+  it('says no for a Docker case, whose local pane holds a `docker exec`', () => {
+    expect(hasObservablePaneSession([{ ...base, docker: { containerName: 'c1' } }])).toBe(false);
+  });
+
+  it('says no for a record rebuilt from the socket, which carries no provenance', () => {
+    // `reconcileSessions()` gives it a synthetic id that matches no state.json
+    // entry, so a remote session rediscovered that way looks local. Session
+    // forces UNKNOWN for it, so reading tmux for it buys nothing.
+    expect(hasObservablePaneSession([{ ...base, discovered: true }])).toBe(false);
+  });
+
+  it('says yes when one local session sits among sessions that cannot answer', () => {
+    // The read is one batched call for the whole socket, so a single local
+    // session is enough to make the tick worth paying for.
+    expect(
+      hasObservablePaneSession([
+        { ...base, sessionId: 's1', remote: { host: 'box', user: 'me' } },
+        { ...base, sessionId: 's2', discovered: true },
+        { ...base, sessionId: 's3' },
+      ])
+    ).toBe(true);
+  });
+
+  // The predicate has to agree with `Session.paneExitApplies`, which is where
+  // the rule is enforced; that pairing is pinned in session-pane-exit.test.ts,
+  // where a real Session can answer for itself.
 });

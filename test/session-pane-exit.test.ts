@@ -35,6 +35,7 @@ import { WebServer } from '../src/web/server.js';
 import { StateStore } from '../src/state-store.js';
 import type { PaneExit, SessionRemote, SessionDocker, SessionState } from '../src/types.js';
 import type { MuxSession, TerminalMultiplexer } from '../src/mux-interface.js';
+import { hasObservablePaneSession } from '../src/tmux-manager.js';
 
 const PORT = 3187;
 
@@ -116,6 +117,43 @@ describe('Session.setPaneExit scoping', () => {
     expect(session.setPaneExit({ status: 137, at: EXIT.at })).toBe(true);
     expect(session.paneExit).toEqual({ status: 137, at: EXIT.at });
   });
+});
+
+describe("the watcher's read gate agrees with the session's scoping", () => {
+  // `hasObservablePaneSession()` decides whether a watcher tick execs tmux at
+  // all, and `Session.paneExitApplies` decides whether the answer is kept. They
+  // are two copies of one rule, and drift between them is silent: too narrow
+  // and a session that could report an exit never gets read, too wide and every
+  // tick pays for an answer the session throws away.
+  const muxSession = (extra: Partial<MuxSession> = {}): MuxSession =>
+    ({
+      sessionId: 'aaaa',
+      muxName: 'codeman-aaaa',
+      pid: 100,
+      createdAt: 0,
+      workingDir: '/tmp',
+      mode: 'claude',
+      attached: true,
+      ...extra,
+    }) as MuxSession;
+
+  const cases: { shape: string; mux: MuxSession; session: () => Session }[] = [
+    { shape: 'local', mux: muxSession(), session: () => localMuxSession() },
+    { shape: 'remote SSH', mux: muxSession({ remote }), session: () => localMuxSession({ remote }) },
+    { shape: 'docker', mux: muxSession({ docker }), session: () => localMuxSession({ docker }) },
+    {
+      shape: 'rebuilt from the socket',
+      mux: muxSession({ discovered: true }),
+      session: () => localMuxSession({ discoveredMuxSession: true }),
+    },
+  ];
+
+  for (const { shape, mux, session } of cases) {
+    it(`agrees for a ${shape} session`, () => {
+      const sessionKeepsIt = session().setPaneExit(EXIT);
+      expect(hasObservablePaneSession([mux])).toBe(sessionKeepsIt);
+    });
+  }
 });
 
 describe('Session.toState with an exited agent', () => {

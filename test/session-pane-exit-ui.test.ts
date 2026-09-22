@@ -2,9 +2,10 @@
  * @fileoverview The exited-agent badge on a session tab (Ark0N/Codeman#446).
  *
  * The server publishes `session.paneExit` when the agent inside a local tmux
- * pane has exited while `remain-on-exit` kept the pane. These cover the two
- * halves the browser owns: turning that field into a label, and getting the
- * label onto and off a tab.
+ * pane has exited while `remain-on-exit` kept the pane. These cover the three
+ * things the browser owns: turning that field into a label, getting the label
+ * onto and off a tab, and what colour the tab's status dot ends up once the
+ * exit, the alert rules and the rich rail's own rules have all had a say.
  *
  * The incremental render path is the only one a live session ever reaches.
  * Going from live to exited adds and removes no tab, so the full rebuild never
@@ -16,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
+import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
 
 describe('the exited-agent tab label', () => {
@@ -120,19 +122,6 @@ describe('the exited-agent badge in a tab', () => {
     expect(tab.classList.contains('tab-agent-exited')).toBe(false);
   });
 
-  it('never quiets a dot that an alert has claimed', () => {
-    // A dot turning red or yellow because a session is blocked on a human
-    // outranks "the agent exited", so the CSS excludes both alert classes by
-    // hand rather than relying on the cascade.
-    const css = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
-    const rules = css.match(/\.session-tab\.tab-agent-exited[^{]*\{/g) ?? [];
-    expect(rules.length).toBeGreaterThan(0);
-    for (const rule of rules) {
-      expect(rule).toContain(':not(.tab-alert-action)');
-      expect(rule).toContain(':not(.tab-alert-idle)');
-    }
-  });
-
   it('removes the badge when the pane comes back', () => {
     // The retraction half: a respawned pane must not keep reading "exited".
     const tab = makeTab();
@@ -143,5 +132,117 @@ describe('the exited-agent badge in a tab', () => {
 
   it('is what the incremental render path calls', () => {
     expect(appJs).toContain('applyPaneExitBadge(tab, session.paneExit)');
+  });
+});
+
+describe('what colour the status dot ends up', () => {
+  /*
+   * The dot renders from `status`, which stays `idle` or `busy` for an exited
+   * pane, so the mute is a CSS rule keyed on the `tab-agent-exited` class. It
+   * competes with two other families of rule over the same dot, and this tree
+   * has lost that competition before: the alert rules and the rich-rail state
+   * rules already exclude each other by hand rather than by cascade.
+   *
+   * So the cascade is resolved rather than asserted from selector text. Every
+   * rule in styles.css that paints `.tab-status` goes into a real document and
+   * a real engine answers, which is what makes a rule moved up the file or a
+   * selector given one more class fail here.
+   *
+   * ⚠ Rules inside an at-rule are skipped, so this describes a desktop-width
+   * tab strip with motion allowed. jsdom reports a custom property unresolved,
+   * so the expected values are the `var(--x)` tokens the stylesheet writes.
+   */
+  const css = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
+
+  const dotRules: string[] = [];
+  postcss.parse(css).walkRules((rule) => {
+    if (!rule.selector.includes('.tab-status')) return;
+    const parents: string[] = [];
+    let insideAtRule = false;
+    for (let p = rule.parent; p && p.type !== 'root'; p = p.parent) {
+      if (p.type === 'rule') parents.unshift(p.selector);
+      else insideAtRule = true;
+    }
+    if (insideAtRule) return;
+    const decls: string[] = [];
+    rule.each((node) => {
+      if (node.type === 'decl') decls.push(`${node.prop}: ${node.value}${node.important ? ' !important' : ''};`);
+    });
+    if (decls.length === 0) return;
+    const selectors = rule.selectors.map((sel) => (parents.length ? `${parents.join(' ')} ${sel}` : sel));
+    dotRules.push(`${selectors.join(',')} { ${decls.join(' ')} }`);
+  });
+
+  /** Paint the dot of one tab and read back what the cascade decided. */
+  const dot = (opts: { tab: string; dotState?: string; rail?: boolean }) => {
+    const railAttrs = opts.rail ? ` data-tab-orientation="vertical" data-tab-rail-detail="rich"` : '';
+    const container = opts.rail ? 'tab-rail' : 'session-tabs';
+    const dom = new JSDOM(
+      `<!DOCTYPE html><html${railAttrs}><head><style>${dotRules.join('\n')}</style></head><body>` +
+        `<div class="${container}"><div class="session-tab ${opts.tab}">` +
+        `<span id="dot" class="tab-status ${opts.dotState ?? 'idle'}"></span></div></div></body></html>`
+    );
+    const style = dom.window.getComputedStyle(dom.window.document.getElementById('dot')!);
+    return {
+      background: style.background,
+      opacity: style.opacity,
+      boxShadow: style.boxShadow,
+      animation: style.animation,
+    };
+  };
+
+  it('finds the rules it is meant to be resolving', () => {
+    // A selector rename that emptied this list would make every case below pass
+    // against a stylesheet with no rules in it.
+    expect(dotRules.some((rule) => rule.includes('tab-agent-exited'))).toBe(true);
+    expect(dotRules.some((rule) => rule.includes('tab-alert-action'))).toBe(true);
+  });
+
+  it('mutes the dot of an exited session', () => {
+    expect(dot({ tab: 'tab-agent-exited' })).toMatchObject({ background: 'var(--text-muted)', opacity: '0.5' });
+  });
+
+  it('leaves a live session green', () => {
+    expect(dot({ tab: '' }).background).toBe('var(--green)');
+  });
+
+  it('keeps a pending permission dialog RED on an exited session', () => {
+    // The one the maintainer asked for: the exit must not quiet an alert. A
+    // board that says two things at once is a board people stop trusting, and
+    // between "the agent is gone" and "this session is blocked on you", the
+    // one that needs a human wins.
+    expect(dot({ tab: 'tab-agent-exited tab-alert-action' }).background).toBe('var(--red)');
+  });
+
+  it('keeps a pending idle alert YELLOW on an exited session', () => {
+    expect(dot({ tab: 'tab-agent-exited tab-alert-idle' }).background).toBe('var(--yellow)');
+  });
+
+  it('mutes a dot the exit caught mid-turn, and stops it pulsing', () => {
+    // `.tab-status.busy` animates `pulse`, so muting the colour alone would
+    // leave a grey dot breathing as if the agent were still working.
+    expect(dot({ tab: 'tab-agent-exited', dotState: 'busy' })).toMatchObject({
+      background: 'var(--text-muted)',
+      opacity: '0.5',
+      animation: 'none',
+    });
+  });
+
+  it('mutes the dot on a rich tab rail too, halo included', () => {
+    // The rail's own state rules are far more specific than the strip's mute
+    // (measured: an exited session kept a full green dot AND the working halo),
+    // so the mute carries a rail twin that must stay below them in source order.
+    expect(dot({ tab: 'tab-agent-exited tab-state-working', dotState: 'busy', rail: true })).toMatchObject({
+      background: 'var(--text-muted)',
+      opacity: '0.5',
+      boxShadow: 'none',
+    });
+    expect(dot({ tab: 'tab-agent-exited tab-state-idle', rail: true }).background).toBe('var(--text-muted)');
+  });
+
+  it('still keeps an alert red on the rich tab rail', () => {
+    expect(
+      dot({ tab: 'tab-agent-exited tab-alert-action tab-state-working', dotState: 'busy', rail: true }).background
+    ).toBe('var(--red)');
   });
 });

@@ -18497,6 +18497,26 @@ html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail
   border-width: 2px;
 }
 
+/* The exited-agent mute, again, for the rich rail (Ark0N/Codeman#446).
+   The strip's rule is (0,5,0) and the three state rules above are (0,9,1), so
+   on this rail an exited session kept a full green dot and the working halo
+   beside a badge reading "exited" — measured, the contradiction the mute
+   exists to remove. This twin matches their (0,9,1) exactly and therefore MUST
+   stay below them in source order; moving it above silently restores the green
+   dot. It also clears the halo, which is a box-shadow the strip's rule never
+   had to think about.
+   ⚠ The alert exclusions are repeated by hand for the same reason they are on
+   the rules above: a dot turning red or yellow because a session is blocked on
+   a human outranks "the agent exited". */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
+  .tab-rail
+  .session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle)
+  .tab-status {
+  background: var(--text-muted);
+  opacity: 0.5;
+  box-shadow: none;
+}
+
 /* Card accents: the same three colours as every other session surface, and the
    same two blinks the home rail runs. `tab-alert-*` draws its own ::before ring
    on top of this for the sessions that are genuinely blocked on a human; these

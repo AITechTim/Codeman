@@ -153,7 +153,13 @@ const GRACEFUL_SHUTDOWN_WAIT_MS = 100;
 /** Default stats collection interval (2 seconds) */
 const DEFAULT_STATS_INTERVAL_MS = 2000;
 
-/** How often the pane-exit watcher re-reads every pane on the socket. */
+/**
+ * How often the pane-exit watcher re-reads every pane on the socket. The
+ * watcher owns this cadence: it does NOT ride `startStatsCollection()`, whose
+ * lifetime a browser panel controls (see {@link TmuxManager.startPaneExitWatcher}).
+ * Matched to the stats cadence above because both cost one batched tmux read,
+ * and kept well under EXEC_TIMEOUT_MS so a normal read finishes inside a tick.
+ */
 const DEFAULT_PANE_EXIT_INTERVAL_MS = 2000;
 
 /** Default remote-reconnect watcher poll interval (5 seconds) — COD-108 */
@@ -357,6 +363,33 @@ export function derivePaneExits(rows: PaneRow[], now: number): Map<string, PaneE
     });
   }
   return exits;
+}
+
+/**
+ * Could any of these tmux sessions ever produce a pane-exit answer? Exported
+ * for unit testing.
+ *
+ * Mirrors `Session.paneExitApplies`, which is where the rule is enforced. A
+ * remote session's local pane holds the ssh client, a docker case's holds a
+ * `docker exec` into the container's own tmux, and a record rebuilt from the
+ * socket carries no provenance at all, so the session end forces all three to
+ * UNKNOWN whatever tmux reports. A tick that sees only those has nothing to
+ * learn, and `refreshPaneExits()` skips its tmux read rather than paying for
+ * the answer.
+ *
+ * ⚠ This gates the READ, never the watcher. The watcher is always-on by
+ * design (see {@link TmuxManager.startPaneExitWatcher}), so it keeps ticking
+ * with nothing to observe and picks the read straight back up as soon as one
+ * local session exists.
+ */
+export function hasObservablePaneSession(sessions: Iterable<MuxSession>): boolean {
+  for (const session of sessions) {
+    if (session.remote) continue;
+    if (session.docker) continue;
+    if (session.discovered === true) continue;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -3055,9 +3088,18 @@ export class TmuxManager extends EventEmitter implements TerminalMultiplexer {
    * Two guards keep a slow read from undoing a fast one. A read already in
    * flight suppresses the next poll, and a read that started before a
    * {@link clearPaneExit} is discarded when it lands.
+   *
+   * A third guard skips the read entirely while no session on this manager
+   * could produce an answer ({@link hasObservablePaneSession}). Skipping
+   * retracts nothing, for the same reason a failed read does not: the map
+   * still holds what the last real read saw, and every path that puts a new
+   * command in a pane calls {@link clearPaneExit} itself.
    */
   async refreshPaneExits(now: number = Date.now()): Promise<void> {
     if (IS_TEST_MODE) return;
+    // Nothing on this socket could answer, so do not exec tmux to find that
+    // out. See `hasObservablePaneSession`: the watcher above still ticks.
+    if (!hasObservablePaneSession(this.sessions.values())) return;
     if (this.paneExitReadInFlight) return;
 
     const generation = this.paneExitGeneration;
