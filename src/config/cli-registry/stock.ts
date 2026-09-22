@@ -550,6 +550,14 @@ const CODEX: CliEntry = {
     // session ever reaches `notePrompt()`, so there is no idle item to pre-acknowledge
     // and a forged label costs a wrong badge and nothing else. A CLI that gains hook
     // signals must not keep a pattern this soft.
+    // ⚠️ Background TERMINALS are the only background work codex advertises on screen.
+    // A sub-agent started without waiting outlives the turn just as a terminal does —
+    // measured 2026-09-22, the sandboxed process was still running — and the pane shows
+    // nothing at all for it: the last rows are the composer and the status line, and
+    // `Sub-agents running` lives in the on-demand `/subagents` panel, not above the
+    // composer. So a codex session waiting on a sub-agent reads as plainly idle here.
+    // Nothing is misfiled by that (codex raises no idle prompts), and there is no row to
+    // match until codex pins one.
     workDetect: {
       promptGlyph: '›',
       workingLine: '[Ee]sc to interrupt',
