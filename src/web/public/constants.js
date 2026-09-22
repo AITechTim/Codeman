@@ -774,8 +774,6 @@ function resolveTerminalFontWeights(settings) {
  */
 const AUTO_COPY_MAX_CHARS = 1_000_000;
 
-
-
 /**
  * What an auto-copy attempt should do at the end of a selection gesture.
  *

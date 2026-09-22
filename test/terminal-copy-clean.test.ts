@@ -407,7 +407,7 @@ describe('copyStripMargin — the per-device toggle', () => {
     // toggle is checked first. There is no buffer to read: the width is declared.
     const h = loadHarness({ copyStripMargin: false });
     select(h);
-    expect(h.app._activeCliGutterColumns()).toBe(0);
+    expect(h.app._cliGutterColumns()).toBe(0);
     expect(h.app.cleanedTerminalSelection()).toBe(body);
   });
 
@@ -455,7 +455,7 @@ describe('the gutter is DECLARED by the CLI, never measured off the pane', () =>
   it('takes the declared width off a mode that declares one', () => {
     const { app, setSelection } = loadHarness();
     setSelection(body, { mode: 'claude', from: 1, to: 2 });
-    expect(app._activeCliGutterColumns()).toBe(2);
+    expect(app._cliGutterColumns()).toBe(2);
     expect(app.cleanedTerminalSelection()).toBe(flush);
   });
 
@@ -466,14 +466,14 @@ describe('the gutter is DECLARED by the CLI, never measured off the pane', () =>
     // indents were 0, 2, 4, 6 and 8 at every one, never 1.
     const { app, setSelection } = loadHarness();
     setSelection('  terminal:\n    pane:\n      gutter:\n        width: 1', { mode: 'codex', from: 1, to: 4 });
-    expect(app._activeCliGutterColumns()).toBe(2);
+    expect(app._cliGutterColumns()).toBe(2);
     expect(app.cleanedTerminalSelection()).toBe('terminal:\n  pane:\n    gutter:\n      width: 1');
   });
 
   it('leaves a mode nobody has measured alone, because it declares none', () => {
     const { app, setSelection } = loadHarness();
     setSelection('    build:\n      steps:', { mode: 'opencode', from: 1, to: 2 });
-    expect(app._activeCliGutterColumns()).toBe(0);
+    expect(app._cliGutterColumns()).toBe(0);
     expect(app.cleanedTerminalSelection()).toBe('    build:\n      steps:');
   });
 
@@ -488,7 +488,7 @@ describe('the gutter is DECLARED by the CLI, never measured off the pane', () =>
     // the injection: no session gets a strip rather than every session guessing.
     const { app, setSelection } = loadHarness(undefined, null);
     setSelection(body, { mode: 'claude', from: 1, to: 2 });
-    expect(app._activeCliGutterColumns()).toBe(0);
+    expect(app._cliGutterColumns()).toBe(0);
     expect(app.cleanedTerminalSelection()).toBe(body);
   });
 
@@ -496,7 +496,7 @@ describe('the gutter is DECLARED by the CLI, never measured off the pane', () =>
     for (const bad of [0, -2, 2.5, '2', null] as unknown[]) {
       const { app, setSelection } = loadHarness(undefined, { claude: bad } as Record<string, number>);
       setSelection(body, { mode: 'claude', from: 1, to: 2 });
-      expect(app._activeCliGutterColumns()).toBe(0);
+      expect(app._cliGutterColumns()).toBe(0);
     }
   });
 
@@ -534,7 +534,7 @@ describe('the transcriptGutter capability, as the registry and server carry it',
     // The frontend looks the mode up in that map; the helper holds no id itself.
     const terminalUi = read('terminal-ui.js');
     const helper = terminalUi.slice(
-      terminalUi.indexOf('_activeCliGutterColumns() {'),
+      terminalUi.indexOf('_cliGutterColumns(sessionId) {'),
       terminalUi.indexOf('async copyTerminalSelection')
     );
     expect(helper).toContain('window.__codemanTranscriptGutter');
@@ -605,6 +605,56 @@ describe('copyTerminalSelection — what reaches the clipboard', () => {
       expect(app._copyText).not.toHaveBeenCalled();
       expect(terminal.clearSelection).toHaveBeenCalledTimes(1);
     });
+  });
+
+  // Every case above runs on the harness default mode, which declares no gutter,
+  // so none of them can see a margin stripped twice. These two run on a mode that
+  // declares one.
+  it('takes the declared width off a claude pane exactly once', () => {
+    const { app, setSelection } = loadHarness();
+    setSelection('      fix(terminal): trim it', { mode: 'claude', from: 1, to: 2 });
+    return app.copyTerminalSelection().then(() => {
+      // 2 gutter columns off a body that carries 4 of its own.
+      expect(app._copyText).toHaveBeenCalledWith('    fix(terminal): trim it');
+    });
+  });
+
+  it("keeps a nested block's own indentation on a claude pane", () => {
+    const { app, setSelection } = loadHarness();
+    setSelection('    build:\n      steps:\n        - run: npm ci', { mode: 'claude', from: 1, to: 4 });
+    return app.copyTerminalSelection().then(() => {
+      expect(app._copyText).toHaveBeenCalledWith('  build:\n    steps:\n      - run: npm ci');
+    });
+  });
+});
+
+describe('the margin strip is not idempotent, so no caller may clean twice', () => {
+  // The trailing trim is a fixed point, and copyTerminalSelection leaned on that
+  // by re-cleaning whatever it was handed. The margin strip broke it: it takes
+  // the narrower of the declared width and the run every line shares, so a
+  // second pass takes up to `margin` columns more. Ctrl+C cleaned to decide
+  // whether to copy and then passed the CLEANED string on, which dedented every
+  // claude and codex copy twice on the most-used copy path of the four.
+  it('takes more off a block that has already been stripped', () => {
+    const h = loadHarness();
+    const clean = h.windowRef.CodemanCopySelection.clean;
+    const once = clean('      fix(terminal): trim it', { margin: 2 });
+    expect(once).toBe('    fix(terminal): trim it');
+    expect(clean(once, { margin: 2 })).toBe('  fix(terminal): trim it');
+  });
+
+  it('is pinned in the Ctrl+C branch, which gates on the clean and copies the raw', () => {
+    // The branch lives inside initTerminal's attachCustomKeyEventHandler closure,
+    // over a real xterm this harness cannot build, so the rule is pinned at the
+    // source rather than driven by a keystroke.
+    const terminalUi = read('terminal-ui.js');
+    const branch = terminalUi.slice(
+      terminalUi.indexOf('if (this.shouldCopyTerminalSelectionFromShortcut?.(ev)) {'),
+      terminalUi.indexOf('// Session-sidebar toggle chord')
+    );
+    expect(branch).toContain('const selection = this.cleanedTerminalSelection(raw);');
+    expect(branch).toContain('void this.copyTerminalSelection(raw);');
+    expect(branch).not.toContain('this.copyTerminalSelection(selection)');
   });
 });
 

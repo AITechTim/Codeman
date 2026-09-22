@@ -368,10 +368,18 @@ Object.assign(CodemanApp.prototype, {
         // part of a row selects real padding spaces, which are truthy, so testing
         // the raw text would spend this press on a copy of nothing and make the
         // user press again to interrupt.
-        const selection = this.cleanedTerminalSelection();
+        //
+        // ⚠️ The gate cleans, and the copy is handed the RAW selection, because
+        // copyTerminalSelection cleans again on its own. The margin strip is not
+        // idempotent: a second pass takes up to `margin` more columns off what
+        // the first pass left, so passing the cleaned string through dedented a
+        // Claude or Codex copy twice. Every other copy path already hands over
+        // the raw selection or reads it live.
+        const raw = this.terminal?.hasSelection?.() ? this.terminal.getSelection() : '';
+        const selection = this.cleanedTerminalSelection(raw);
         if (selection.trim()) {
           ev.preventDefault();
-          void this.copyTerminalSelection(selection);
+          void this.copyTerminalSelection(raw);
           return false;
         }
         // Nothing worth copying. The clear is for feedback, not for the
@@ -4170,11 +4178,16 @@ Object.assign(CodemanApp.prototype, {
    *
    * `text` is for the callers that already read the selection to decide whether
    * to copy at all (the Ctrl+C gate and the right-click handler), so the read is
-   * not repeated. The transform is idempotent on xterm output, so an
-   * already-cleaned string is an acceptable argument: a CR is consumed by the
-   * parser as a cursor move and never stored in a cell, so the only \r the
-   * selection can carry is the Windows line join, and that is what makes the
-   * trailing scan a fixed point. Fuzzed over 300 000 realistic selections.
+   * not repeated.
+   *
+   * ⚠️ **Pass the RAW selection, never an already-cleaned one.** The trailing
+   * trim alone is a fixed point, because a CR is consumed by the parser as a
+   * cursor move and never stored in a cell, so the only \r the selection can
+   * carry is the Windows line join. The MARGIN strip is not: it takes the
+   * narrower of the declared width and the run every line shares, so a second
+   * pass over an already-stripped block takes up to `margin` columns more. A
+   * caller that cleans to decide whether to copy must still hand the raw text
+   * to copyTerminalSelection, which cleans once on its own.
    *
    * A COLUMN selection comes back untouched. Alt+drag makes one (xterm's
    * shouldColumnSelect keys on altKey alone, and Codeman sets neither of the
@@ -4193,7 +4206,7 @@ Object.assign(CodemanApp.prototype, {
     if (!clean) return raw;
     const range = this._normalisedSelectionRange();
     return clean(raw, {
-      margin: this._activeCliGutterColumns(),
+      margin: this._cliGutterColumns(),
       firstLinePartial: !!range && range.start.x > 0,
     });
   },
@@ -4210,9 +4223,13 @@ Object.assign(CodemanApp.prototype, {
    * UNNORMALISED fields under the same two names, and a reversed pair would
    * make the row window below run backwards and collapse, which would report
    * no margin at all for every upward drag in a deep buffer.
+   *
+   * `terminal` names which xterm to read, defaulting to the primary pane's.
+   * Pane B of a split owns a second terminal and passes it, because this file's
+   * `this` is always the primary pane.
    */
-  _normalisedSelectionRange() {
-    const range = this.terminal?.getSelectionPosition?.();
+  _normalisedSelectionRange(terminal) {
+    const range = (terminal ?? this.terminal)?.getSelectionPosition?.();
     if (!range?.start || !range?.end) return null;
     const { start, end } = range;
     const reversed = end.y < start.y || (end.y === start.y && end.x < start.x);
@@ -4220,8 +4237,10 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * How many columns to take off a copy from the active session's pane: the
-   * transcript gutter its CLI declares, or 0 when it declares none.
+   * How many columns to take off a copy from one session's pane: the transcript
+   * gutter its CLI declares, or 0 when it declares none. `sessionId` defaults to
+   * the active session, and Pane B of a split passes its own, so both panes of a
+   * split strip the width their own CLI declares rather than Pane A's.
    *
    * ⚠️ Read from `window.__codemanTranscriptGutter`, the map the server derives
    * from the `transcriptGutter` CAPABILITY at render time — never an id literal
@@ -4245,11 +4264,11 @@ Object.assign(CodemanApp.prototype, {
    * A missing map means no session gets a strip, the same direction an
    * unmeasured CLI takes by declaring nothing.
    */
-  _activeCliGutterColumns() {
+  _cliGutterColumns(sessionId) {
     if (!this._copyStripMarginEnabled()) return 0;
     const byMode = window.__codemanTranscriptGutter;
     if (!byMode || typeof byMode !== 'object') return 0;
-    const mode = this.sessions?.get(this.activeSessionId)?.mode;
+    const mode = this.sessions?.get(sessionId ?? this.activeSessionId)?.mode;
     const columns = mode ? byMode[mode] : 0;
     return Number.isInteger(columns) && columns > 0 ? columns : 0;
   },
