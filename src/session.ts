@@ -2763,7 +2763,17 @@ export class Session extends EventEmitter {
     // Called only from the probe, and only with what a capture returned: `null` is
     // "the screen could not be read", which is not evidence that nothing is running.
     if (!pattern || paneText === null) return;
-    this._watching = watchingLabel(paneText, pattern, this._watchingWindow);
+    const label = watchingLabel(paneText, pattern, this._watchingWindow);
+    if (label === this._watching) return;
+    this._watching = label;
+    // ⚠️ This CHANGES while the session's status does not, so it needs an event of its
+    // own. The label is usually set on the idle transition, which broadcasts anyway, but
+    // it CLEARS when the work ends — and for a CLI whose background work ends without
+    // taking a turn (measured on codex: a background terminal finishing repaints the row
+    // away and nothing else happens) the session is idle before and after. Without this,
+    // the server knew the badge was gone and every open page went on drawing it until
+    // some unrelated event arrived.
+    this.emit('watchingChanged');
   }
 
   /**

@@ -245,6 +245,40 @@ describe('Session.watching', () => {
     expect(session.watching).toBeNull();
   });
 
+  it('announces the change, because the session status does not move with it', () => {
+    // Measured on codex: a background terminal finishing repaints the row away and the
+    // session is idle before and after, so no other event fires. Without this one the
+    // server drops the label and every open page goes on drawing the badge.
+    vi.useFakeTimers();
+    const screen = { text: WITH_MONITOR };
+    const session = withFakePane(() => screen.text);
+    const changes: (string | null)[] = [];
+    session.on('watchingChanged', () => changes.push(session.watching));
+
+    runAndSettle(session);
+    expect(changes).toEqual(['1 monitor']);
+
+    // A repaint that carries the composer glyph but no chip: the pane went quiet again
+    // without a turn, which is exactly the case the event exists for.
+    screen.text = NOTHING_RUNNING;
+    feed(session, COMPOSER_REPAINT);
+    vi.advanceTimersByTime(IDLE_SILENCE_MS + 2000);
+    expect(changes).toEqual(['1 monitor', null]);
+    expect(session.status).toBe('idle');
+  });
+
+  it('says nothing while the answer stays the same', () => {
+    vi.useFakeTimers();
+    const session = withFakePane(WITH_MONITOR);
+    const changes: (string | null)[] = [];
+    session.on('watchingChanged', () => changes.push(session.watching));
+
+    runAndSettle(session);
+    runAndSettle(session);
+    runAndSettle(session);
+    expect(changes).toEqual(['1 monitor']);
+  });
+
   it('keeps its last answer when the screen cannot be read', () => {
     vi.useFakeTimers();
     const screen: { text: string | null } = { text: WITH_MONITOR };
