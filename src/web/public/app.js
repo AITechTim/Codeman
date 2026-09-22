@@ -4617,6 +4617,10 @@ class CodemanApp {
     // The word is duplicated from mobile-overview.js for the same reason the pill labels
     // above are: it is one word, and this file must render a complete row even when a
     // stale cached mobile-overview.js has arrived without it.
+    // The visible text is that constant. The pane-derived label appears only in the
+    // tooltip, where escapeHtml() (which escapes both quote characters) is what this file
+    // already relies on for every untrusted string it puts in an attribute, and where the
+    // source caps it at MAX_WATCHING_LABEL_CHARS before it ever gets here.
     if (row.watching) {
       const title = escapeHtml(`Still running in the background: ${row.watching}`);
       parts.push(`<span class="tab-pill tab-pill--watching" title="${title}">watching</span>`);
@@ -5277,7 +5281,7 @@ class CodemanApp {
       const richMeta = this._sidebarRichMetaHTML(richRow);
       const richClass = richRow ? ` tab-state-${richRow.state}` : '';
       const richData = richRow
-        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}"`
+        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}:${richRow.watching}"`
         : '';
 
       const inlineSessionActions = this.shouldInlineSessionActions();

@@ -12382,6 +12382,17 @@ kbd {
   color: var(--text-dim);
   font-size: 0.68rem;
 }
+/* Why this card is not blinking at anyone: the session is watching work it
+   started itself. Accent, like the watching badge on a session row, and never
+   the red or yellow that mean a human is needed. */
+.approval-quiet {
+  margin-bottom: 6px;
+  color: var(--accent);
+  font-size: 0.68rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .approval-summary {
   color: var(--text);
   font-size: 0.76rem;

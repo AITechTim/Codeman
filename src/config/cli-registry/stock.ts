@@ -207,10 +207,17 @@ const CLAUDE: CliEntry = {
       promptGlyph: '❯',
       workingLine: String.raw`…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b|esc to interrupt`,
       // Claude prints what it started in the background on the footer row beneath its
-      // composer, as `⏵⏵ bypass permissions on · 1 monitor · ← for agents`. The labels are the
-      // CLI's own words for each kind of background task, and group 1 is the one Codeman
-      // badges the session with. Verified against a live 2.1.278 pane on 2026-09-21.
-      watchingLine: String.raw`(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?|Artifact comment monitors?))`,
+      // composer, as `⏵⏵ bypass permissions on · 1 monitor · ← for agents`. The labels are
+      // the CLI's own words for each kind of background task, and group 1 is the one
+      // Codeman badges the session with. Verified against a live 2.1.278 pane on
+      // 2026-09-21.
+      // ⚠️ The leading `·` is an anchor, not decoration. This pattern runs over the foot
+      // of the screen, which is the one part of it the AGENT does not write, and the
+      // separator is what keeps it on the footer's own item list. An agent that could get
+      // a bare `1 monitor` matched would silence its own idle alert by printing it. A
+      // footer that ever carries the chip as its only item therefore reports no watching
+      // rather than opening that door. See `watchingLabel()` in `session-activity.ts`.
+      watchingLine: String.raw`·\s*(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?|Artifact comment monitors?))`,
     },
     requiresMux: false,
     // Claude installs Codeman's own hooks block into every workspace it runs in, so its

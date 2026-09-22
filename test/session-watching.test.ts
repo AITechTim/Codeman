@@ -15,7 +15,12 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { Session } from '../src/session.js';
 import { getCli } from '../src/config/cli-registry/index.js';
 import { compileVersionRegex } from '../src/config/cli-registry/patterns.js';
-import { watchingLabel, WATCHING_TAIL_LINES, IDLE_SILENCE_MS } from '../src/session-activity.js';
+import {
+  watchingLabel,
+  WATCHING_TAIL_LINES,
+  MAX_WATCHING_LABEL_CHARS,
+  IDLE_SILENCE_MS,
+} from '../src/session-activity.js';
 
 /** The registry's own pattern for Claude, which is what every consumer runs. */
 const CLAUDE_WATCHING = compileVersionRegex(getCli('claude')!.capabilities.workDetect!.watchingLine!)!;
@@ -112,7 +117,7 @@ describe('watchingLabel', () => {
     // PRINTS "1 monitor" (this one has been discussing exactly that) is not running one.
     const transcript =
       '> does Codeman know about watching?\n' +
-      '⏺ The footer says 1 monitor while a monitor is armed, and 2 shells for\n' +
+      '⏺ The footer says · 1 monitor · while a monitor is armed, and · 2 shells · for\n' +
       '  backgrounded commands. Codeman reads neither today.\n' +
       '  Nothing else on the screen means background work is running.\n';
     expect(watchingLabel(pane('⏵⏵ bypass permissions on · ← for agents', transcript), CLAUDE_WATCHING)).toBeNull();
@@ -120,11 +125,31 @@ describe('watchingLabel', () => {
 
   it('looks no further up the screen than the tail it declares', () => {
     const chip = '⏵⏵ bypass permissions on · 1 monitor · ← for agents';
-    const blanks = Array(WATCHING_TAIL_LINES).fill('  still here').join('\n');
-    // Blank lines are dropped before the tail is taken, so padding with them must not
-    // push the footer out of range.
+    const below = Array(WATCHING_TAIL_LINES).fill('  still here').join('\n');
+    // Blank lines are dropped before the tail is taken, so a pane padded with them must
+    // still read its own footer.
     expect(watchingLabel(`${chip}\n\n\n\n\n\n`, CLAUDE_WATCHING)).toBe('1 monitor');
-    expect(watchingLabel(`${chip}\n${blanks}\n`, CLAUDE_WATCHING)).toBeNull();
+    expect(watchingLabel(`${chip}\n${below}\n`, CLAUDE_WATCHING)).toBeNull();
+  });
+
+  it('refuses a label the footer did not separate, which is the injection guard', () => {
+    // The pattern anchors on the `·` the footer joins its items with. Without that
+    // anchor an agent could silence its own idle alert by printing the words, since the
+    // only rows it cannot write are the footer and the status line.
+    expect(watchingLabel(pane('1 monitor'), CLAUDE_WATCHING)).toBeNull();
+    expect(watchingLabel(pane('running 2 shells for the build'), CLAUDE_WATCHING)).toBeNull();
+    expect(watchingLabel(pane('⏵⏵ bypass permissions on · 1 monitor'), CLAUDE_WATCHING)).toBe('1 monitor');
+  });
+
+  it('reads a coloured footer, because a capture may carry ANSI', () => {
+    const coloured = pane('\u001b[2m⏵⏵ bypass permissions on\u001b[0m · \u001b[36m1 monitor\u001b[0m · ← for agents');
+    expect(watchingLabel(coloured, CLAUDE_WATCHING)).toBe('1 monitor');
+  });
+
+  it('caps the label, because it ends up on a badge and in an approval card', () => {
+    const long = `· ${'9'.repeat(MAX_WATCHING_LABEL_CHARS * 2)} monitors`;
+    const label = watchingLabel(pane(`⏵⏵ bypass permissions on ${long} · ← for agents`), CLAUDE_WATCHING);
+    expect(label?.length).toBe(MAX_WATCHING_LABEL_CHARS);
   });
 
   it('survives a pattern handed to it with the global flag set', () => {

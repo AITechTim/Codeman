@@ -498,7 +498,21 @@ export class Session extends EventEmitter {
   private _activityStreak: ActivityStreak | null = null; // Unbroken run of PTY repaints (working detection)
   private _lastPaneProbeAt = 0; // Throttle for the tmux screen probe
   private _lastPaneProbeWorking: boolean | null = null; // Its last verdict (null = could not read)
-  private _watching: string | null = null; // Background work the pane's own footer reports
+  /**
+   * Background work the pane's own footer reports, e.g. `1 monitor`; null for none.
+   *
+   * Cached BESIDE `_lastPaneProbeWorking` and refreshed only by a capture that really
+   * happened, so it goes stale exactly as that verdict does. The probe returns its
+   * cached boolean without re-capturing inside `PANE_PROBE_MIN_INTERVAL_MS`, and a
+   * label derived from a capture nobody took would be a guess wearing a fact's clothes.
+   *
+   * ⚠️ It then FREEZES once `_confirmIdle()` concludes: `activityTimeout` is null from
+   * there, and nothing looks at the pane again until it produces output. That is
+   * correct rather than merely tolerable, because the background work ending is itself
+   * what wakes the agent and repaints the pane. Do not add a timer to keep this fresh;
+   * it would spend a `capture-pane` per idle session per tick to learn nothing.
+   */
+  private _watching: string | null = null;
   /** Lazily compiled `capabilities.workDetect.workingLine`. See _workingLinePattern(). */
   private _workingLineRe: RegExp | undefined = undefined;
   /** Lazily compiled `capabilities.workDetect.watchingLine`. See _watchingLinePattern(). */
@@ -2743,6 +2757,8 @@ export class Session extends EventEmitter {
    */
   private _readWatching(paneText: string | null): void {
     const pattern = this._watchingLinePattern();
+    // Called only from the probe, and only with what a capture returned: `null` is
+    // "the screen could not be read", which is not evidence that nothing is running.
     if (!pattern || paneText === null) return;
     this._watching = watchingLabel(paneText, pattern);
   }

@@ -52,12 +52,19 @@ Three capability fields carry a regular expression an override file can set: `di
 
 `watchingLine` reads a different row of the same screen. A CLI draws it while work the agent
 itself started is still running — Claude prints `⏵⏵ bypass permissions on · 1 monitor · ← for
-agents` while a monitor, a backgrounded shell or a cloud session is live — and Codeman shows
-that as the session's watching badge, so a quiet pane waiting for its own background work
-does not read as a pane waiting for a human. `watchingLabel()` in `session-activity.ts` runs
-the pattern over the last few lines of a capture only, because the transcript above the
-composer quotes arbitrary text and a session that PRINTS "1 monitor" is not running one.
+agents` while a monitor, a backgrounded shell or a cloud session is live. Codeman turns that
+into `Session.watching`, and an idle prompt from such a session opens already acknowledged,
+so a pane waiting for its own background work never raises an alert a human cannot answer.
 Group 1 is the label, and a CLI that declares no pattern reports no background work.
+
+That label is the one value in the registry that an AGENT can influence, because it comes off
+the agent's own screen. Two things keep it honest, and both belong to whoever adds a pattern
+for a new CLI. `watchingLabel()` in `session-activity.ts` searches only the last
+`WATCHING_TAIL_LINES` rows, which is the part of the screen the CLI draws rather than the
+agent, and the pattern itself anchors on the separator that CLI's footer uses to join its
+items. Without both, an agent could silence its own idle alert by printing `· 1 monitor ·`
+into its output. The label is also ANSI-stripped and length-capped at the source, since it
+ends up on a badge and in an approval card.
 
 ### Three capabilities that must stay independent
 
