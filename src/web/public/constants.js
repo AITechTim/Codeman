@@ -1717,23 +1717,28 @@ function terminalGeometryAgrees(a, b) {
  * The server is the authority: it owns the PTY the CLI is drawing for, and it
  * can refuse a resize outright (`Session.resize` ignores small-viewport
  * requests while a desktop connection holds an active sizing claim) without
- * the asking client ever being told. A terminal that keeps its own shape after
- * such a refusal renders garbage; one that adopts the PTY's shape renders the
- * truth, and may simply be wider than the screen can show.
+ * the asking client ever being told. A terminal that keeps its own WIDTH after
+ * such a refusal renders garbage, because Ink wraps its frame and counts its
+ * erase rows at the width it was told.
  *
- * Correct-and-reachable beats correct-and-clipped beats garbled, so a pane
- * wider than the viewport also earns horizontal reach — see `.pty-oversized`.
+ * ⚠️ COLUMNS ONLY. Rows are deliberately left alone, and adopting them was a
+ * real regression: a phone that took a desktop's 43 rows into a viewport with
+ * room for 18 painted an `.xterm-screen` far taller than its container, and
+ * because xterm's own viewport then had nothing to scroll, the bottom of the
+ * frame — the CLI's input line — sat below the container with no gesture that
+ * could reach it. Output visible, typing invisible, for as long as the claim
+ * stayed hot. Width is the axis the wrap arithmetic depends on; rows only
+ * decide how much is on screen at once, and keeping the local row count keeps
+ * the composer at the bottom of a viewport that scrolls.
  *
  * @param {{cols: number, rows: number}|null} local - what xterm currently holds
  * @param {{cols: number, rows: number}|null} pty - what the server just reported
- * @returns {{adopt: boolean, oversized: boolean}}
+ * @returns {{adopt: boolean, cols: number|null}}
  */
 function reconcilePtyGeometry(local, pty) {
-  if (!pty || !Number.isFinite(pty.cols) || !Number.isFinite(pty.rows)) {
-    return { adopt: false, oversized: false };
-  }
-  if (terminalGeometryAgrees(local, pty)) return { adopt: false, oversized: false };
-  return { adopt: true, oversized: !!local && pty.cols > local.cols };
+  if (!pty || !Number.isFinite(pty.cols)) return { adopt: false, cols: null };
+  if (!local || !Number.isFinite(local.cols) || local.cols === pty.cols) return { adopt: false, cols: null };
+  return { adopt: true, cols: pty.cols };
 }
 
 if (typeof window !== 'undefined') {

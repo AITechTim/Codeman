@@ -66,6 +66,11 @@ function makeApp(overrides: Record<string, unknown> = {}) {
     // now, so the harness must let it (#464).
     syncTerminalGeometry: mixin.syncTerminalGeometry,
     _resizeTerminalTo: mixin._resizeTerminalTo,
+    // Real, so a geometry change really does re-check whether the terminal now
+    // overflows its container (#464 item 4) — the fake DOM has no container, so
+    // it measures nothing and settles on "no overflow", which is the truth here.
+    _scheduleOverflowAffordanceSync: mixin._scheduleOverflowAffordanceSync,
+    _syncTerminalOverflowAffordance: mixin._syncTerminalOverflowAffordance,
     _onPtyGeometryReport: vi.fn(),
     getTerminalDimensions: () => ({ cols: 120, rows: 40 }),
     terminal: { cols: 120, rows: 40, resize: vi.fn() },

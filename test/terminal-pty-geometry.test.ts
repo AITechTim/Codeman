@@ -161,39 +161,40 @@ describe('clampTerminalDimensions', () => {
 describe('reconcilePtyGeometry', () => {
   const { reconcilePtyGeometry } = loadGeometry();
 
-  it('does nothing when the terminal already matches the PTY', () => {
-    expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, { cols: 62, rows: 40 })).toEqual({
-      adopt: false,
-      oversized: false,
-    });
+  it('does nothing when the terminal already has the PTY\u2019s width', () => {
+    expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, { cols: 62, rows: 40 })).toEqual({ adopt: false, cols: null });
   });
 
-  it('adopts a PTY the client never asked for — a declined resize is still the truth', () => {
+  it('adopts a width the client never asked for \u2014 a declined resize is still the truth', () => {
     // Session.resize ignores a small viewport while a desktop claim is live.
-    expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, { cols: 120, rows: 40 })).toEqual({
-      adopt: true,
-      oversized: true,
-    });
+    expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, { cols: 120, rows: 40 })).toEqual({ adopt: true, cols: 120 });
   });
 
-  it('adopts without claiming oversized when the PTY is merely shorter or narrower', () => {
-    expect(reconcilePtyGeometry({ cols: 120, rows: 40 }, { cols: 80, rows: 40 })).toEqual({
-      adopt: true,
-      oversized: false,
-    });
-    expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, { cols: 62, rows: 12 })).toEqual({
-      adopt: true,
-      oversized: false,
-    });
+  // \u26a0\ufe0f The regression this pins: adopting the PTY's ROWS put a phone that took
+  // a desktop's 43 into a viewport with room for 18, which painted the CLI's
+  // input line below the container with nothing able to scroll to it. Width is
+  // the axis the wrap arithmetic needs; rows only decide how much is on screen.
+  it('never asks for the PTY\u2019s rows, however far off they are', () => {
+    for (const ptyRows of [43, 4, 400]) {
+      const out = reconcilePtyGeometry({ cols: 62, rows: 18 }, { cols: 120, rows: ptyRows });
+      expect(out).toEqual({ adopt: true, cols: 120 });
+      expect(out).not.toHaveProperty('rows');
+    }
+  });
+
+  it('does nothing when only the rows differ', () => {
+    expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, { cols: 62, rows: 12 })).toEqual({ adopt: false, cols: null });
+  });
+
+  it('adopts a narrower PTY too \u2014 the width it was told is the width it draws for', () => {
+    expect(reconcilePtyGeometry({ cols: 120, rows: 40 }, { cols: 80, rows: 40 })).toEqual({ adopt: true, cols: 80 });
   });
 
   it('keeps its own geometry when the server reported none', () => {
-    // An older server answers the resize POST with `{}`; that is not evidence.
-    for (const bad of [null, {}, { cols: 62 }, { cols: 'wide', rows: 40 }]) {
-      expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, bad as Partial<Dims>)).toEqual({
-        adopt: false,
-        oversized: false,
-      });
+    // A session with no pane answers `{}` (Session.ptyGeometry is null), and an
+    // older server answers `{}` too. Neither is evidence about any PTY.
+    for (const bad of [null, {}, { rows: 40 }, { cols: 'wide', rows: 40 }]) {
+      expect(reconcilePtyGeometry({ cols: 62, rows: 40 }, bad as Partial<Dims>)).toEqual({ adopt: false, cols: null });
     }
   });
 });
@@ -313,15 +314,78 @@ describe('exactly one function may change the terminal size', () => {
   });
 });
 
+describe('the failed-load notice fits the narrowest terminal this app will render', () => {
+  // ⚠️ `e587d845`'s commit message claimed a test asserted this against the
+  // BUILT asset. It did not: that assertion lived in a throwaway probe that was
+  // deleted with the rest of the scratch scripts, so the claim was wrong when it
+  // was written. This is the real one, and it reads the source rather than
+  // `dist/`, because `dist/` is not committed and a test that skips when it is
+  // absent would pass for the wrong reason in CI.
+  const app = read('src/web/public/app.js');
+  const { TERMINAL_MIN_COLS } = loadGeometry();
+
+  /** The literal the catch writes, escapes resolved, SGR stripped. */
+  function noticeLines(): string[] {
+    const at = app.indexOf('if (clearedBeforeFresh && this.terminal)');
+    expect(at, 'the failed-load branch is gone — renamed?').toBeGreaterThan(-1);
+    // Anchored past the comments: one of them quotes a lone '.', which a
+    // first-quote match happily returns instead of the notice.
+    const writeAt = app.indexOf('this.terminal.write(', at);
+    expect(writeAt, 'the failed-load branch no longer writes to the terminal').toBeGreaterThan(-1);
+    const call = app.slice(writeAt, app.indexOf('\n      }', writeAt));
+    const literal = call.match(/'((?:[^'\\]|\\.)*)'/);
+    expect(literal, 'no string literal in the failed-load branch').not.toBeNull();
+    return literal![1]
+      .replace(/\\x1b\[[0-9;]*m/g, '')
+      .split('\\r\\n')
+      .filter((line) => line.trim().length > 0);
+  }
+
+  it('says what failed, that the session lives, and what to do', () => {
+    const lines = noticeLines();
+    expect(lines.length).toBe(3);
+    expect(lines[0]).toMatch(/did not load/i);
+    expect(lines[1]).toMatch(/live output/i);
+    // A dead end is the most expensive defect here: the pane is blank and the
+    // reader has no idea whether the session is recoverable.
+    expect(lines[2], 'the notice must name the next step').toMatch(/reload/i);
+  });
+
+  it('never wraps, down to the 40-column floor', () => {
+    // A 52-character sentence measured at 320px wrapped and left a lone '.' on
+    // a line of its own. The floor is the narrowest this app renders, and it is
+    // two taps away on a small phone via increaseFontSize.
+    for (const line of noticeLines()) {
+      expect(
+        line.length,
+        `"${line}" is ${line.length} columns, over the ${TERMINAL_MIN_COLS} floor`
+      ).toBeLessThanOrEqual(TERMINAL_MIN_COLS);
+    }
+  });
+
+  it('does not tell the reader to reopen the tab, which retries nothing', () => {
+    // selectSession early-returns when the session is already active, so
+    // clicking the tab you are already on does not re-fetch.
+    expect(app).toContain('if (this.activeSessionId === sessionId && !forceReload)');
+    expect(noticeLines().join(' ')).not.toMatch(/reopen|switch tab/i);
+  });
+});
+
 // ───────────────────────────────────────────────────────────────────────────
 // Resize stopped being write-only.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('the server reports the geometry the PTY actually holds', () => {
-  it('Session exposes the effective dimensions', () => {
+  it('Session reports its geometry only while a pane is actually drawing', () => {
     const session = read('src/session.ts');
-    expect(session).toMatch(/get ptyCols\(\): number \{\s*return this\._ptyCols;/);
-    expect(session).toMatch(/get ptyRows\(\): number \{\s*return this\._ptyRows;/);
+    // ⚠️ `resize()` writes _ptyCols/_ptyRows only when ptyProcess is set and
+    // nothing seeds them from the spawn geometry, so a dead-pane session still
+    // holds the constructor defaults of 120x40. Reporting those made a client
+    // adopt a size no process was ever told, and claim another device owned the
+    // pane when none existed.
+    expect(session).toMatch(/get ptyGeometry\(\): \{ cols: number; rows: number \} \| null \{/);
+    expect(session).toContain('return this.ptyProcess ? { cols: this._ptyCols, rows: this._ptyRows } : null;');
+    expect(session, 'the raw getters would report the defaults again').not.toMatch(/get ptyCols\(\)/);
   });
 
   it('the WebSocket answers a resize with what took', () => {
@@ -330,8 +394,9 @@ describe('the server reports the geometry the PTY actually holds', () => {
     expect(at).toBeGreaterThan(-1);
     const after = ws.slice(at, at + 1400);
     expect(after).toContain('"t":"zc"');
-    expect(after).toContain('session.ptyCols');
-    expect(after).toContain('session.ptyRows');
+    expect(after).toContain('const applied = session.ptyGeometry;');
+    // No pane, no frame at all.
+    expect(after).toContain('if (applied && socket.readyState === 1)');
     // Documented in the protocol block at the top of the file, like every other frame.
     expect(ws).toContain('{"t":"zc","c":N,"r":N}');
   });
@@ -341,7 +406,7 @@ describe('the server reports the geometry the PTY actually holds', () => {
     const at = routes.indexOf("app.post('/api/sessions/:id/resize'");
     expect(at).toBeGreaterThan(-1);
     const handler = routes.slice(at, at + 1600);
-    expect(handler).toContain('return { cols: session.ptyCols, rows: session.ptyRows };');
+    expect(handler).toContain('return session.ptyGeometry ?? {};');
   });
 
   it('the client adopts the report and re-bases its dedupe on it', () => {
@@ -350,10 +415,11 @@ describe('the server reports the geometry the PTY actually holds', () => {
     expect(start).toBeGreaterThan(-1);
     const body = terminalUi.slice(start, terminalUi.indexOf('\n  },', start));
     expect(body).toContain('reconcilePtyGeometry');
-    expect(body).toContain('this._resizeTerminalTo({ cols, rows })');
+    // Columns only: the local row count is carried through untouched.
+    expect(body).toContain('this._resizeTerminalTo({ cols, rows: local.rows })');
     // Without this the next resize is deduped against a request that was
     // REFUSED, which suppresses the retry that recovers the pane.
-    expect(body).toContain('this._lastResizeDims = { cols, rows }');
+    expect(body).toContain('this._lastResizeDims = { cols, rows: local.rows }');
     // And the WS frame is wired up at all.
     expect(read('src/web/public/app.js')).toContain("msg.t === 'zc'");
   });
@@ -370,15 +436,30 @@ describe('the server reports the geometry the PTY actually holds', () => {
       const body = css.slice(at + selector.length, css.indexOf('\n}', at));
       return body.replace(/\/\*[\s\S]*?\*\//g, '');
     };
-    const oversized = declarationsOf('.terminal-container.pty-oversized');
+    const oversized = declarationsOf('.terminal-container.term-overflows-x');
     expect(oversized).toContain('overflow-x: auto;');
     // Both axes, explicitly: mobile.css sets `overflow: visible` on the bare
     // selector, and a lone overflow-x would leave overflow-y computing to auto.
     expect(oversized).toContain('overflow-y: hidden;');
-    // On the base rule, not only the .touch-device variant — mobile.css's
-    // `.terminal-container { touch-action: none }` is unscoped.
-    expect(oversized).toContain('touch-action: pan-x;');
-    // The class is only ever on while the mismatch is.
-    expect(read('src/web/public/terminal-ui.js')).toContain("classList.toggle('pty-oversized', !!oversized)");
+    // ⚠️ NO touch-action here, deliberately. `touch-action: pan-x` does nothing
+    // for the sessions this targets — `touchstart` preventDefault()s every
+    // 'content' tap, which cancels the browser's pan before it starts — and
+    // granting it as well as the JS pan would move the pane twice for one
+    // finger on the taps where that preventDefault does not run. The terminal's
+    // own touchmove handler owns both axes; mobile.css's unscoped
+    // `touch-action: none` is what keeps it the only owner.
+    expect(css.slice(css.indexOf('.terminal-container.term-overflows-x'))).not.toMatch(
+      /\.terminal-container\.term-overflows-x[^{]*\{[^}]*touch-action/
+    );
+    expect(read('src/web/public/terminal-ui.js')).toContain('const canPanHorizontally = () =>');
+    expect(read('src/web/public/terminal-ui.js')).toContain("if (panAxis === 'x') {");
+    // The class is only ever on while the terminal really is too wide, and it
+    // is MEASURED rather than derived: the floor widens the terminal past a
+    // narrow container with the PTY agreeing throughout, so a mismatch test
+    // would never fire for it (360px, font 24: 218px unreachable).
+    expect(read('src/web/public/terminal-ui.js')).toContain("classList.toggle('term-overflows-x', overflows)");
+    expect(read('src/web/public/terminal-ui.js')).toContain(
+      'screen.getBoundingClientRect().width - container.clientWidth > 1'
+    );
   });
 });

@@ -764,6 +764,32 @@ Object.assign(CodemanApp.prototype, {
       let longPressStartX = 0;
       let longPressStartY = 0;
       let touchStartY = 0;
+      let touchStartX = 0;
+      // 'x' | 'y' | null — locked on the first travel past the tap slop, so a
+      // diagonal drag cannot pan and scroll at the same time.
+      let panAxis = null;
+      /**
+       * Can this gesture pan sideways? Only while the terminal is wider than
+       * the box showing it (`.term-overflows-x`, set by
+       * `_syncTerminalOverflowAffordance`).
+       *
+       * ⚠️ This has to be done in JS. `touch-action: pan-x` alone does nothing
+       * for the sessions the affordance targets: `touchstart` calls
+       * preventDefault() for every 'content' tap — the normal case for a
+       * mouse-tracking TUI sitting at the bottom of its buffer — which cancels
+       * the browser's pan before it starts. Measured under touch emulation, a
+       * 140px horizontal swipe reached scrollLeft 141 without that
+       * preventDefault and 0 with it. It only ever worked for shell sessions,
+       * while scrolled up, or with a mouse.
+       */
+      const canPanHorizontally = () =>
+        // Both halves. The class is what makes the container a scroller at all
+        // (`overflow-x: auto`); without it `scrollLeft` silently stays 0, and a
+        // gesture locked to 'x' on that basis would do nothing AND suppress the
+        // vertical scroll it should have been. The measurement is the second
+        // half because sub-pixel cell widths can leave a stray pixel of
+        // scrollWidth on a terminal that fits perfectly well.
+        container.classList.contains('term-overflows-x') && container.scrollWidth - container.clientWidth > 1;
       let tapStartedWithTerminalFocus = false;
       let tapStartIntentCache = null;
       // px — ignore micro-drift to distinguish tap from scroll. Shared with the
@@ -783,6 +809,8 @@ Object.assign(CodemanApp.prototype, {
             touchLastX = ev.touches[0].clientX;
             touchLastY = ev.touches[0].clientY;
             touchStartY = touchLastY;
+            touchStartX = touchLastX;
+            panAxis = null;
             velocity = 0;
             pixelAccum = 0;
             isTouching = true;
@@ -851,8 +879,15 @@ Object.assign(CodemanApp.prototype, {
           }
           if (ev.touches.length === 1 && isTouching) {
             const touchY = ev.touches[0].clientY;
-            if (!didScroll && Math.abs(touchY - touchStartY) >= TAP_THRESHOLD) {
-              didScroll = true;
+            const touchX = ev.touches[0].clientX;
+            if (!didScroll) {
+              const travelY = Math.abs(touchY - touchStartY);
+              const travelX = Math.abs(touchX - touchStartX);
+              const sideways = canPanHorizontally() && travelX >= TAP_THRESHOLD;
+              if (travelY >= TAP_THRESHOLD || sideways) {
+                didScroll = true;
+                panAxis = sideways && travelX > travelY ? 'x' : 'y';
+              }
             }
             // Below the tap threshold, treat the gesture as a potential tap:
             // don't preventDefault (iOS needs click synthesis to show the
@@ -862,6 +897,15 @@ Object.assign(CodemanApp.prototype, {
             // fling, so a jittery tap would both position the cursor AND scroll.
             if (!didScroll) return;
             ev.preventDefault();
+            if (panAxis === 'x') {
+              // Pan the container, and touch nothing the vertical path owns —
+              // no pixelAccum, no velocity, so touchend cannot turn a sideways
+              // swipe into a momentum fling down the scrollback.
+              container.scrollLeft -= touchX - touchLastX;
+              touchLastX = touchX;
+              touchLastY = touchY;
+              return;
+            }
             const delta = touchLastY - touchY; // positive = scroll down
             pixelAccum += delta;
             velocity = delta * 1.2;
@@ -1087,11 +1131,24 @@ Object.assign(CodemanApp.prototype, {
               }
             }
             if (!sentViaWs) {
+              // ⚠️ The reply carries the geometry that actually took, and this
+              // is the path where a declined resize is LEAST likely to be
+              // noticed: no socket means no `{"t":"zc"}` frame either, so
+              // discarding it here left the one transport that cannot hear the
+              // answer also not asking for it.
+              const resizedSessionId = this.activeSessionId;
               fetch(`/api/sessions/${this.activeSessionId}/resize`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ cols, rows, viewportType }),
-              }).catch(() => {});
+              })
+                .then(async (res) => {
+                  const applied = (await res.json())?.data ?? {};
+                  this._onPtyGeometryReport(resizedSessionId, applied.cols, applied.rows);
+                })
+                .catch(() => {
+                  /* a resize that never landed tells us nothing about the PTY */
+                });
             }
           }
         }
@@ -5454,7 +5511,11 @@ Object.assign(CodemanApp.prototype, {
     }
     const dims = this.getTerminalDimensions();
     if (!dims) return null;
-    return this._resizeTerminalTo(dims) ? dims : null;
+    if (!this._resizeTerminalTo(dims)) return null;
+    // The floor can leave this terminal wider than the box that shows it, and
+    // that clips columns with no gesture to reach them (issue #464, item 4).
+    this._scheduleOverflowAffordanceSync();
+    return dims;
   },
 
   /**
@@ -5583,7 +5644,7 @@ Object.assign(CodemanApp.prototype, {
    * 120 columns against a 62-column terminal draws every wrapped line twice.
    *
    * Adopting can leave the pane wider than the viewport, and the container is
-   * `overflow: hidden`, so `.pty-oversized` grants horizontal reach for exactly
+   * `overflow: hidden`, so `.term-overflows-x` grants horizontal reach for exactly
    * as long as the mismatch lasts. Correct-and-reachable beats correct-and-
    * clipped beats garbled; nothing here is worth trapping content behind.
    *
@@ -5594,38 +5655,107 @@ Object.assign(CodemanApp.prototype, {
   _onPtyGeometryReport(sessionId, cols, rows) {
     if (!this.terminal || sessionId !== this.activeSessionId) return;
     const local = { cols: this.terminal.cols, rows: this.terminal.rows };
-    const { adopt, oversized } = window.CodemanTerminalGeometry.reconcilePtyGeometry(local, { cols, rows });
-    if (!adopt) {
-      this._setPtyOversized(false);
-      return;
+    const { adopt } = window.CodemanTerminalGeometry.reconcilePtyGeometry(local, { cols, rows });
+    // Columns only, and the local row count is kept — see reconcilePtyGeometry
+    // for why adopting rows put the CLI's input line below the container with
+    // nothing able to scroll to it.
+    if (adopt && this._resizeTerminalTo({ cols, rows: local.rows })) {
+      // The numbers we would report next are now the PTY's, not the container's:
+      // without this the dedupe in throttledResize/sendResize compares against a
+      // request that was refused and suppresses the retry that recovers the pane.
+      this._lastResizeDims = { cols, rows: local.rows };
     }
-    if (!this._resizeTerminalTo({ cols, rows })) return;
-    // The numbers we would report next are now the PTY's, not the container's:
-    // without this the dedupe in throttledResize/sendResize compares against a
-    // request that was refused and suppresses the retry that recovers the pane.
-    this._lastResizeDims = { cols, rows };
-    this._setPtyOversized(oversized);
+    // Is the PTY at a width this container did not ask for? Compared against
+    // what we WOULD request, not against what the terminal currently holds:
+    // once adopted those two are equal, so the second question answers itself
+    // false and the condition would look resolved while it is still true.
+    // The floor widens this terminal too, and that is the reader's own font
+    // setting rather than another device — hence the comparison, not `>`.
+    const wanted = this.getTerminalDimensions();
+    this._paneWidthRefused = !!wanted && Number.isFinite(cols) && cols !== wanted.cols;
+    this._scheduleOverflowAffordanceSync();
   },
 
   /**
-   * Let the reader reach a pane wider than their screen, and say why once.
+   * Measure on the NEXT frame, coalesced.
    *
-   * Chrome for a condition that is not happening is clutter, so both the scroll
-   * affordance and the notice exist only while the mismatch does. The notice is
-   * once per transition, not per report: reports arrive on every resize, and a
-   * toast that repeats is noise about a situation the reader can already see.
+   * `terminal.resize()` updates the buffer synchronously but the screen element
+   * takes its new width with the render, so measuring in the same tick reads
+   * the size the terminal just left. Coalesced because a settling container
+   * fires several resizes and only the last one's measurement is the truth.
    */
-  _setPtyOversized(oversized) {
-    const container = document.getElementById('terminalContainer');
-    if (container) container.classList.toggle('pty-oversized', !!oversized);
-    if (oversized === this._ptyOversized) return;
-    this._ptyOversized = oversized;
-    if (oversized) {
-      // 53 characters: measured at one line on a 430px phone. The longer
-      // wording wrapped to two, which is a lot of the terminal to cover for a
-      // notice about a condition that resolves itself.
-      this.showToast('Another device is setting the width — scroll sideways', 'info');
+  _scheduleOverflowAffordanceSync() {
+    if (typeof requestAnimationFrame !== 'function') {
+      this._syncTerminalOverflowAffordance();
+      return;
     }
+    if (this._overflowAffordanceFrame) return;
+    this._overflowAffordanceFrame = requestAnimationFrame(() => {
+      this._overflowAffordanceFrame = null;
+      this._syncTerminalOverflowAffordance();
+    });
+  },
+
+  /**
+   * Let the reader reach a pane wider than the box that shows it.
+   *
+   * ⚠️ Keyed on what actually does not FIT, not on a PTY mismatch. Two
+   * different causes put the terminal wider than its container and both leave
+   * columns unreachable behind `.terminal-container`'s clip:
+   *
+   *  - another device holds the sizing claim, so this terminal adopts a width
+   *    it did not ask for; and
+   *  - the 40-column floor. On a 360px phone, font 18 applies 40 columns and
+   *    paints 433px, and font 24 paints 578px — 218px, 38% of the pane, with no
+   *    gesture that could reach it. `increaseFontSize` goes to 24 and applies
+   *    immediately, so that is two taps away, and the PTY agrees with the
+   *    terminal throughout: a mismatch test would never fire.
+   *
+   * Measured rather than derived from cell arithmetic, because the cell width
+   * is fractional and the container's padding is not ours to assume. One pixel
+   * of slack keeps sub-pixel rounding from flapping the class.
+   */
+  _syncTerminalOverflowAffordance() {
+    // ⚠️ Nothing in here may throw. It runs off every geometry change, which is
+    // the resize path, and the affordance is cosmetic: a terminal that cannot
+    // be measured — disposed mid-resize, or a harness with no real DOM — must
+    // lose the scroll affordance, never the resize.
+    let container = null;
+    let overflows = false;
+    try {
+      container = document.getElementById('terminalContainer');
+      const screen = container?.querySelector('.xterm-screen');
+      if (container && screen) {
+        overflows = screen.getBoundingClientRect().width - container.clientWidth > 1;
+      }
+    } catch {
+      /* unmeasurable; fall through with the affordance off */
+    }
+    container?.classList.toggle('term-overflows-x', overflows);
+    // The notice tells the reader to scroll sideways, so it is only true advice
+    // once there is something to scroll. A wide PTY on a screen wide enough to
+    // show it needs no explanation and gets none.
+    if (!overflows || !this._paneWidthRefused) {
+      this._paneOwnedElsewhere = false;
+      return;
+    }
+    this._notePaneOwnedElsewhere();
+  },
+
+  /**
+   * Say, once, that this pane's width belongs to another device.
+   *
+   * Once per transition, not per report: reports arrive on every resize, and a
+   * toast that repeats is noise about a situation already on screen. Silent
+   * when it resolves — the pane simply reflows back to this screen.
+   */
+  _notePaneOwnedElsewhere() {
+    if (this._paneOwnedElsewhere) return;
+    this._paneOwnedElsewhere = true;
+    // 53 characters: measured at one line on a 430px phone. The longer
+    // wording wrapped to two, which is a lot of the terminal to cover for a
+    // notice about a condition that resolves itself.
+    this.showToast('Another device is setting the width — scroll sideways', 'info');
   },
 
   /**

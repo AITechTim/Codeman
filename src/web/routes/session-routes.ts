@@ -2119,8 +2119,9 @@ export function registerSessionRoutes(
     // one asked for: `Session.resize` declines small-viewport requests while a
     // desktop connection holds an active sizing claim. A browser terminal left
     // at a shape the PTY refused renders garbled output, not merely wrong-sized
-    // output, so the client adopts these (issue #464).
-    return { cols: session.ptyCols, rows: session.ptyRows };
+    // output, so the client adopts this (issue #464). A session with no pane
+    // reports nothing rather than the constructor defaults — see `ptyGeometry`.
+    return session.ptyGeometry ?? {};
   });
 
   // ========== Get Last Response (from transcript JSONL) ==========

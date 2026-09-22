@@ -2722,13 +2722,6 @@ class CodemanApp {
         // terminal sat at the bottom of a just-rewritten buffer, so the next
         // flush would scroll back down and undo the restore above.
         this._syncStickyScrollBaseline();
-        // ⚠️ HERE, not in the `finally`. The marker means "this session lost
-        // output", and only a repaint that actually happened settles it. Clearing
-        // on every exit meant a reconcile that threw — or hit the new fetch
-        // deadline, which is the flaky-link case the marker exists for — dropped
-        // the gap silently, and nothing ever retried it. Left set, the next
-        // ws.onopen has another go.
-        this._markTerminalBufferReconciled(sessionId);
         // Re-position local echo overlay at new prompt location
         this._localEchoOverlay?.rerender();
         // Resize PTY to match actual browser dimensions (critical for OpenCode
@@ -2737,6 +2730,16 @@ class CodemanApp {
           this.sendResize(this.activeSessionId);
         }
       }
+      // ⚠️ HERE: after a response arrived, and NOT in the `finally`. The marker
+      // means "this session lost output", and only a reconcile that actually
+      // completed settles it. Clearing on every exit meant one that threw — or
+      // hit the fetch deadline, which is the flaky-link case the marker exists
+      // for — dropped the gap silently with nothing to retry it.
+      // ⚠️ Outside the `if (data.terminalBuffer)` too: a server that answers
+      // with an empty capture HAS reconciled us, there was simply nothing to
+      // replay. Leaving the marker set there refetched on every reconnect for
+      // the life of the page.
+      this._markTerminalBufferReconciled(sessionId);
     } catch (err) {
       console.error('needsRefresh reload failed:', err);
     } finally {
