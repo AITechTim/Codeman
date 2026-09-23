@@ -509,9 +509,17 @@ export class Session extends EventEmitter {
    *
    * ⚠️ It then FREEZES once `_confirmIdle()` concludes: `activityTimeout` is null from
    * there, and nothing looks at the pane again until it produces output. That is
-   * correct rather than merely tolerable, because the background work ending is itself
-   * what wakes the agent and repaints the pane. Do not add a timer to keep this fresh;
-   * it would spend a `capture-pane` per idle session per tick to learn nothing.
+   * correct rather than merely tolerable, because work ending repaints the pane either
+   * way — a monitor firing wakes the agent, and codex drops its background-terminal row
+   * on its own. Do not add a timer to keep this fresh; it would spend a `capture-pane`
+   * per idle session per tick to learn nothing.
+   *
+   * A server restart is not a hole in that either, though it looks like one: this field
+   * is live state and starts empty. Reconciliation re-attaches the pane, the attach
+   * repaint carries the composer glyph, and the idle confirmation that arms on it probes
+   * and re-reads the label with no input from anyone — measured 2026-09-23 on a restarted
+   * instance, back within ~20 s for a session whose background terminal was still
+   * running. A session that comes back with no label has no chip on its screen.
    */
   private _watching: string | null = null;
   /** Lazily compiled `capabilities.workDetect.workingLine`. See _workingLinePattern(). */
