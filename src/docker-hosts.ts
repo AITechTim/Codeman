@@ -606,9 +606,36 @@ export function agentImageNpmPackages(): string[] {
   return packages;
 }
 
-/** The `--build-arg` pairs the agent image takes. */
-export function agentImageBuildArgPairs(): Array<[string, string]> {
-  return [['CLI_NPM_PACKAGES', agentImageNpmPackages().join(' ')]];
+/**
+ * Environment variable → agent.Dockerfile ARG for the optional git-host CLIs (gh, az).
+ * ⚠️ Mirrors `GIT_HOST_CLI_BUILD_ARGS` in `scripts/lib/cli-catalog.mjs`; the parity test pins them.
+ */
+export const GIT_HOST_CLI_BUILD_ARGS: ReadonlyArray<readonly [string, string]> = [
+  ['CODEMAN_AGENT_IMAGE_INSTALL_GH', 'CODEMAN_INSTALL_GH'],
+  ['CODEMAN_AGENT_IMAGE_INSTALL_AZ', 'CODEMAN_INSTALL_AZ'],
+];
+
+/**
+ * The `--build-arg` pairs for the optional git-host CLIs. PURE. An unset or empty variable
+ * contributes NOTHING, so the Dockerfile's own default (off) applies and the argv is the same
+ * as before these existed; anything other than 0/1 is refused rather than guessed at.
+ */
+export function gitHostCliBuildArgPairs(env: NodeJS.ProcessEnv): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  for (const [envName, argName] of GIT_HOST_CLI_BUILD_ARGS) {
+    const value = env[envName];
+    if (value === undefined || value === '') continue;
+    if (value !== '0' && value !== '1') {
+      throw new Error(`${envName} must be 0 or 1, got ${JSON.stringify(value)}`);
+    }
+    pairs.push([argName, value]);
+  }
+  return pairs;
+}
+
+/** The `--build-arg` pairs the agent image takes. PURE given `env`. */
+export function agentImageBuildArgPairs(env: NodeJS.ProcessEnv = process.env): Array<[string, string]> {
+  return [['CLI_NPM_PACKAGES', agentImageNpmPackages().join(' ')], ...gitHostCliBuildArgPairs(env)];
 }
 
 // ========== Credential mount resolution (IO) ==========
@@ -829,6 +856,27 @@ const CRED_STORES: CredStorePolicy[] = [
   },
   { rel: '.config/gcloud', seedWhole: true },
   { rel: '.config/opencode', seedWhole: true },
+  // GitHub CLI: `hosts.yml` holds the token wherever no system keyring exists (the
+  // Docker server image, a headless Linux host), `config.yml` the preferences. The
+  // agent image routes github.com git credentials through `gh`, so this seed is what
+  // lets an agent clone/push a private repo. A token that lives in a desktop keyring
+  // is not in `hosts.yml` and does not carry in; sign `gh` in inside the container.
+  { rel: '.config/gh', seedFiles: ['hosts.yml', 'config.yml'] },
+  // Azure CLI: only the sign-in state. `~/.azure` also accumulates `logs/`,
+  // `commands/`, telemetry and (on a bare host) `cliextensions/`, none of which is
+  // needed to authenticate; the agent image carries its own extensions outside HOME.
+  // `msal_token_cache.json` is plaintext only on Linux (Windows/macOS encrypt it), so
+  // this carries a sign-in from the Docker server image or a Linux host.
+  {
+    rel: '.azure',
+    seedFiles: [
+      'azureProfile.json',
+      'msal_token_cache.json',
+      'service_principal_entries.json',
+      'clouds.config',
+      'config',
+    ],
+  },
   // OMP keeps its config in `~/.omp/agent` (config.yml/mcp.json/models.yml/
   // settings.yml — small, no bigger than grok's config.toml/pager.toml), but
   // that dir ALSO holds agent.db/history.db/models.db (SQLite caches) and
@@ -1136,10 +1184,17 @@ function buildAgentImage(
       error: `docker/agent.Dockerfile not found in this install; clone the repo or build ${image} manually`,
     });
   }
+  let buildArgPairs: Array<[string, string]>;
+  try {
+    buildArgPairs = agentImageBuildArgPairs();
+  } catch (err) {
+    // A malformed CODEMAN_AGENT_IMAGE_INSTALL_* value: report it like any other build failure.
+    return Promise.resolve({ ok: false, built: false, alreadyPresent: false, error: String((err as Error).message) });
+  }
   const argv = dockerEngineArgv(docker);
   const args = [
     ...argv.slice(1),
-    ...agentImageBuildArgs(resolved.dockerfile, image, resolved.contextDir, opts.noCache, agentImageBuildArgPairs()),
+    ...agentImageBuildArgs(resolved.dockerfile, image, resolved.contextDir, opts.noCache, buildArgPairs),
   ];
   return new Promise<EnsureImageResult>((resolve) => {
     // async spawn (NEVER spawnSync) so a multi-minute build never wedges the event loop.

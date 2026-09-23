@@ -41,6 +41,66 @@ Releases that change `server.Dockerfile`, `docker-compose.yaml`, or add a key to
 changed, and asks you to run `Start-Codeman.sh` here on the host instead. Details:
 [`../docs/docker-self-update.md`](../docs/docker-self-update.md).
 
+## Private repositories (GitHub and Azure DevOps)
+
+The images can include the GitHub CLI (`gh`) and the Azure CLI (`az`, with the `azure-devops` extension), wired into the system Git configuration as credential helpers, so Codeman can clone private repositories. Both are **opt-in and off by default**, and are turned on per host in `docker-compose.override.yml`.
+
+### Turning them on
+
+Add the build arguments to `docker-compose.override.yml` (see [Local customisation](#local-customisation)), then rebuild with `Start-Codeman.sh`. Set only the one you need:
+
+```yaml
+services:
+  codeman:
+    build:
+      args:
+        CODEMAN_INSTALL_GH: '1'
+        CODEMAN_INSTALL_AZ: '1'
+    environment:
+      # The same two switches for the Docker-case agent image Codeman builds.
+      CODEMAN_AGENT_IMAGE_INSTALL_GH: '1'
+      CODEMAN_AGENT_IMAGE_INSTALL_AZ: '1'
+```
+
+The `build: args:` pair controls the Codeman server image. The `environment:` pair controls the agent image for [Docker cases](../docs/docker-cases.md), which Codeman builds on the first Docker case; an agent image that already exists is not rebuilt by this, so run `node scripts/build-agent-image.mjs --no-cache` inside the container afterwards. The same variables work in front of that command when building it by hand. Values must be `0` or `1`; anything else stops the build with an error naming the argument.
+
+They are not `.env` settings: turning a CLI on is a per-host choice, which is what the override file is for, and a new `.env.example` key makes the in-app updater refuse to update every existing installation until its `.env` gains the key.
+
+The Azure CLI is the large one, about 600 MB of the roughly 670 MB the pair adds. A CLI left off leaves nothing behind: no apt repository, no package, no `azure-devops` extension and no credential-helper entry, so git for that host behaves exactly as it does without this feature.
+
+### Signing in
+
+With a CLI on, the system Git configuration routes credentials through it:
+
+| Host                                                  | Credential helper                         | Sign in with                 |
+| ----------------------------------------------------- | ----------------------------------------- | ---------------------------- |
+| `https://github.com`, `https://gist.github.com`       | `gh auth git-credential`                  | `gh auth login`              |
+| `https://dev.azure.com`, `https://*.visualstudio.com` | `/usr/local/bin/git-credential-azure-cli` | `az login --use-device-code` |
+
+Codeman itself still collects no Git credentials. Sign the container in once from a **Terminal / Shell** session (Run menu). The session runs as the runtime account, so the sign-in is stored under `CODEMAN_APPDATA_PATH` (`~/.config/gh`, `~/.azure`) and survives rebuilds and container recreation:
+
+```sh
+gh auth login                  # GitHub.com -> HTTPS -> "Login with a web browser" (device code)
+az login --use-device-code     # then: az devops configure --defaults organization=https://dev.azure.com/<org>
+```
+
+After that, **Add Case → Clone Repo** accepts private `https://` URLs on those hosts, and `git clone` works from any session. Until a CLI is signed in its helper prints nothing, so a private clone fails immediately with the usual authentication error rather than waiting on a prompt.
+
+Azure DevOps is authenticated with an Entra ID access token that the helper requests from `az` for each Git operation, so nothing is written to disk beyond `az`'s own sign-in. An account that has to use a personal access token can set `AZURE_DEVOPS_EXT_PAT` for the container instead (for example under `environment:` in `docker-compose.override.yml`); the helper prefers it when present. SSH remotes are unaffected by any of this and keep using the account's own keys.
+
+In a Docker case built with the CLIs on, a case with credential seeding on copies these sign-ins into its container at launch (`~/.config/gh/hosts.yml` and `config.yml`, plus the sign-in files from `~/.azure`). A case container created before you signed in only picks them up once it is recreated.
+
+The GitHub agent skill for `gh` installs into the runtime account's home in the same session:
+
+```sh
+gh skill install cli/cli gh --scope user
+gh skill update gh              # after a later gh release
+```
+
+### Versions
+
+Both CLIs, and the extension, are installed from their vendors' repositories with no version pinned, so they arrive at whatever is current when that build step runs. Docker caches the step, though: `Start-Codeman.sh` rebuilds with the cache, which keeps the versions from the first build until the Dockerfile changes at or above that step or the image is rebuilt with `--no-cache`. They are apt packages owned by root, so they cannot be upgraded from a session; `az extension update --name azure-devops` is the exception and works without a rebuild.
+
 ## Local customisation
 
 Compose merges `docker-compose.override.yml` on top of `docker-compose.yaml`. Keep host-specific changes there rather than editing `docker-compose.yaml`, so this repository can be updated without losing them. Both `docker-compose.override.yml` and `docker-compose.override.yaml` are ignored by Git.

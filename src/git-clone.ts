@@ -579,7 +579,7 @@ export function classifyGitFailure(stderr: string, timedOut: boolean, spawnError
     return {
       code: 'AUTH_REQUIRED',
       message:
-        'That repository needs authentication. Codeman clones without credentials, so private repositories have to be cloned outside Codeman and added with Link Existing.',
+        "That repository needs authentication. Codeman never asks for credentials, so sign this server's git in first (for example `gh auth login` or `az login` from a shell session; the Docker image can include both, see docker/README.md), or clone it outside Codeman and add it with Link Existing.",
       stderr: clean,
     };
   }

@@ -351,6 +351,33 @@ describe('resolveDockerCredentialArtifacts (isolated codex/gemini/gcloud/opencod
     expect(mounts.filter((m) => m.readonly && m.dst.includes('cred-seeds')).length).toBeGreaterThanOrEqual(3);
   });
 
+  it('gh + az: seed only the sign-in files, never logs/extensions/caches', () => {
+    mkdirSync(join(home, '.config', 'gh'), { recursive: true });
+    writeFileSync(join(home, '.config', 'gh', 'hosts.yml'), '');
+    writeFileSync(join(home, '.config', 'gh', 'config.yml'), '');
+    mkdirSync(join(home, '.azure', 'logs'), { recursive: true });
+    mkdirSync(join(home, '.azure', 'cliextensions'), { recursive: true });
+    writeFileSync(join(home, '.azure', 'azureProfile.json'), '{}');
+    writeFileSync(join(home, '.azure', 'msal_token_cache.json'), '{}');
+    writeFileSync(join(home, '.azure', 'config'), '');
+
+    const { mounts, seedCopies } = resolveDockerCredentialArtifacts(home);
+    const dests = seedCopies.map((s) => s.to);
+    expect(dests).toContain('/home/agent/.config/gh/hosts.yml');
+    expect(dests).toContain('/home/agent/.config/gh/config.yml');
+    expect(dests).toContain('/home/agent/.azure/azureProfile.json');
+    expect(dests).toContain('/home/agent/.azure/msal_token_cache.json');
+    expect(dests).toContain('/home/agent/.azure/config');
+    // Absent files are skipped, and nothing outside the sign-in set is seeded.
+    expect(dests).not.toContain('/home/agent/.azure/service_principal_entries.json');
+    expect(dests.some((d) => d.includes('logs') || d.includes('cliextensions'))).toBe(false);
+    expect(seedCopies.filter((s) => /\.azure|\.config\/gh/.test(s.to)).every((s) => !s.recursive)).toBe(true);
+    // Every host credential file rides a READ-ONLY mount, so the container never writes back.
+    const credMounts = mounts.filter((m) => /\.azure|\.config[\\/]gh/.test(m.src));
+    expect(credMounts.length).toBe(5);
+    expect(credMounts.every((m) => m.readonly)).toBe(true);
+  });
+
   it('gates every artifact on existsSync (absent stores contribute nothing)', () => {
     const { mounts, seedCopies } = resolveDockerCredentialArtifacts(home);
     expect(mounts).toEqual([]);
