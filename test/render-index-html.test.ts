@@ -143,6 +143,19 @@ describe('WebServer.renderIndexHtml', () => {
     expect(html).toContain('btn-multimonitor--hidden');
   });
 
+  it('injects the transcript-gutter map for a /session/:id window too', async () => {
+    // Every other payload is gated on !soloSessionId, but a solo window copies from a
+    // terminal like the main page does, so it needs the widths the copy strip keys on.
+    const { server } = makeServer();
+    const html = await render(server, 'sess-123');
+    const match = html.match(/window\.__codemanTranscriptGutter=(\{[^<]*\});/);
+    expect(match).not.toBeNull();
+    const map = JSON.parse(match![1]) as Record<string, number>;
+    expect(map.claude).toBe(2);
+    expect(map.codex).toBe(2);
+    expect(map.shell).toBeUndefined();
+  });
+
   it('escapes the solo id so it cannot break out of the inline <script>', async () => {
     const { server } = makeServer({});
     const html = await render(server, 'a</script><b>');

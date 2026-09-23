@@ -214,8 +214,8 @@ const CLAUDE: CliEntry = {
   capabilities: {
     external: false,
     // Claude indents its transcript body two columns and puts its own ●/✻/❯ markers
-    // in them, so a copy can drop two and paste flush. The only entry that declares
-    // this, because it is the only one whose gutter has been measured.
+    // in them, so a copy can drop two and paste flush. Claude and codex are the only
+    // entries that declare this, because theirs are the only gutters that have been measured.
     transcriptGutter: 2,
     // The historical hard-coded pair, now stated as data. `workingLine` matches both the
     // `✻ Actualizing… (39s · ↓ 2.0k tokens)` status line and the bare `esc to interrupt`
