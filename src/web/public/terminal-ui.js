@@ -1934,24 +1934,22 @@ Object.assign(CodemanApp.prototype, {
     this.terminal?.select?.(index % cols, Math.floor(index / cols), length);
   },
 
-  /** Long-press fired: select the word under the finger and arm drag-to-extend. */
+  /** Long-press fired: swallow the platform gesture, then select a word if one exists. */
   _beginTouchSelection(clientX, clientY) {
+    // Reaching the 350ms threshold makes this a long press even when the finger
+    // landed on blank space. Arm every guard before looking for a word so Chrome
+    // cannot focus xterm's hidden textarea, and leave _touchSelecting set so the
+    // touchend branch preventDefaults the compatibility mouse sequence.
+    this._blurMobileTerminalInput();
+    this._suppressTrustedTapMouseEvents();
+    this._armTouchSelectionFocusGuard();
+    this._touchSelecting = true;
     const cell = this._touchSelectionCellAt(clientX, clientY);
     if (!cell) return false;
     const word = this._touchSelectionWordAt(cell);
     if (!word) return false;
-    // The keyboard must not sit on top of the thing being selected, and the
-    // composer would eat the selection on its next keystroke anyway.
-    this._blurMobileTerminalInput();
     this._touchSelectionAnchor = word;
-    this._touchSelecting = true;
     this._touchSelectionActive = true;
-    // From here until the gesture ends, no trusted mouse event may reach xterm —
-    // see _endTouchSelectionGesture for why — and the terminal input may not take
-    // focus. Both are re-armed as the gesture continues, since their windows are
-    // short and a press can be held for much longer.
-    this._suppressTrustedTapMouseEvents();
-    this._armTouchSelectionFocusGuard();
     this._applyTouchSelection(word.index, word.length);
     // Android answers; iOS ignores it silently. Both are fine.
     try {
