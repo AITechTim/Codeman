@@ -2068,9 +2068,11 @@ class CodemanApp {
         + (this._terminalWriteInFlightBytes || 0);
       if (queued + data.data.length > 131072) { // 128KB — drop to prevent accumulation
         // The bytes are gone from the stream now, so the recovery is the only
-        // thing that puts this terminal back in step with the PTY.
-        _crashDiag.log(`TERMINAL DROP: ${(queued / 1024).toFixed(0)}KB queued`);
-        this._scheduleDroppedOutputRecovery(data.id);
+        // thing that puts this terminal back in step with the PTY. It also
+        // writes the crash-trail line, once per debounce window: logged here,
+        // one line per dropped frame evicted the whole 50-entry trail in
+        // under a second.
+        this._scheduleDroppedOutputRecovery(data.id, 0, queued);
         return;
       }
 
@@ -2091,25 +2093,34 @@ class CodemanApp {
    *
    * Debounced by the same 2s as before, so a sustained burst still collapses
    * into one attempt rather than hammering the API; bounded by
-   * `DROP_RECOVERY_MAX_ATTEMPTS`, because every reason the refresh can be
-   * skipped is transient contention. Giving up after the cap leaves exactly
-   * what the old code left, so the floor is no worse.
+   * `DROP_RECOVERY_MAX_ATTEMPTS`, because the early returns it retries past
+   * are transient contention. A refresh that died at the fetch DEADLINE is
+   * not retried: that is a stalled link, not contention, and each retry would
+   * be another `?full=1` capture waiting out a deadline of up to two minutes.
+   * Giving up leaves exactly what the old code left, so the floor is no worse.
    *
    * @param {string} sessionId - the session whose output was dropped
    * @param {number} [attempt] - zero-based, for the bound
+   * @param {number} [queuedBytes] - render-queue bytes at the drop, for the crash trail
    */
-  _scheduleDroppedOutputRecovery(sessionId, attempt = 0) {
+  _scheduleDroppedOutputRecovery(sessionId, attempt = 0, queuedBytes) {
     if (!sessionId || this._clientDropRecoveryTimer) return;
+    // Behind the debounce guard: one line per window, not per dropped frame.
+    if (Number.isFinite(queuedBytes)) _crashDiag.log(`TERMINAL DROP: ${(queuedBytes / 1024).toFixed(0)}KB queued`);
     this._clientDropRecoveryTimer = setTimeout(async () => {
       this._clientDropRecoveryTimer = null;
       let repainted = false;
+      let timedOut = false;
       try {
-        repainted = (await this._onSessionNeedsRefresh({ id: sessionId })) === true;
+        const result = await this._onSessionNeedsRefresh({ id: sessionId });
+        repainted = result === true;
+        timedOut = result === 'deadline';
       } catch {
         // Treated as "did not repaint" — retrying is the entire point of this.
       }
       const retry = window.CodemanDroppedOutput.shouldRetryDroppedOutputRecovery({
         repainted,
+        timedOut,
         attempt,
         stillActive: this.activeSessionId === sessionId,
       });
@@ -2757,7 +2768,9 @@ class CodemanApp {
    * "recovered" silently loses the recovery; `_scheduleDroppedOutputRecovery`
    * is the one that cannot afford to.
    *
-   * @returns {Promise<boolean>} true only once a response has been applied.
+   * @returns {Promise<boolean|'deadline'>} true only once a response has been
+   *   applied; 'deadline' when the capture fetch hit its deadline (a stalled
+   *   link, which the dropped-output scheduler does not retry); false otherwise.
    */
   async _onSessionNeedsRefresh(event = {}) {
     // Server sends this after SSE backpressure clears — terminal data was dropped,
@@ -2846,7 +2859,7 @@ class CodemanApp {
       return true;
     } catch (err) {
       console.error('needsRefresh reload failed:', err);
-      return false;
+      return err?.name === 'AbortError' ? 'deadline' : false;
     } finally {
       if (this._terminalRefreshOwner === refreshOwner) this._terminalRefreshOwner = null;
     }

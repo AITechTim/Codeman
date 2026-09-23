@@ -24,7 +24,7 @@ import { describe, expect, it, vi } from 'vitest';
 const publicDir = resolve(import.meta.dirname, '../src/web/public');
 const read = (rel: string) => readFileSync(resolve(import.meta.dirname, '..', rel), 'utf8');
 
-type RetryState = { repainted: boolean; attempt: number; stillActive: boolean };
+type RetryState = { repainted: boolean; timedOut?: boolean; attempt: number; stillActive: boolean };
 
 function loadConstants() {
   const context = vm.createContext({ window: {}, globalThis: {} });
@@ -55,6 +55,14 @@ describe('shouldRetryDroppedOutputRecovery', () => {
     // selectSession repaints from the server on its own, so a retry here would
     // be a second replay of a buffer that is about to be written anyway.
     expect(shouldRetryDroppedOutputRecovery({ repainted: false, attempt: 0, stillActive: false })).toBe(false);
+  });
+
+  it('does not retry a refresh that died at the fetch deadline', () => {
+    // A stalled link, not contention: each retry would be another full capture
+    // waiting out a deadline of up to two minutes.
+    expect(shouldRetryDroppedOutputRecovery({ repainted: false, timedOut: true, attempt: 0, stillActive: true })).toBe(
+      false
+    );
   });
 
   it('gives up at the cap rather than looping against the API forever', () => {
@@ -93,12 +101,14 @@ function loadAppPrototype(): Record<string, unknown> {
   vm.runInContext(
     `${readFileSync(resolve(publicDir, 'constants.js'), 'utf8')}\n` +
       `${readFileSync(resolve(publicDir, 'app.js'), 'utf8')}\n` +
-      `globalThis.__CodemanApp = CodemanApp;`,
+      `globalThis.__CodemanApp = CodemanApp;\nglobalThis.__crashDiag = _crashDiag;`,
     context
   );
+  crashTrail = (context as { __crashDiag: { _entries: string[] } }).__crashDiag._entries;
   return (context as { __CodemanApp: { prototype: Record<string, unknown> } }).__CodemanApp.prototype;
 }
 
+let crashTrail: string[] = [];
 const proto = loadAppPrototype();
 const SESSION = 'session-A';
 
@@ -188,6 +198,33 @@ describe('_scheduleDroppedOutputRecovery', () => {
     }
   });
 
+  it('does not retry a refresh that hit the fetch deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const { app, calls } = makeApp(() => Promise.resolve('deadline'));
+      app._scheduleDroppedOutputRecovery(SESSION);
+      await drain();
+      expect(calls.length, 'a stalled link is not contention; one full capture is the old cost').toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('writes one crash-trail line per debounce window, not one per dropped frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const { app } = makeApp(() => Promise.resolve(true));
+      const before = crashTrail.filter((e) => e.includes('TERMINAL DROP')).length;
+      const schedule = app._scheduleDroppedOutputRecovery as (id: string, attempt?: number, queued?: number) => void;
+      for (let i = 0; i < 125; i++) schedule.call(app, SESSION, 0, 200 * 1024);
+      const drops = crashTrail.filter((e) => e.includes('TERMINAL DROP')).length - before;
+      expect(drops, 'one second of 8ms frames used to evict the whole 50-entry trail').toBe(1);
+      await drain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('coalesces a burst of drops into one attempt, as the debounce always did', async () => {
     vi.useFakeTimers();
     try {
@@ -208,7 +245,9 @@ describe('the drop path and the refresh agree on what counts as recovered', () =
     const at = app.indexOf('131072');
     expect(at, 'the cap is gone — renamed?').toBeGreaterThan(-1);
     const branch = app.slice(at, at + 600);
-    expect(branch).toContain('this._scheduleDroppedOutputRecovery(data.id)');
+    expect(branch).toContain('this._scheduleDroppedOutputRecovery(data.id, 0, queued)');
+    // The crash-trail line belongs behind the scheduler's debounce guard.
+    expect(branch).not.toContain('_crashDiag.log');
     expect(branch, 'a bare setTimeout here is the bug this fixes').not.toContain('setTimeout');
   });
 

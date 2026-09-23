@@ -1713,27 +1713,32 @@ function sanitizeDiagEntry(msg) {
 // so a skipped refresh lost the recovery silently and the dropped bytes were
 // never replayed.
 //
-// Bounded, because every reason the refresh can be skipped is transient
-// contention that clears in seconds, and a permanently failing refresh must not
-// become a forever-loop against the API. Giving up after the cap leaves exactly
-// the garbled frames the old code left, so the floor is no worse than before.
+// Bounded, because the early returns it retries past are transient contention
+// that clears in seconds, and a permanently failing refresh must not become a
+// forever-loop against the API. A refresh that hit the capture fetch DEADLINE
+// is not contention but a stalled link, and is not retried at all: each retry
+// would be another `?full=1` capture waiting out a deadline of up to two
+// minutes, where the old code cost exactly one. Giving up after the cap leaves
+// exactly the garbled frames the old code left, so the floor is no worse.
 const DROP_RECOVERY_DELAY_MS = 2000;
 const DROP_RECOVERY_MAX_ATTEMPTS = 5;
 
 /**
  * Should a dropped-output recovery run again?
  *
- * @param {{repainted: boolean, attempt: number, stillActive: boolean}} state
+ * @param {{repainted: boolean, timedOut?: boolean, attempt: number, stillActive: boolean}} state
  *   `repainted` — whether `_onSessionNeedsRefresh` actually rewrote the buffer.
+ *   `timedOut`  - whether it failed at the capture fetch deadline.
  *   `attempt`   — how many have already run, zero-based.
  *   `stillActive` — whether the dropped session is still the one on screen.
  * @returns {boolean}
  */
-function shouldRetryDroppedOutputRecovery({ repainted, attempt, stillActive }) {
+function shouldRetryDroppedOutputRecovery({ repainted, timedOut = false, attempt, stillActive }) {
   // Switched away: `selectSession` repaints from the server on its own, so a
   // retry here would be a second replay of a buffer that is about to be written.
   if (!stillActive) return false;
   if (repainted) return false;
+  if (timedOut) return false;
   return attempt + 1 < DROP_RECOVERY_MAX_ATTEMPTS;
 }
 
