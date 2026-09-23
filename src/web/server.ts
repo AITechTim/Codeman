@@ -1688,6 +1688,27 @@ export class WebServer extends EventEmitter {
         () => `<script>window.__codemanCustomModelClis=${customModelClisJson};</script>\n</head>`
       );
     }
+    // How many columns each run mode indents its transcript by, so a copy can drop
+    // that much. Read off `capabilities` like the payload above and never as an id
+    // list here, so a CLI that declares a gutter later needs no frontend change.
+    // Ids and small integers only, no user-settable strings, so JSON.stringify
+    // alone is enough (same reasoning as __codemanCliAvailable's booleans).
+    //
+    // ⚠️ Outside the `if (!soloSessionId)` block above, unlike every other payload
+    // here: a detached session window (`/session/:id`) runs a terminal, so Ctrl+C
+    // copies there, and an absent map reads as "no session gets a strip". The
+    // toggle used to work in the main window and do nothing in the popup on the
+    // same device. This needs no availability probe, so it costs a solo window
+    // nothing that the run menu's own payloads would have cost it.
+    const gutterClis: Record<string, number> = {};
+    for (const entry of enabledClis()) {
+      const columns = entry.capabilities.transcriptGutter;
+      if (typeof columns === 'number') gutterClis[entry.id] = columns;
+    }
+    html = html.replace(
+      '</head>',
+      () => `<script>window.__codemanTranscriptGutter=${JSON.stringify(gutterClis)};</script>\n</head>`
+    );
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
       html = html.replace('</head>', () => `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
       if (settings.gestureControlEnabled === true) {
