@@ -812,6 +812,14 @@ interface CredStorePolicy {
   seedFiles?: string[];
   /** Seed the WHOLE dir (RO mount → cp -a) — for stores with no shared/host-read state. */
   seedWhole?: boolean;
+  /**
+   * Seed this store ONLY when this environment variable is exactly `1`, read when
+   * the container is created. For credentials that belong to an opt-in tool rather
+   * than to an agent CLI every case already trusts: they are not inert just because
+   * the image lacks the tool (a gh `hosts.yml` token or an Azure refresh token is
+   * usable by anything in the container, and the agent in it is prompt-injectable).
+   */
+  enabledByEnv?: string;
 }
 
 const CRED_STORES: CredStorePolicy[] = [
@@ -857,18 +865,22 @@ const CRED_STORES: CredStorePolicy[] = [
   { rel: '.config/gcloud', seedWhole: true },
   { rel: '.config/opencode', seedWhole: true },
   // GitHub CLI: `hosts.yml` holds the token wherever no system keyring exists (the
-  // Docker server image, a headless Linux host), `config.yml` the preferences. The
-  // agent image routes github.com git credentials through `gh`, so this seed is what
-  // lets an agent clone/push a private repo. A token that lives in a desktop keyring
-  // is not in `hosts.yml` and does not carry in; sign `gh` in inside the container.
-  { rel: '.config/gh', seedFiles: ['hosts.yml', 'config.yml'] },
+  // Docker server image, a headless Linux host), `config.yml` the preferences. An
+  // agent image built with CODEMAN_INSTALL_GH=1 routes github.com git credentials
+  // through `gh`, so this seed is what lets an agent clone/push a private repo. A
+  // token that lives in a desktop keyring is not in `hosts.yml` and does not carry
+  // in; sign `gh` in inside the container. OPT-IN: seeded only when the same switch
+  // that builds gh into the agent image is on, never merely because the file exists.
+  { rel: '.config/gh', seedFiles: ['hosts.yml', 'config.yml'], enabledByEnv: 'CODEMAN_AGENT_IMAGE_INSTALL_GH' },
   // Azure CLI: only the sign-in state. `~/.azure` also accumulates `logs/`,
   // `commands/`, telemetry and (on a bare host) `cliextensions/`, none of which is
   // needed to authenticate; the agent image carries its own extensions outside HOME.
   // `msal_token_cache.json` is plaintext only on Linux (Windows/macOS encrypt it), so
   // this carries a sign-in from the Docker server image or a Linux host.
+  // OPT-IN like gh: the MSAL cache holds refresh tokens for the whole Azure account.
   {
     rel: '.azure',
+    enabledByEnv: 'CODEMAN_AGENT_IMAGE_INSTALL_AZ',
     seedFiles: [
       'azureProfile.json',
       'msal_token_cache.json',
@@ -901,10 +913,14 @@ const CRED_STORES: CredStorePolicy[] = [
  * session state back into the host). Every path is existsSync-gated (on most hosts
  * only a subset exists). Pure-ish IO (no writes; just existence checks + mount specs).
  */
-export function resolveDockerCredentialArtifacts(home: string = homedir()): DockerClaudeArtifacts {
+export function resolveDockerCredentialArtifacts(
+  home: string = homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): DockerClaudeArtifacts {
   const mounts: DockerMount[] = [];
   const seedCopies: DockerSeedCopy[] = [];
   for (const store of CRED_STORES) {
+    if (store.enabledByEnv && env[store.enabledByEnv] !== '1') continue;
     const hostBase = join(home, store.rel);
     if (!existsSync(hostBase)) continue;
     const containerBase = `${CONTAINER_HOME}/${store.rel}`;

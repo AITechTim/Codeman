@@ -76,12 +76,14 @@ COPY --from=docker:29-cli \
 # user signs in to here is what authenticates, and nothing when they have not
 # (the clone then fails fast with AUTH_REQUIRED, exactly as before).
 #
-# Each is OPT-IN and OFF by default: the image is unchanged unless the build
-# gets CODEMAN_INSTALL_GH=1 and/or CODEMAN_INSTALL_AZ=1, which a deployment sets
-# under `build: args:` in docker-compose.override.yml (docker/README.md,
-# "Private repositories"). Off means nothing at all: no apt repository, no
-# package, no extension and no credential-helper entry. The Azure CLI is the
-# heavy one (~600 MB, mostly its bundled Python). The base docker-compose.yaml
+# Each is OPT-IN and OFF by default: the image is functionally unchanged
+# unless the build gets CODEMAN_INSTALL_GH=1 and/or CODEMAN_INSTALL_AZ=1, which
+# a deployment sets under `build: args:` in docker-compose.override.yml
+# (docker/README.md, "Private repositories"). Off installs no apt repository,
+# package, extension or credential-helper entry; all that remains is the
+# AZURE_EXTENSION_DIR variable, its empty directory and one layer that copies
+# and then removes the helper script. The Azure CLI is the heavy one (~600 MB,
+# mostly its bundled Python). The base docker-compose.yaml
 # and .env deliberately do not carry them: turning a CLI on is a per-host
 # choice, which is what the override file is for, and a new .env.example key
 # would make the self-updater refuse existing installs until their .env gained

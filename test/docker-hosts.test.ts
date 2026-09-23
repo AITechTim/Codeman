@@ -351,6 +351,40 @@ describe('resolveDockerCredentialArtifacts (isolated codex/gemini/gcloud/opencod
     expect(mounts.filter((m) => m.readonly && m.dst.includes('cred-seeds')).length).toBeGreaterThanOrEqual(3);
   });
 
+  /** Host files for both opt-in stores, present whether or not the switches are on. */
+  function writeGhAzHostFiles(): void {
+    mkdirSync(join(home, '.config', 'gh'), { recursive: true });
+    writeFileSync(join(home, '.config', 'gh', 'hosts.yml'), '');
+    writeFileSync(join(home, '.config', 'gh', 'config.yml'), '');
+    mkdirSync(join(home, '.azure'), { recursive: true });
+    writeFileSync(join(home, '.azure', 'azureProfile.json'), '{}');
+    writeFileSync(join(home, '.azure', 'msal_token_cache.json'), '{}');
+  }
+  const isGhOrAz = (p: string) => /\.azure|\.config[\\/]gh/.test(p);
+
+  it('gh + az: the DEFAULT environment seeds neither, even when the host files exist', () => {
+    writeGhAzHostFiles();
+    for (const env of [{}, { CODEMAN_AGENT_IMAGE_INSTALL_GH: '0', CODEMAN_AGENT_IMAGE_INSTALL_AZ: '' }]) {
+      const { mounts, seedCopies } = resolveDockerCredentialArtifacts(home, env);
+      expect(mounts.filter((m) => isGhOrAz(m.src))).toEqual([]);
+      expect(seedCopies.filter((s) => isGhOrAz(s.to))).toEqual([]);
+    }
+  });
+
+  it('gh + az: each store follows ONLY its own switch, and only the exact value 1', () => {
+    writeGhAzHostFiles();
+    const dests = (env: NodeJS.ProcessEnv) => resolveDockerCredentialArtifacts(home, env).seedCopies.map((s) => s.to);
+    const ghOnly = dests({ CODEMAN_AGENT_IMAGE_INSTALL_GH: '1' });
+    expect(ghOnly).toContain('/home/agent/.config/gh/hosts.yml');
+    expect(ghOnly.some((d) => d.includes('.azure'))).toBe(false);
+    const azOnly = dests({ CODEMAN_AGENT_IMAGE_INSTALL_AZ: '1' });
+    expect(azOnly).toContain('/home/agent/.azure/msal_token_cache.json');
+    expect(azOnly.some((d) => d.includes('.config/gh'))).toBe(false);
+    expect(
+      dests({ CODEMAN_AGENT_IMAGE_INSTALL_GH: 'true', CODEMAN_AGENT_IMAGE_INSTALL_AZ: 'yes' }).some(isGhOrAz)
+    ).toBe(false);
+  });
+
   it('gh + az: seed only the sign-in files, never logs/extensions/caches', () => {
     mkdirSync(join(home, '.config', 'gh'), { recursive: true });
     writeFileSync(join(home, '.config', 'gh', 'hosts.yml'), '');
@@ -361,7 +395,10 @@ describe('resolveDockerCredentialArtifacts (isolated codex/gemini/gcloud/opencod
     writeFileSync(join(home, '.azure', 'msal_token_cache.json'), '{}');
     writeFileSync(join(home, '.azure', 'config'), '');
 
-    const { mounts, seedCopies } = resolveDockerCredentialArtifacts(home);
+    const { mounts, seedCopies } = resolveDockerCredentialArtifacts(home, {
+      CODEMAN_AGENT_IMAGE_INSTALL_GH: '1',
+      CODEMAN_AGENT_IMAGE_INSTALL_AZ: '1',
+    });
     const dests = seedCopies.map((s) => s.to);
     expect(dests).toContain('/home/agent/.config/gh/hosts.yml');
     expect(dests).toContain('/home/agent/.config/gh/config.yml');

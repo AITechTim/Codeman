@@ -66,7 +66,7 @@ The `build: args:` pair controls the Codeman server image. The `environment:` pa
 
 They are not `.env` settings: turning a CLI on is a per-host choice, which is what the override file is for, and a new `.env.example` key makes the in-app updater refuse to update every existing installation until its `.env` gains the key.
 
-The Azure CLI is the large one, about 600 MB of the roughly 670 MB the pair adds. A CLI left off leaves nothing behind: no apt repository, no package, no `azure-devops` extension and no credential-helper entry, so git for that host behaves exactly as it does without this feature.
+The Azure CLI is the large one, about 600 MB of the roughly 670 MB the pair adds. A CLI left off leaves nothing functional behind: no apt repository, no package, no `azure-devops` extension and no credential-helper entry, so git for that host behaves exactly as it does without this feature. With both off the image is functionally unchanged; it still carries the `AZURE_EXTENSION_DIR` variable, an empty extensions directory and one small layer that copies and then removes the helper script.
 
 ### Signing in
 
@@ -86,9 +86,11 @@ az login --use-device-code     # then: az devops configure --defaults organizati
 
 After that, **Add Case → Clone Repo** accepts private `https://` URLs on those hosts, and `git clone` works from any session. Until a CLI is signed in its helper prints nothing, so a private clone fails immediately with the usual authentication error rather than waiting on a prompt.
 
+**Multi-user mode:** every Codeman user's git runs as the same server account, so these sign-ins would otherwise be shared. Clone Repo therefore runs a **non-admin**'s clone and preflight with every git credential helper cleared (`git -c credential.helper=`): a non-admin can clone public repositories and anything their own SSH setup allows, but not a private https repository through the admin's `gh`/`az` sign-in. Admins, and single-user mode, keep the helpers. A non-admin's own agent sessions still run as that same account; see `docs/security-architecture.md`, multi-user mode.
+
 Azure DevOps is authenticated with an Entra ID access token that the helper requests from `az` for each Git operation, so nothing is written to disk beyond `az`'s own sign-in. An account that has to use a personal access token can set `AZURE_DEVOPS_EXT_PAT` for the container instead (for example under `environment:` in `docker-compose.override.yml`); the helper prefers it when present. SSH remotes are unaffected by any of this and keep using the account's own keys.
 
-In a Docker case built with the CLIs on, a case with credential seeding on copies these sign-ins into its container at launch (`~/.config/gh/hosts.yml` and `config.yml`, plus the sign-in files from `~/.azure`). A case container created before you signed in only picks them up once it is recreated.
+Docker cases copy these sign-ins into a case container only when the matching agent-image switch is on (`CODEMAN_AGENT_IMAGE_INSTALL_GH=1` for `~/.config/gh/hosts.yml` and `config.yml`, `CODEMAN_AGENT_IMAGE_INSTALL_AZ=1` for the sign-in files from `~/.azure`) and the case has credential seeding on. With a switch off they are never copied, even when the files exist, because a GitHub token or an Azure refresh token is usable by anything in the container. The copies are made when the container is **created**, so an existing case container never picks them up: after turning a switch on, signing in, or rebuilding the agent image, **recreate the case container** (remove it; the next session in that case creates a fresh one).
 
 The GitHub agent skill for `gh` installs into the runtime account's home in the same session:
 
