@@ -62,6 +62,8 @@ import {
   type SessionWriteOptions,
 } from './types.js';
 import { resolveAndClaimOmpSessionId } from './utils/omp-session-resolver.js';
+import { claudeTranscriptExists } from './utils/claude-transcript.js';
+import { matchesPattern } from './config/cli-registry/patterns.js';
 import { probeDockerCliVersion } from './docker-hosts.js';
 import { probeRemoteCliVersion } from './remote-hosts.js';
 import type { TerminalMultiplexer, MuxSession } from './mux-interface.js';
@@ -1749,7 +1751,7 @@ export class Session extends EventEmitter {
       // `options.respawnPaneOptions` was built eagerly before this dead-pane
       // check ran, so it still carries the pre-pin ompConfig; rebuild it.
       this._pinOmpRespawnId();
-      const newPid = await mux.respawnPane(this._buildRespawnPaneOptions());
+      const newPid = await mux.respawnPane(await this._buildRespawnPaneOptionsWithResumePin());
       if (!newPid) {
         console.error('[Session] Failed to respawn pane, will create new session');
         needsNewSession = true;
@@ -1765,7 +1767,28 @@ export class Session extends EventEmitter {
     if (isRestored) {
       console.log('[Session] Attaching to existing mux session:', this._muxSession!.muxName);
     } else {
-      // Create a new mux session
+      // Create a new mux session. When this is the FALLBACK after a failed
+      // respawn, the eagerly-built create options still carry the unpinned
+      // launch seed, so a session whose transcript exists would meet the same
+      // `--session-id ... already in use` refusal the respawn just lost to —
+      // the recovery of last resort failing for the very reason it was needed.
+      // A genuinely new session has no transcript under any of its candidate
+      // ids, so nothing is pinned and its command shape is unchanged.
+      //
+      // `_resumeSessionId` is written alongside, not just the create options:
+      // this branch leaves `isRestored` false, so the block that sets
+      // `_claudeSessionId` below reads that field and would otherwise settle on
+      // `this.id` while the CLI resumes the chain tail. The response viewer,
+      // Read My Mind and the unified-list alias map all read `_claudeSessionId`
+      // until the next first-hand hook, so the two have to name the same
+      // conversation.
+      if (needsNewSession) {
+        const pinned = (await this._buildRespawnPaneOptionsWithResumePin()).resumeSessionId;
+        if (pinned) {
+          options.createSessionOptions.resumeSessionId = pinned;
+          this._resumeSessionId = pinned;
+        }
+      }
       this._muxSession = await mux.createSession(options.createSessionOptions);
       console.log('[Session] Created mux session:', this._muxSession.muxName);
       // No extra sleep — createSession() already waits for tmux readiness
@@ -1878,21 +1901,7 @@ export class Session extends EventEmitter {
     }
 
     this._pinOmpRespawnId();
-    const options = this._buildRespawnPaneOptions();
-    // Unlike the dead-pane respawn, this one kills a WORKING pane whose conversation
-    // already has a transcript, and a CLI that launches with `--session-id <id>` refuses
-    // an id that is already in use (claude: `Error: Session ID ... is already in use.`),
-    // which turned an endpoint switch into a dead pane and a lost session. A launch that
-    // declares a `fallback` chain renders `resume || new` once a resume id is set, the
-    // same `--resume <id> || --session-id <id>` shape the docker and remote pane commands
-    // already use, so pin the live conversation id for THIS respawn only. The registry
-    // shape is the gate, not the CLI's name: an entry whose resume id is minted by the
-    // CLI itself (codex/pi/omp/grok) never declares that chain, and its resume field is
-    // read from its own `<Mode>Config` rather than this top-level one anyway.
-    if (!options.resumeSessionId && getCli(this.mode)?.launch.chain === 'fallback') {
-      options.resumeSessionId = this._claudeSessionId ?? this.id;
-    }
-    const newPid = await mux.respawnPane(options);
+    const newPid = await mux.respawnPane(await this._buildRespawnPaneOptionsWithResumePin());
     if (!newPid) {
       console.error('[Session] restartCli: respawnPane failed for', this._muxSession.muxName);
       return false;
@@ -1945,6 +1954,108 @@ export class Session extends EventEmitter {
       owner: this._owner,
     };
     return this._withCustomModelLaunchModel(options);
+  }
+
+  /**
+   * Respawn options for a pane whose command is being REPLACED, with the
+   * conversation pinned so the relaunch resumes rather than collides.
+   *
+   * A CLI that launches with `--session-id <id>` refuses an id that is already
+   * in use (claude: `Error: Session ID ... is already in use.`), and every
+   * session whose agent has been prompted owns a transcript under that id. So
+   * relaunching such a pane with the bare launch line fails, the pane dies
+   * again immediately, and the user's conversation is stranded. A launch that
+   * declares a `fallback` chain renders `resume || new` once a resume id is
+   * set, which is the shape that survives both cases.
+   *
+   * Three candidates are tried in priority order — the conversation chain's
+   * tail, the launch seed, then the session's own id — and the first one a
+   * transcript backs is pinned. Four conditions gate that walk, each protecting
+   * against a way of resuming the WRONG conversation or of making a working
+   * relaunch fail.
+   *
+   * ⚠️ **A remote or docker session is never pinned.** Unlike `restartCli()`,
+   * whose route refuses both, the dead-pane respawn is reached by every session
+   * shape. Their pane commands (`buildRemoteLaunchCommand`,
+   * `claudeDockerPaneCommand`) already render a SELF-HEALING
+   * `--session-id <sid> || --resume <sid>`, and both flip to resume-first the
+   * moment the resume id differs from the session id. The conversation lives on
+   * the far side, so a local id pinned onto it resolves to nothing there, the
+   * resume fails, and the `--session-id` fallback then collides with the
+   * transcript the far side really does hold — both branches fail and the pane
+   * dies. `_pinOmpRespawnId()` refuses remote for the same reason.
+   *
+   * ⚠️ **The candidates come from the conversation CHAIN, never from
+   * `_claudeSessionId`.** That field holds either a first-hand id from the
+   * CLI's own hook payload or a history correlation, which is a guess keyed on
+   * the working directory. `_recordClaudeSessionInChain()` refuses a guess
+   * precisely so it cannot "write a foreign conversation into this pane's
+   * permanent record", and launching from one would do worse than the display
+   * bug that rule exists to prevent: the relaunched CLI would open and WRITE to
+   * a conversation that was never this pane's. The chain's tail is the live
+   * conversation and is hook-vouched, so it leads the walk, ahead of the launch
+   * seed, which is written once at construction and never moves off a `/clear`.
+   *
+   * ⚠️ **Every candidate must be backed by a transcript, the session's own id
+   * included, and a candidate that has none is passed over rather than ending
+   * the walk.** A pin that differs from the session id leaves
+   * `--session-id <this.id>` in the fallback branch, so a resume that finds
+   * nothing collides there and the pane dies exactly as it did before this
+   * pinning existed. Pinning `this.id` renders the self-healing
+   * `--resume <id> || --session-id <id>`, which is correct whether or not a
+   * transcript exists, but a pane that has none pays for the shape twice:
+   * claude prints "No conversation found" into the scrollback of a session that
+   * is brand new, and `wrapWithNice()` prefixes only the FIRST branch of the
+   * rendered `a || b`, so the branch that actually runs loses its priority for
+   * the life of the session. Falling off the end of the walk therefore pins
+   * nothing, which is the right answer: with no transcript anywhere there is
+   * nothing for the bare `--session-id <this.id>` to collide with.
+   *
+   * The create route pre-validates a resume id for the same reason, though it
+   * additionally requires the transcript be substantial — here mere existence
+   * is the question, because a one-line transcript still makes `--session-id`
+   * collide.
+   *
+   * The registry shape is the last gate, not the CLI's name: an entry whose
+   * resume id is minted by the CLI itself (codex/pi/omp/grok) declares no
+   * `fallback` chain and reads its resume field from its own `<Mode>Config`.
+   *
+   * `reattachRemote()` deliberately does NOT call this. It re-runs the remote
+   * session command, which attaches to the durable remote tmux with the agent
+   * still inside it and renders no local `--session-id` to collide.
+   */
+  private async _buildRespawnPaneOptionsWithResumePin(): Promise<import('./mux-interface.js').RespawnPaneOptions> {
+    const options = this._buildRespawnPaneOptions();
+    if (this._remote || this._docker) return options;
+    const entry = getCli(this.mode);
+    if (entry?.launch.chain !== 'fallback') return options;
+
+    const resumeIdPattern = entry.launch.params?.resumeId;
+    const configDir = this._claudeConfigDir();
+    const chainTail = this._claudeSessionChain[this._claudeSessionChain.length - 1];
+    const candidates = [chainTail, options.resumeSessionId, this.id].filter((v): v is string => !!v);
+    for (const candidate of candidates) {
+      // A session Codeman DISCOVERED on the socket rather than created carries a
+      // synthetic `restored-<fragment>` id, which fails claude's `uuid` token
+      // pattern. The renderer would silently drop the resume flag and emit the
+      // unpinned command, so say so here rather than letting the caller believe
+      // the pane was pinned.
+      if (resumeIdPattern?.type === 'token' && !matchesPattern(resumeIdPattern.pattern, candidate)) {
+        console.log(`[Session] Not pinning resume id ${candidate} for relaunch: the CLI cannot accept that id shape`);
+        continue;
+      }
+      if (!(await claudeTranscriptExists(candidate, configDir))) continue;
+      options.resumeSessionId = candidate;
+      return options;
+    }
+    // Nothing on disk to collide with, so the bare `--session-id <this.id>` the
+    // unpinned options already carry is the correct command.
+    return options;
+  }
+
+  /** The session's Claude config dir when it has been relocated (#255), else undefined. */
+  private _claudeConfigDir(): string | undefined {
+    return this._envOverrides?.CLAUDE_CONFIG_DIR;
   }
 
   /**
