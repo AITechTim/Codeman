@@ -2067,19 +2067,61 @@ class CodemanApp {
         + (this._loadBufferQueue?.reduce((s, w) => s + w.data.length, 0) || 0)
         + (this._terminalWriteInFlightBytes || 0);
       if (queued + data.data.length > 131072) { // 128KB — drop to prevent accumulation
-        // Schedule a self-recovery once the
-        // queue drains (debounced to avoid hammering the API during sustained bursts).
-        if (!this._clientDropRecoveryTimer) {
-          this._clientDropRecoveryTimer = setTimeout(() => {
-            this._clientDropRecoveryTimer = null;
-            this._onSessionNeedsRefresh();
-          }, 2000);
-        }
+        // The bytes are gone from the stream now, so the recovery is the only
+        // thing that puts this terminal back in step with the PTY.
+        _crashDiag.log(`TERMINAL DROP: ${(queued / 1024).toFixed(0)}KB queued`);
+        this._scheduleDroppedOutputRecovery(data.id);
         return;
       }
 
       this.batchTerminalWrite(data.data);
     }
+  }
+
+  /**
+   * Put the terminal back in step after a dropped frame, and keep trying until
+   * something actually repaints.
+   *
+   * ⚠️ A fire-and-forget timer is not a recovery, which is what this used to be:
+   * it nulled its own handle and then called `_onSessionNeedsRefresh()`, whose
+   * early returns are most likely to fire during the very burst that caused the
+   * drop. A skipped refresh lost the recovery with nothing left to retry it, so
+   * the hole stayed in the stream — and a hole in a TUI byte stream is a
+   * desynced cursor, which is muffled text (issue #464).
+   *
+   * Debounced by the same 2s as before, so a sustained burst still collapses
+   * into one attempt rather than hammering the API; bounded by
+   * `DROP_RECOVERY_MAX_ATTEMPTS`, because every reason the refresh can be
+   * skipped is transient contention. Giving up after the cap leaves exactly
+   * what the old code left, so the floor is no worse.
+   *
+   * @param {string} sessionId - the session whose output was dropped
+   * @param {number} [attempt] - zero-based, for the bound
+   */
+  _scheduleDroppedOutputRecovery(sessionId, attempt = 0) {
+    if (!sessionId || this._clientDropRecoveryTimer) return;
+    this._clientDropRecoveryTimer = setTimeout(async () => {
+      this._clientDropRecoveryTimer = null;
+      let repainted = false;
+      try {
+        repainted = (await this._onSessionNeedsRefresh({ id: sessionId })) === true;
+      } catch {
+        // Treated as "did not repaint" — retrying is the entire point of this.
+      }
+      const retry = window.CodemanDroppedOutput.shouldRetryDroppedOutputRecovery({
+        repainted,
+        attempt,
+        stillActive: this.activeSessionId === sessionId,
+      });
+      if (retry) {
+        _crashDiag.log(`DROP RECOVERY: attempt ${attempt + 1} did not repaint, retrying`);
+        this._scheduleDroppedOutputRecovery(sessionId, attempt + 1);
+      }
+      // Read through `window.` like terminal-ui.js does with its own constants:
+      // a bare global resolves in a browser but not in the vm harnesses the gate
+      // runs app.js under, and this body executes inside a timer where a
+      // ReferenceError would be swallowed — taking the recovery with it.
+    }, window.CodemanDroppedOutput.DROP_RECOVERY_DELAY_MS);
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -2705,15 +2747,27 @@ class CodemanApp {
     }
   }
 
+  /**
+   * Reload this session's buffer from the server.
+   *
+   * ⚠️ Returns whether it ACTUALLY reloaded. Four of the paths out of here are
+   * early returns, and two of them — a buffer load in flight, a refresh already
+   * owning this session — are most likely to be true during exactly the output
+   * burst that makes a caller need this. A caller that treats "called" as
+   * "recovered" silently loses the recovery; `_scheduleDroppedOutputRecovery`
+   * is the one that cannot afford to.
+   *
+   * @returns {Promise<boolean>} true only once a response has been applied.
+   */
   async _onSessionNeedsRefresh(event = {}) {
     // Server sends this after SSE backpressure clears — terminal data was dropped,
     // so reload the buffer to recover from any display corruption.
     const sessionId = this.activeSessionId;
-    if (event?.id && event.id !== sessionId) return;
-    if (!sessionId || !this.terminal) return;
+    if (event?.id && event.id !== sessionId) return false;
+    if (!sessionId || !this.terminal) return false;
     // Skip if buffer load already in progress — avoids competing clear+rewrite cycles
-    if (this._isLoadingBuffer) return;
-    if (this._terminalRefreshOwner?.sessionId === sessionId) return;
+    if (this._isLoadingBuffer) return false;
+    if (this._terminalRefreshOwner?.sessionId === sessionId) return false;
     const refreshOwner = { sessionId };
     this._terminalRefreshOwner = refreshOwner;
     try {
@@ -2739,7 +2793,7 @@ class CodemanApp {
       // Bail on a tab switch mid-fetch: writing here would paint this session's
       // history into the terminal the user is now looking at. The window is two
       // fetches wide in the fallback case, so this guard is not optional.
-      if (this.activeSessionId !== sessionId || this._terminalRefreshOwner !== refreshOwner) return;
+      if (this.activeSessionId !== sessionId || this._terminalRefreshOwner !== refreshOwner) return false;
       if (data.terminalBuffer) {
         // This refresh is SERVER-triggered, so a user quietly reading scrollback
         // did not ask for it and must not be dragged to the bottom by it (#259).
@@ -2789,8 +2843,10 @@ class CodemanApp {
       // replay. Leaving the marker set there refetched on every reconnect for
       // the life of the page.
       this._markTerminalBufferReconciled(sessionId);
+      return true;
     } catch (err) {
       console.error('needsRefresh reload failed:', err);
+      return false;
     } finally {
       if (this._terminalRefreshOwner === refreshOwner) this._terminalRefreshOwner = null;
     }
