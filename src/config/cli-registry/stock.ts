@@ -83,7 +83,10 @@ function agentDefaults(): Pick<
 // (e.g. claude was registered as Anthropic's brand orange, `#d97757`, but the
 // button renders blue): `docs/cli-registry.md`'s own "transcribed, not
 // authoritative, re-measure before wiring one up" warning for this
-// DECLARED-FOR-LATER field, taken literally. This is a data-accuracy fix only —
+// DECLARED-FOR-LATER field, taken literally. The one exception is GEMINI, whose
+// run-button border (#60a5fa) is the only one that disagrees with its own tab badge
+// and run-mode dot (#8ab4f8); it takes the badge colour, so every accent names the
+// same hex the frontend uses as that CLI's flat identity. This is a data-accuracy fix only —
 // `accent` still has no reader, so nothing rendered changes because of it.
 const CLAUDE: CliEntry = {
   id: 'claude' as CliEntry['id'],
@@ -630,7 +633,8 @@ const GEMINI: CliEntry = {
   id: 'gemini' as CliEntry['id'],
   label: 'Gemini',
   shortBadge: 'GM',
-  accent: '#60a5fa',
+  // The tab badge / run-mode-dot colour, not the run-button border (see the note above CLAUDE).
+  accent: '#8ab4f8',
   enabled: true,
   stock: true,
   order: 30,
@@ -916,9 +920,9 @@ const GROK: CliEntry = {
   shortBadge: 'GK',
   // Upstream hand-authored a charcoal GRADIENT across 4+ CSS spots (welcome button, tab
   // badge, run-mode dot, mobile skin overrides) rather than one flat colour; our registry's
-  // `accent` is a single hex, so this is the closest single value (the run-mode-dot colour,
-  // zinc-400). Nothing reads `accent` yet — the frontend is untouched in this change and
-  // keeps its own hand-authored CSS; the field is here so the entry is complete.
+  // `accent` is a single hex, so this is the closest single value (zinc-300, the run-button
+  // border and tab-badge colour). Nothing reads `accent` yet: the frontend keeps its own
+  // hand-authored CSS; the field is here so the entry is complete.
   accent: '#d4d4d8',
   enabled: true,
   stock: true,

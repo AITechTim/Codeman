@@ -695,7 +695,7 @@ export interface CliEntry {
   /**
    * Single hex colour, measured from the CLI's actual `.btn-toolbar.btn-run.mode-<id>`
    * gradient in styles.css (see stock.ts's comment above `CLAUDE` for the exact
-   * methodology). DECLARED-FOR-LATER (below) — no code reads this yet; styles.css's
+   * methodology). DECLARED-FOR-LATER (above) — no code reads this yet; styles.css's
    * gradients are still hand-authored per id, not derived from this field via any
    * CSS custom property. There is no `--cli-accent` variable in the codebase.
    */
