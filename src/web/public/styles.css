@@ -2433,6 +2433,51 @@ html[data-tab-orientation='vertical'] .tab-rail .session-tab .tab-name-prefix {
   display: inline-flex;
 }
 
+/* The agent inside the pane has exited (Ark0N/Codeman#446). Unlike the badge
+   above this one carries text the server computed, so it is added and removed
+   by the renderer rather than toggled by a class. */
+.session-tab .tab-exited-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 4px;
+  margin-left: 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--danger);
+}
+
+/* An exited agent quiets the status dot, which otherwise reports `status` and
+   so stays green (or pulses, for a session the exit caught mid-turn) beside a
+   badge saying the agent is gone. `status` itself is deliberately untouched —
+   `error` is the PTY-exit breaker's value and makes the browser offer a restart
+   — so this is a rendering rule only, and it matches `.tab-status.ended`.
+
+   ⚠ Three states are excluded BY HAND rather than by cascade, the same way the
+   rich-rail dot rules below do it: a dot turning red or yellow because a
+   session is blocked on a human outranks "the agent exited", and this selector
+   is specific enough (0,5,0) to have beaten those (0,3,0) rules otherwise. The
+   third is `.tab-status.error` (0,2,0), which is the PTY-exit breaker's state
+   and the one the browser answers with a "restart it?" confirm — the same
+   argument that protects the two alert classes, and it reaches the dot rather
+   than the tab, which is why the `:not()` sits on `.tab-status` here and on
+   `.session-tab` there. The spinner ring is a pseudo-element the skin blocks
+   cannot reach, so it needs hiding explicitly rather than by unsetting the
+   animation. */
+.session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status:not(.error) {
+  background: var(--text-muted);
+  opacity: 0.5;
+  animation: none;
+}
+.session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle) .tab-status:not(.error)::after {
+  display: none;
+}
+
 /* ===== Tab action icons: active tab only =================================
    All three per-tab icons live in a .tab-actions wrapper (in flow; it adds
    no width of its own while the children keep the width:0 collapse above).
@@ -18475,6 +18520,26 @@ html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail
   .tab-status.busy::after {
   inset: -4px;
   border-width: 2px;
+}
+
+/* The exited-agent mute, again, for the rich rail (Ark0N/Codeman#446).
+   The strip's rule is (0,5,0) and the three state rules above are (0,9,1), so
+   on this rail an exited session kept a full green dot and the working halo
+   beside a badge reading "exited" — measured, the contradiction the mute
+   exists to remove. This twin matches their (0,9,1) exactly and therefore MUST
+   stay below them in source order; moving it above silently restores the green
+   dot. It also clears the halo, which is a box-shadow the strip's rule never
+   had to think about.
+   ⚠ The alert exclusions are repeated by hand for the same reason they are on
+   the rules above: a dot turning red or yellow because a session is blocked on
+   a human outranks "the agent exited". */
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact)
+  .tab-rail
+  .session-tab.tab-agent-exited:not(.tab-alert-action):not(.tab-alert-idle)
+  .tab-status:not(.error) {
+  background: var(--text-muted);
+  opacity: 0.5;
+  box-shadow: none;
 }
 
 /* Card accents: the same three colours as every other session surface, and the
