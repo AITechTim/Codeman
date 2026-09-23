@@ -17,9 +17,9 @@
 // a headless Terminal reports `_renderService: undefined`, so a test here would
 // pass whether or not the field still exists, which is worse than no test.
 //
-// So this guards the next best thing: the dependency range those field names
-// were verified against. A major bump fails here, loudly, and sends someone to
-// re-verify `_kickRenderer` by hand in a browser. The failure mode being
+// So this guards the next best thing: the exact xterm version those field names
+// were verified against, as resolved in the lockfile. ANY bump fails here,
+// loudly, and sends someone to re-verify `_kickRenderer` by hand in a browser. The failure mode being
 // defended against is silent — every access in `_kickRenderer` is
 // optional-chained, so a renamed field degrades it to a permanent no-op with no
 // error, no log, and a terminal that simply freezes again.

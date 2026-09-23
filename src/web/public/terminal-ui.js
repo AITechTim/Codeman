@@ -1093,7 +1093,8 @@ Object.assign(CodemanApp.prototype, {
         // a shape the PTY is never told about, and Claude Code computes its
         // repaints from the shape it was told. Withhold both, or neither —
         // a reflow nothing is rendering for buys nothing and costs correctness.
-        const dims = this.activeSessionId && !keyboardUp && !detachedElsewhere ? this.syncTerminalGeometry() : null;
+        const dims =
+          this.activeSessionId && !keyboardUp && !detachedElsewhere ? this._geometryForResizeRequest() : null;
         // ⚠️ A null measurement is NOT a reason to report the floor. It used to
         // fall back to a bare 40x10, which tells the PTY a shape nothing measured
         // and xterm does not hold — the write-only guess this whole change exists
@@ -1112,9 +1113,12 @@ Object.assign(CodemanApp.prototype, {
             // IMPORTANT: Only clear when we're actually sending SIGWINCH (dims changed).
             // Clearing without a subsequent Ink redraw leaves the terminal blank.
             const activeResizeSession = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+            // Not while another device holds the width: the columns were not
+            // reflowed here, and a refused resize brings no redraw after it.
             if (
               activeResizeSession &&
               activeResizeSession.mode !== 'shell' &&
+              !this._paneWidthRefused &&
               this.terminal &&
               this.isTerminalAtBottom()
             ) {
@@ -5616,6 +5620,33 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * The geometry to ASK the server for, applied locally only as far as the PTY
+   * can follow it.
+   *
+   * Ordinarily that is all of it: `syncTerminalGeometry()`. While another
+   * device holds the width (`_paneWidthRefused`, set by `_onPtyGeometryReport`)
+   * it is not. Fitting then re-wraps xterm to the container's columns, the
+   * request is refused, the report puts the PTY's columns back, and the whole
+   * buffer re-wraps twice per ask, with the viewport pointing at a different
+   * part of the scrollback in between. The mobile retry asks every 30 seconds,
+   * so that happened on a timer for as long as the refusal lasted. So the
+   * columns stay at the PTY's (the #464 invariant: the browser never draws at
+   * a width the PTY does not have), the rows follow the container (they are
+   * never adopted, see reconcilePtyGeometry), and the container's columns go
+   * out as the request. An accepted request is adopted by the report.
+   *
+   * @returns {{cols: number, rows: number}|null} the geometry to request
+   */
+  _geometryForResizeRequest() {
+    if (!this._paneWidthRefused) return this.syncTerminalGeometry();
+    const wanted = this.getTerminalDimensions();
+    if (!wanted || !this.terminal) return null;
+    if (!this._resizeTerminalTo({ cols: this.terminal.cols, rows: wanted.rows })) return null;
+    this._scheduleOverflowAffordanceSync();
+    return wanted;
+  },
+
+  /**
    * Re-measure after something changed the CELL size, and tell the server.
    *
    * ⚠️ A font change is a geometry change. Bigger glyphs mean fewer columns in
@@ -5677,8 +5708,9 @@ Object.assign(CodemanApp.prototype, {
     // a pane it does not own is not its to refit either.
     if (!this.isSoloWindow && this.detachedSessions?.has(sessionId)) return false;
     // Fit, floor, and apply in one step so the numbers below are the numbers
-    // xterm is actually holding.
-    const dims = this.syncTerminalGeometry();
+    // xterm is actually holding (or, while another device holds the width,
+    // the numbers this container would hold if the PTY followed).
+    const dims = this._geometryForResizeRequest();
     if (!dims) return false;
     // Did the dimensions actually change since the last resize we sent? Callers
     // use this to skip work (e.g. the post-resize TUI-redraw settle) when no

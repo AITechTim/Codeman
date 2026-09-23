@@ -24,7 +24,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import xtermHeadless from '@xterm/headless';
 
 const { Terminal } = xtermHeadless as unknown as {
@@ -47,7 +47,6 @@ function loadGeometry() {
     context.window as {
       CodemanTerminalGeometry: {
         clampTerminalDimensions: (p: Partial<Dims> | null | undefined) => Dims | null;
-        terminalGeometryAgrees: (a: Dims | null, b: Dims | null) => boolean;
         reconcilePtyGeometry: (local: Dims | null, pty: Partial<Dims> | null) => { adopt: boolean; oversized: boolean };
         TERMINAL_MIN_COLS: number;
         TERMINAL_MIN_ROWS: number;
@@ -226,12 +225,15 @@ describe('exactly one function may change the terminal size', () => {
     expect(body).toContain('this._resizeTerminalTo(dims)');
   });
 
-  // A whole-repo sweep rather than a spot check, so a NEW call site trips it
-  // rather than quietly reopening #464. Scoped to the MAIN terminal: the split
+  // A sweep of every module that touches the main terminal rather than a spot
+  // check, so a NEW call site there trips it rather than quietly reopening
+  // #464. A module outside the list below is not covered. Scoped to the MAIN
+  // terminal: the split
   // pane, the teammate windows and the log viewer are separate xterm instances
   // with their own PTYs (or none), and each owns its own sizing.
   it('no other call site fits the main terminal behind its back', () => {
-    const MAIN_TERMINAL_FIT = /^(?!.*(?:_splitPane|entry\.fitAddon)).*fitAddon[?.]*\.fit\(\)/;
+    // `fit(` optionally called through `?.`, so `fitAddon?.fit?.()` counts too.
+    const MAIN_TERMINAL_FIT = /^(?!.*(?:_splitPane|entry\.fitAddon)).*fitAddon[?.]*\.fit(?:\?\.)?\(\)/;
     const offenders: string[] = [];
     for (const rel of [
       'src/web/public/terminal-ui.js',
@@ -293,7 +295,7 @@ describe('exactly one function may change the terminal size', () => {
   it('sendResize yields a detached session BEFORE touching geometry, not after', () => {
     const body = bodyOf(terminalUi, 'async sendResize(sessionId, options = {}) {');
     const yieldAt = body.indexOf('detachedSessions?.has(sessionId)) return false');
-    const fitAt = body.indexOf('this.syncTerminalGeometry()');
+    const fitAt = body.indexOf('this._geometryForResizeRequest()');
     expect(yieldAt, 'the detached-session yield is gone').toBeGreaterThan(-1);
     expect(fitAt, 'sendResize no longer syncs geometry').toBeGreaterThan(-1);
     expect(
@@ -308,7 +310,7 @@ describe('exactly one function may change the terminal size', () => {
     expect(start).toBeGreaterThan(-1);
     const block = terminalUi.slice(start, terminalUi.indexOf("window.addEventListener('resize', throttledResize)"));
     const guardAt = block.indexOf('!keyboardUp && !detachedElsewhere');
-    const syncAt = block.indexOf('this.syncTerminalGeometry()');
+    const syncAt = block.indexOf('this._geometryForResizeRequest()');
     expect(guardAt).toBeGreaterThan(-1);
     expect(syncAt, 'the geometry sync must sit INSIDE the guard').toBeGreaterThan(guardAt);
   });
@@ -461,5 +463,104 @@ describe('the server reports the geometry the PTY actually holds', () => {
     expect(read('src/web/public/terminal-ui.js')).toContain(
       'screen.getBoundingClientRect().width - container.clientWidth > 1'
     );
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// A refused width must not be re-applied locally on every ask. The real mixin
+// methods, run against a fake terminal whose FitAddon behaves like xterm's.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('while another device holds the width', () => {
+  const SESSION = 'session-A';
+
+  function makeApp() {
+    const FakeCodemanApp = function () {} as unknown as { prototype: Record<string, unknown> };
+    const context = vm.createContext({
+      console,
+      setTimeout,
+      clearTimeout,
+      setInterval: vi.fn(),
+      clearInterval: vi.fn(),
+      CodemanApp: FakeCodemanApp,
+      window: { addEventListener: vi.fn(), removeEventListener: vi.fn(), innerWidth: 400 },
+      document: { addEventListener: vi.fn(), getElementById: () => null },
+    });
+    vm.runInContext(read('src/web/public/constants.js'), context, { filename: 'constants.js' });
+    vm.runInContext(read('src/web/public/terminal-ui.js'), context, { filename: 'terminal-ui.js' });
+    const mixin = FakeCodemanApp.prototype as Record<string, (...a: unknown[]) => unknown>;
+    // The phone's container: 57x13. Every resize xterm performs is recorded,
+    // because a resize is a re-wrap of the whole buffer.
+    const resizes: Array<[number, number]> = [];
+    const terminal = {
+      cols: 80,
+      rows: 24,
+      resize(cols: number, rows: number) {
+        resizes.push([cols, rows]);
+        this.cols = cols;
+        this.rows = rows;
+      },
+    };
+    const proposal = { cols: 57, rows: 13 };
+    const sent: Array<{ c: number; r: number }> = [];
+    const app = Object.assign(Object.create(mixin), {
+      terminal,
+      fitAddon: {
+        proposeDimensions: () => ({ ...proposal }),
+        // xterm's FitAddon resizes to the raw proposal.
+        fit: () => terminal.resize(proposal.cols, proposal.rows),
+      },
+      activeSessionId: SESSION,
+      detachedSessions: new Set<string>(),
+      isSoloWindow: false,
+      _lastResizeDims: null,
+      _wsReady: true,
+      _wsSessionId: SESSION,
+      _ws: { send: (frame: string) => sent.push(JSON.parse(frame)) },
+      _notePaneOwnedElsewhere: vi.fn(),
+    }) as Record<string, unknown> & {
+      sendResize: (id: string) => Promise<boolean>;
+      _onPtyGeometryReport: (id: string, cols: number, rows: number) => void;
+      _paneWidthRefused?: boolean;
+    };
+    return { app, terminal, resizes, sent, proposal };
+  }
+
+  it('asks for its own width again without re-wrapping to it until the PTY follows', async () => {
+    const { app, terminal, resizes, sent } = makeApp();
+    await app.sendResize(SESSION);
+    expect(sent.at(-1)).toMatchObject({ c: 57, r: 13 });
+    // Refused: the desktop keeps the pane at 198 columns.
+    app._onPtyGeometryReport(SESSION, 198, 43);
+    expect(terminal.cols).toBe(198);
+    expect(app._paneWidthRefused).toBe(true);
+
+    // The retry timer asks again. Nothing about the screen changed, so xterm
+    // must not be re-wrapped to 57 and back (it used to be, every 30 seconds).
+    resizes.length = 0;
+    await app.sendResize(SESSION);
+    app._onPtyGeometryReport(SESSION, 198, 43);
+    expect(resizes).toEqual([]);
+    expect(terminal.cols).toBe(198);
+    // It still ASKS for this screen's width, which is how it recovers.
+    expect(sent.at(-1)).toMatchObject({ c: 57, r: 13 });
+
+    // The desktop went idle and the request took: the report is adopted.
+    await app.sendResize(SESSION);
+    app._onPtyGeometryReport(SESSION, 57, 13);
+    expect(terminal.cols).toBe(57);
+    expect(app._paneWidthRefused).toBe(false);
+  });
+
+  it('still follows the container\u2019s rows while the width is held elsewhere', async () => {
+    const { app, terminal, resizes, proposal } = makeApp();
+    await app.sendResize(SESSION);
+    app._onPtyGeometryReport(SESSION, 198, 43);
+    resizes.length = 0;
+    proposal.rows = 20; // keyboard dismissed
+    await app.sendResize(SESSION);
+    // Rows only: the columns stay at the width the PTY has.
+    expect(resizes).toEqual([[198, 20]]);
+    expect(terminal.cols).toBe(198);
   });
 });

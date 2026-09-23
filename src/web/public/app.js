@@ -6652,6 +6652,10 @@ class CodemanApp {
       // Fit terminal to container BEFORE writing any buffer data.
       // If the browser was resized while viewing another session, the terminal
       // canvas may be at stale dimensions — content would render at wrong width.
+      // A width refusal belonged to the PREVIOUS session's pane, and while it
+      // stands sendResize keeps the columns it last adopted; this pane's own
+      // report re-establishes it if another device holds this one too.
+      this._paneWidthRefused = false;
       this.syncTerminalGeometry();
 
       // Also push the new dimensions to the PTY. Without this, codex/codeman

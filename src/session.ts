@@ -1973,6 +1973,7 @@ export class Session extends EventEmitter {
           env: buildMuxAttachEnv(cliExportsTruecolor(this.mode)),
         })
       );
+      this._notePtySpawnGeometry(ptyCols, ptyRows);
     } catch (spawnErr) {
       console.error(`[Session] Failed to spawn PTY for ${options.spawnErrLabel}:`, spawnErr);
       this.emit('error', `Failed to attach to mux session: ${spawnErr}`);
@@ -2684,6 +2685,7 @@ export class Session extends EventEmitter {
             env: { ...buildClaudeEnv(this.id), ...(this._envOverrides ?? {}) },
           })
         );
+        this._notePtySpawnGeometry(120, 40);
       } catch (spawnErr) {
         console.error('[Session] Failed to spawn Claude PTY:', spawnErr);
         this._status = 'stopped';
@@ -3306,6 +3308,7 @@ export class Session extends EventEmitter {
             env: buildShellEnv(this.id),
           })
         );
+        this._notePtySpawnGeometry(120, 40);
       } catch (spawnErr) {
         console.error('[Session] Failed to spawn shell PTY:', spawnErr);
         this._status = 'stopped';
@@ -3415,6 +3418,7 @@ export class Session extends EventEmitter {
               env: { ...buildClaudeEnv(this.id), ...(this._envOverrides ?? {}) },
             })
           );
+          this._notePtySpawnGeometry(120, 40);
         } catch (spawnErr) {
           console.error('[Session] Failed to spawn Claude PTY for runPrompt:', spawnErr);
           this.emit(
@@ -4102,6 +4106,17 @@ export class Session extends EventEmitter {
   private _ptyRows = 40;
 
   /**
+   * Record the geometry a PTY was just spawned at. A reattached pane keeps the
+   * tmux window's size, not the constructor's 120x40, and without this
+   * `ptyGeometry` reported the old numbers for a live pane and the dedupe in
+   * `resize()` skipped a real resize that happened to match them.
+   */
+  private _notePtySpawnGeometry(cols: number, rows: number): void {
+    this._ptyCols = cols;
+    this._ptyRows = rows;
+  }
+
+  /**
    * The geometry the CLI is actually drawing for, or null when nothing is
    * drawing.
    *
@@ -4111,11 +4126,11 @@ export class Session extends EventEmitter {
    * than wrong-sized output, because Claude Code's repaints are computed from
    * the width it was told (issue #464). Both transports report this back.
    *
-   * ⚠️ NULL WITHOUT A PANE, never the field values. `resize()` writes
-   * `_ptyCols`/`_ptyRows` only when `ptyProcess` is set, and nothing seeds them
-   * from the spawn geometry, so a session with a dead pane — or one created
-   * through the API and never started — still holds the constructor defaults
-   * of 120x40. Reporting those made a client adopt a size no process had ever
+   * ⚠️ NULL WITHOUT A PANE, never the field values. The fields are seeded at
+   * spawn (`_notePtySpawnGeometry`) and moved by `resize()`, but a session with
+   * a dead pane (or one created through the API and never started) still
+   * holds the constructor defaults of 120x40, or the size of a pane that is
+   * gone. Reporting those made a client adopt a size no process had ever
    * been told, and on anything narrower than 120 columns it claimed another
    * device owned the pane when none existed. `reconcilePtyGeometry` treats a
    * report with no finite numbers as no evidence, which is the truth here.
@@ -4211,7 +4226,7 @@ export class Session extends EventEmitter {
       if (Date.now() - this._lastDesktopActivityAt < Session.DESKTOP_CLAIM_IDLE_MS) {
         // Declined. The caller is told nothing here on purpose — the decision
         // belongs to the session, not the socket — but the caller MUST report
-        // `ptyCols`/`ptyRows` back afterwards so the asking client can adopt
+        // `ptyGeometry` back afterwards so the asking client can adopt
         // the shape it did not get. Both transports do; see issue #464.
         return;
       }

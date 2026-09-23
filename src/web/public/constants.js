@@ -1770,11 +1770,6 @@ function clampTerminalDimensions(proposed) {
   };
 }
 
-/** Whether two geometries are the same screen. Either being absent is a mismatch. */
-function terminalGeometryAgrees(a, b) {
-  return !!a && !!b && a.cols === b.cols && a.rows === b.rows;
-}
-
 /**
  * What to do when the server reports the PTY's real geometry.
  *
@@ -1829,7 +1824,6 @@ if (typeof window !== 'undefined') {
   };
   window.CodemanTerminalGeometry = {
     clampTerminalDimensions,
-    terminalGeometryAgrees,
     reconcilePtyGeometry,
     TERMINAL_MIN_COLS,
     TERMINAL_MIN_ROWS,

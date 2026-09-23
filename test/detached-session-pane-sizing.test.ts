@@ -65,6 +65,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
     // The real chain: sendResize fits, floors and applies through one function
     // now, so the harness must let it (#464).
     syncTerminalGeometry: mixin.syncTerminalGeometry,
+    _geometryForResizeRequest: mixin._geometryForResizeRequest,
     _resizeTerminalTo: mixin._resizeTerminalTo,
     // Real, so a geometry change really does re-check whether the terminal now
     // overflows its container (#464 item 4) — the fake DOM has no container, so
