@@ -34,6 +34,7 @@ const STRIPPED_ENV_VARS: Array<[name: string, why: string]> = [
   ['CODEMAN_INSTANCE', 'moves the data dir to ~/.codeman-<name> and the tmux socket to codeman-<name>'],
   ['CODEMAN_DATA_DIR', 'ABSOLUTE override: bypasses the temp HOME and points the suite at a real data dir'],
   ['CODEMAN_TMUX_SOCKET', 'renames the socket resolveTmuxSocketName() returns'],
+  ['CLAUDE_CONFIG_DIR', 'relocates the Claude tree, so transcript fixtures under the temp HOME read as missing'],
 ];
 
 const SETUP_SOURCE = readFileSync(fileURLToPath(new URL('./setup.ts', import.meta.url)), 'utf-8');

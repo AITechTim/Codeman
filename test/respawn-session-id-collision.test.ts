@@ -82,6 +82,32 @@ function failingRespawnMux() {
   return { mux: mux as unknown as TerminalMultiplexer, calls };
 }
 
+/**
+ * A mux whose tmux lost the WHOLE session (tmux kill-server, a crash, an
+ * external kill-session), not just the pane. `_setupOrAttachMuxSession()` drops
+ * its stale handle and goes straight to `createSession()`, relaunching the CLI
+ * exactly as the failed-respawn fallback does.
+ */
+function vanishedSessionMux() {
+  const calls: CreateSessionOptions[] = [];
+  const respawns: RespawnPaneOptions[] = [];
+  const mux = {
+    isAvailable: () => true,
+    muxSessionExists: () => false,
+    isPaneDead: () => false,
+    setAttached: () => {},
+    respawnPane: async (options: RespawnPaneOptions) => {
+      respawns.push(options);
+      return 4242;
+    },
+    createSession: async (options: CreateSessionOptions) => {
+      calls.push(options);
+      return muxSession('codeman-recreated');
+    },
+  };
+  return { mux: mux as unknown as TerminalMultiplexer, calls, respawns };
+}
+
 const CONVERSATION = 'aaaabbbb-cccc-dddd-eeee-ffff00001111';
 
 let configDir: string;
@@ -258,6 +284,58 @@ describe('pinning a conversation onto a relaunch', () => {
     }
   });
 
+  it('pins the create path when tmux lost the whole session, not just the pane', async () => {
+    // The stale-session branch nulls the handle and never sets the failed-respawn
+    // flag, so without its own pin the relaunch carried the bare launch line and
+    // met the same `--session-id ... already in use` refusal.
+    giveTranscript(CONVERSATION);
+    const { mux, calls, respawns } = vanishedSessionMux();
+    const session = localSession({ claudeSessionChain: [CONVERSATION] }, mux);
+
+    await session.startInteractive();
+    try {
+      expect(respawns).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].resumeSessionId).toBe(CONVERSATION);
+      expect(session.claudeSessionId).toBe(CONVERSATION);
+    } finally {
+      await session.stop();
+    }
+  });
+
+  it('leaves a genuinely new session unpinned on the create path', async () => {
+    // No mux handle to begin with, so the stale-session flag is never set and
+    // the create options keep their original shape.
+    const { mux, calls } = vanishedSessionMux();
+    const session = localSession({ muxSession: undefined }, mux);
+    giveTranscript(session.id);
+
+    await session.startInteractive();
+    try {
+      expect(calls).toHaveLength(1);
+      expect(calls[0].resumeSessionId).toBeUndefined();
+    } finally {
+      await session.stop();
+    }
+  });
+
+  it('names the conversation the dead-pane respawn actually resumed', async () => {
+    // The chain tail has no transcript, so the walk degrades to the session id.
+    // The session must then report that id, not the chain tail claude never
+    // opened: the response viewer, Read My Mind and the alias map all read it.
+    const { mux, calls } = recordingMux();
+    const session = localSession({ claudeSessionChain: [CONVERSATION] }, mux);
+    giveTranscript(session.id);
+
+    await session.startInteractive();
+    try {
+      expect(calls[0].resumeSessionId).toBe(session.id);
+      expect(session.claudeSessionId).toBe(session.id);
+    } finally {
+      await session.stop();
+    }
+  });
+
   it('pins nothing for a remote session, whose conversation lives elsewhere', async () => {
     // The dead-pane respawn is reached by every session shape, unlike
     // `restartCli()` whose route refuses remote. A local id pinned onto a
@@ -311,9 +389,13 @@ describe('pinning a conversation onto a relaunch', () => {
     expect(calls[0].resumeSessionId).toBeUndefined();
   });
 
-  it('pins nothing for a remote reattach, which relaunches no CLI', async () => {
+  it('documents that a remote reattach carries no pin', async () => {
     // `reattachRemote()` re-runs the remote session command, which attaches to
     // the durable remote tmux with the agent still running inside it.
+    // ⚠️ Documentation, not a regression guard: `reattachRemote()` only runs for
+    // a remote session, and the pin builder refuses remote sessions on its own,
+    // so this would still pass if `reattachRemote()` were switched to the pinned
+    // builder. The builder's remote guard is what the test above pins.
     giveTranscript(CONVERSATION);
     const { mux, calls } = recordingMux();
     const session = localSession(

@@ -1875,29 +1875,40 @@ export class Session extends EventEmitter {
     respawnPaneOptions: import('./mux-interface.js').RespawnPaneOptions;
     createSessionOptions: import('./mux-interface.js').CreateSessionOptions;
     spawnErrLabel: string;
-  }): Promise<{ isRestored: boolean }> {
+  }): Promise<{ isRestored: boolean; respawnedResumeId?: string; respawnedDeadPane: boolean }> {
     const mux = this._mux!;
 
-    // Verify stale mux session — tmux may have been destroyed (e.g., killed externally)
+    // Verify stale mux session — tmux may have been destroyed (e.g., killed externally).
+    // A session that HAD a mux session relaunches its CLI below just like a failed
+    // respawn does (tmux kill-server, a tmux crash, an external kill-session), so
+    // its transcript collides with the bare `--session-id` the same way. A
+    // genuinely new session starts with `_muxSession` null and never sets this.
+    let muxSessionVanished = false;
     if (this._muxSession && !mux.muxSessionExists(this._muxSession.muxName)) {
       console.log('[Session] Stale mux session detected (tmux gone):', this._muxSession.muxName);
       this._muxSession = null;
+      muxSessionVanished = true;
     }
 
     // Check if session exists but pane is dead (remain-on-exit keeps it alive)
     // Respawn the pane instead of creating a whole new session — preserves tmux scrollback
     let needsNewSession = false;
+    let respawnedDeadPane = false;
+    let respawnedResumeId: string | undefined;
     if (this._muxSession && mux.isPaneDead(this._muxSession.muxName)) {
       console.log('[Session] Dead pane detected, respawning:', this._muxSession.muxName);
       // Confirmed dead — safe to resolve/pin now (see `_pinOmpRespawnId()`).
       // `options.respawnPaneOptions` was built eagerly before this dead-pane
       // check ran, so it still carries the pre-pin ompConfig; rebuild it.
       this._pinOmpRespawnId();
-      const newPid = await mux.respawnPane(await this._buildRespawnPaneOptionsWithResumePin());
+      const respawnOptions = await this._buildRespawnPaneOptionsWithResumePin();
+      const newPid = await mux.respawnPane(respawnOptions);
       if (!newPid) {
         console.error('[Session] Failed to respawn pane, will create new session');
         needsNewSession = true;
       } else {
+        respawnedDeadPane = true;
+        respawnedResumeId = respawnOptions.resumeSessionId;
         this._pendingEnvUnsets.clear();
         // Wait a moment for the respawned process to fully start
         await new Promise((resolve) => setTimeout(resolve, MUX_STARTUP_DELAY_MS));
@@ -1931,8 +1942,9 @@ export class Session extends EventEmitter {
       // `this.id` while the CLI resumes the chain tail. The response viewer,
       // Read My Mind and the unified-list alias map all read `_claudeSessionId`
       // until the next first-hand hook, so the two have to name the same
-      // conversation.
-      if (needsNewSession) {
+      // conversation. The vanished-tmux-session branch above relaunches for the
+      // same reason and takes the same pin.
+      if (needsNewSession || muxSessionVanished) {
         const pinned = (await this._buildRespawnPaneOptionsWithResumePin()).resumeSessionId;
         if (pinned) {
           options.createSessionOptions.resumeSessionId = pinned;
@@ -1980,7 +1992,7 @@ export class Session extends EventEmitter {
       throw spawnErr;
     }
 
-    return { isRestored };
+    return { isRestored, respawnedResumeId, respawnedDeadPane };
   }
 
   /**
@@ -2165,9 +2177,10 @@ export class Session extends EventEmitter {
    * claude prints "No conversation found" into the scrollback of a session that
    * is brand new, and `wrapWithNice()` prefixes only the FIRST branch of the
    * rendered `a || b`, so the branch that actually runs loses its priority for
-   * the life of the session. Falling off the end of the walk therefore pins
-   * nothing, which is the right answer: with no transcript anywhere there is
-   * nothing for the bare `--session-id <this.id>` to collide with.
+   * the life of the session. Falling off the end of the walk therefore adds
+   * no pin (the options keep any launch seed they already carried), which is
+   * the right answer: with no transcript anywhere there is nothing for the
+   * bare `--session-id <this.id>` to collide with.
    *
    * The create route pre-validates a resume id for the same reason, though it
    * additionally requires the transcript be substantial — here mere existence
@@ -2213,7 +2226,10 @@ export class Session extends EventEmitter {
 
   /** The session's Claude config dir when it has been relocated (#255), else undefined. */
   private _claudeConfigDir(): string | undefined {
-    return this._envOverrides?.CLAUDE_CONFIG_DIR;
+    // Trimmed like `claudeProjectsDir()` trims the process-wide override: the
+    // envOverrides schema validates keys only, and a whitespace-only value would
+    // otherwise resolve to a relative path and read "no transcript" for everything.
+    return this._envOverrides?.CLAUDE_CONFIG_DIR?.trim() || undefined;
   }
 
   /**
@@ -2537,7 +2553,7 @@ export class Session extends EventEmitter {
     // If mux wrapping is enabled, create or attach to a mux session
     if (this._useMux && this._mux) {
       try {
-        const { isRestored } = await this._setupOrAttachMuxSession({
+        const { isRestored, respawnedResumeId, respawnedDeadPane } = await this._setupOrAttachMuxSession({
           // Single source of truth shared with reattachRemote() (COD-108).
           respawnPaneOptions: this._buildRespawnPaneOptions(),
           createSessionOptions: {
@@ -2584,7 +2600,18 @@ export class Session extends EventEmitter {
         // persisted chain's tail is that conversation, reported first-hand by
         // the CLI's own hook, so it outranks every fallback here. A NEW pane has
         // an empty chain and falls through to the resume/alias fallbacks.
-        restoredConversation = isRestored ? this._claudeSessionChain[this._claudeSessionChain.length - 1] : undefined;
+        //
+        // A dead-pane respawn is NOT that case for a CLI whose relaunch the resume
+        // pin walk governs (`launch.chain === 'fallback'`): the CLI did stop, and
+        // the walk may have passed over a chain tail with no transcript behind it,
+        // so the conversation is whatever the respawn actually resumed. Undefined
+        // there means the pane launched unpinned, which the fallbacks below name.
+        const pinGovernsRespawn = respawnedDeadPane && getCli(this.mode)?.launch.chain === 'fallback';
+        restoredConversation = pinGovernsRespawn
+          ? respawnedResumeId
+          : isRestored
+            ? this._claudeSessionChain[this._claudeSessionChain.length - 1]
+            : undefined;
         this._claudeSessionId =
           restoredConversation ||
           this._resumeSessionId ||
