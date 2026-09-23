@@ -6,6 +6,8 @@ For the Compose configuration, environment settings, storage migration, and macv
 
 The image includes Claude Code, Codex, Gemini CLI, and OpenCode. Authenticate a CLI from its Codeman session; credentials are never baked into the image.
 
+It can also include the GitHub CLI (`gh`) and the Azure CLI (`az`) with the `azure-devops` extension, wired in as Git credential helpers, so Clone Repo and `git clone` reach private GitHub and Azure DevOps repositories once they are signed in. Both are off by default; [Turning them on](../docker/README.md#turning-them-on) shows the `docker-compose.override.yml` settings.
+
 ## Prerequisites
 
 - Docker Engine or Docker Desktop with Docker Compose v2
