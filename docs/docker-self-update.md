@@ -224,7 +224,9 @@ the host and the in-app path works from then on.
 
 **Resetting the build artefacts** — `docker compose down -v`, then
 `Start-Codeman.sh`. This discards the named volumes and re-seeds them from a fresh
-image.
+image. `docker/Update-Codeman.sh` scripts exactly this by default (plus an
+unconditional `--no-cache` rebuild, which a plain `Start-Codeman.sh` run does not
+force on its own) — see "Major updates" in `docker/README.md`.
 
 ## Disabling it
 

@@ -103,6 +103,29 @@ gh skill update gh              # after a later gh release
 
 Both CLIs, and the extension, are installed from their vendors' repositories with no version pinned, so they arrive at whatever is current when that build step runs. Docker caches the step, though: `Start-Codeman.sh` rebuilds with the cache, which keeps the versions from the first build until the Dockerfile changes at or above that step or the image is rebuilt with `--no-cache`. They are apt packages owned by root, so they cannot be upgraded from a session; `az extension update --name azure-devops` is the exception and works without a rebuild.
 
+### Major updates
+
+`Start-Codeman.sh` rebuilds the image on every start, but only clears the
+`codeman-node-modules`/`codeman-dist` build-artefact volumes when it detects
+the checkout's HEAD or `package-lock.json` moved — exactly right for an
+ordinary `git pull`, too narrow when a release note (or the updater's own
+blocker message) calls for starting over on a Dockerfile-only change, which
+touches neither. For that case, `docker/Update-Codeman.sh` force-rebuilds the
+image with no layer cache, clears those two volumes, stops the stack, then
+hands off to `Start-Codeman.sh` for the usual start:
+
+```sh
+bash docker/Update-Codeman.sh
+```
+
+Pass `--keep-volumes` to skip clearing them (safe only if you know the
+rebuilt image's `node_modules`/`dist` did not change) — the scripted default
+is the "Resetting the build artefacts" procedure in
+[`../docs/docker-self-update.md`](../docs/docker-self-update.md). Those two
+are the only named volumes `docker-compose.yaml` itself declares; a
+`docker-compose.override.yml` could add more, and application data and case
+workspaces are host bind mounts, never touched either way.
+
 ## Local customisation
 
 Compose merges `docker-compose.override.yml` on top of `docker-compose.yaml`. Keep host-specific changes there rather than editing `docker-compose.yaml`, so this repository can be updated without losing them. Both `docker-compose.override.yml` and `docker-compose.override.yaml` are ignored by Git.
