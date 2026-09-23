@@ -25,11 +25,17 @@
 # so a rebuilt image's fresh node_modules/dist otherwise sit unused behind a
 # volume's old content and the container comes back up looking unchanged —
 # exactly wrong for a script whose whole point is "be certain of what ships".
-# Start-Codeman.sh only clears them when it detects the checkout's HEAD or
-# `package-lock.json` moved, which is right for its own ordinary-start case but
-# too narrow here: nothing about a Dockerfile-only change (the case that sends
-# people to this script in the first place) touches either of those. Pass
-# --keep-volumes to opt out and reuse whatever is already in them.
+# Start-Codeman.sh clears codeman-dist when the checkout's HEAD moved and
+# codeman-node-modules only when `package-lock.json` changed. A released
+# server.Dockerfile change arrives through `git pull`, so HEAD moves and dist
+# is refreshed, but a Dockerfile change that bumps the Node base image leaves
+# the lockfile untouched while every native module (node-pty is compiled from
+# source, there is no Linux prebuild) has to be rebuilt against the new Node
+# ABI. Start-Codeman.sh would keep the old codeman-node-modules volume, and it
+# never builds with --no-cache. This script clears BOTH volumes, and ONLY
+# those two (targeted `docker volume rm` by Compose label, never
+# `down --volumes`, which would also take any volume an override file adds).
+# Pass --keep-volumes to opt out and reuse whatever is already in them.
 #
 # Usage: docker/Update-Codeman.sh [--keep-volumes]
 #   --keep-volumes   Do not clear codeman-node-modules/codeman-dist. Safe to
@@ -88,20 +94,26 @@ for override_file in "$override_yml" "$override_yaml"; do
 done
 compose_command=(docker compose --env-file "$env_file" "${compose_files[@]}")
 
-# Same collision guard as Start-Codeman.sh, and load-bearing HERE rather than
-# left to that script's own copy: this script's --no-cache build and its
-# `down`/`down --volumes` (below) both run BEFORE the handoff at the bottom of
-# this file, so Start-Codeman.sh's guard would only fire after the damage this
-# one exists to prevent has already happened. docker-compose.yaml hard-codes
-# `name: codeman`, so a second checkout run without COMPOSE_PROJECT_NAME
-# resolves to the SAME Compose project as any other checkout on the host and
-# operates on ITS containers and volumes — this script's default `down
-# --volumes` makes that worse than Start-Codeman.sh's own targeted refresh,
-# since it clears every named volume the resolved project has, not just the
-# two this script means to. See Start-Codeman.sh's own guard for the full
-# incident this is written against (2026-09-21).
+# Collision guard. Start-Codeman.sh has no equivalent; this is the only one,
+# and it has to run before this script's own --no-cache build, `down` and
+# volume removal below. docker-compose.yaml hard-codes `name: codeman`, so a
+# second checkout run without COMPOSE_PROJECT_NAME resolves to the SAME Compose
+# project as any other checkout on the host and would operate on ITS
+# containers and volumes.
+#
+# The project name is read from the resolved config's top-level `name` key
+# (the first `name` in the output; nested ones come later), the same parse
+# Start-Codeman.sh uses. `--format json` needs Compose v2.3+. This is the first
+# `docker` call the script makes, so its failure is reported here rather than
+# left to `set -e`, which would exit with no output at all.
+if ! project_config=$("${compose_command[@]}" config --format json); then
+  printf 'Error: `docker compose config --format json` failed (see the message above, if any).\n' >&2
+  printf 'Check that Docker and Compose v2.3+ are installed and on PATH, and that\n' >&2
+  printf '%s and the Compose files in %s are valid.\n' "$env_file" "$script_dir" >&2
+  exit 1
+fi
 project_name=$(
-  "${compose_command[@]}" config --format json 2>/dev/null |
+  printf '%s\n' "$project_config" |
     sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*$/\1/p' | head -n1
 )
 if [[ -n "$project_name" ]]; then
@@ -112,11 +124,13 @@ if [[ -n "$project_name" ]]; then
   # status propagates through the command substitution and `set -e` aborts the
   # WHOLE script right here, every time, regardless of whether a collision
   # actually exists — caught only by actually running this end-to-end (a
-  # static text/regex check on the source cannot see it).
+  # static text/regex check on the source cannot see it). The empty-line
+  # filter keeps a container with no working_dir label from winning head -n1
+  # and hiding a real collision behind it.
   other_working_dir=$(
     docker ps -a --filter "label=com.docker.compose.project=$project_name" \
       --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null |
-      grep -v -F -x -- "$script_dir" | head -n1 || true
+      grep -v -F -x -- "$script_dir" | grep -v '^$' | head -n1 || true
   )
   if [[ -n "$other_working_dir" ]]; then
     printf 'Error: Compose project "%s" is already in use by a DIFFERENT checkout:\n' "$project_name" >&2
@@ -127,10 +141,15 @@ if [[ -n "$project_name" ]]; then
     printf 'docker-compose.yaml hard-codes `name: %s`, so two checkouts on the same host\n' "$project_name" >&2
     printf 'collide unless each one sets a distinct COMPOSE_PROJECT_NAME. Continuing would\n' >&2
     printf 'rebuild and stop the OTHER checkout'"'"'s running container and, by default,\n' >&2
-    printf 'delete ALL of its named volumes.\n' >&2
+    printf 'delete its codeman-node-modules/codeman-dist volumes.\n' >&2
     printf '\n' >&2
     printf 'Fix: export COMPOSE_PROJECT_NAME=<something-unique-to-this-checkout> before\n' >&2
     printf 'running this script, then retry.\n' >&2
+    printf '\n' >&2
+    printf 'If instead THIS checkout was moved or renamed after its container was created,\n' >&2
+    printf 'the path above is its own old location: remove the old container (for example\n' >&2
+    printf '`docker rm -f <container>` for the codeman container) and retry, rather than\n' >&2
+    printf 'setting COMPOSE_PROJECT_NAME, which would start a second project beside it.\n' >&2
     exit 1
   fi
 fi
@@ -189,11 +208,35 @@ printf 'Building a fresh image (--no-cache)...\n'
 "${compose_command[@]}" build --no-cache
 
 printf 'Stopping the stack...\n'
-if [[ "$keep_volumes" == '1' ]]; then
+if [[ "$keep_volumes" == '1' || -n "$project_name" ]]; then
   "${compose_command[@]}" down
 else
-  printf 'Also clearing the codeman-node-modules/codeman-dist volumes (pass --keep-volumes to skip).\n'
+  # No resolvable project name means the label filter below could match
+  # nothing, so fall back to Compose's own removal, and say what it really does.
+  printf 'Warning: could not resolve the Compose project name; clearing EVERY named volume\n' >&2
+  printf 'in this Compose project (override file included) with `down --volumes` instead.\n' >&2
   "${compose_command[@]}" down --volumes
+fi
+
+# Targeted removal of exactly the two build-artefact volumes, scoped by label to
+# THIS project (the volume key alone is shared by any other stack declaring the
+# same key). Same lookup as Start-Codeman.sh's refresh. A failure is reported,
+# not fatal: the stack is already down, and the handoff below is what brings
+# it back up.
+if [[ "$keep_volumes" != '1' && -n "$project_name" ]]; then
+  printf 'Clearing the codeman-node-modules/codeman-dist volumes (pass --keep-volumes to skip).\n'
+  for key in codeman-node-modules codeman-dist; do
+    volume_name=$(
+      docker volume ls -q \
+        --filter "label=com.docker.compose.volume=$key" \
+        --filter "label=com.docker.compose.project=$project_name" |
+        head -n1
+    ) || volume_name=''
+    if [[ -n "$volume_name" ]] && ! docker volume rm -- "$volume_name"; then
+      printf 'Warning: could not remove volume %s; the container may keep serving the\n' "$volume_name" >&2
+      printf 'previous build from it. Remove it by hand and rerun this script.\n' >&2
+    fi
+  done
 fi
 
 # Start-Codeman.sh does everything a plain `up -d` does not: re-derives

@@ -18,6 +18,11 @@
  *    `CODEMAN_CASES_PATH`, so the directory it creates has the owner the
  *    container will accept, and its `git_head_commit` helper (a pure function
  *    over `.git`) resolves the three ref layouts a checkout can have.
+ * 4. `Update-Codeman.sh` (the scripted major update) runs its collision guard
+ *    before its own `--no-cache` build and `down`, removes exactly the two
+ *    build-artefact volumes rather than every volume in the project, and hands
+ *    off to `Start-Codeman.sh`; checked statically and by an end-to-end run
+ *    against a stub `docker`.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -193,10 +198,8 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
   });
 
   it('resolves the collision guard BEFORE the --no-cache build and the down, not after', () => {
-    // This script's own build/down run before the handoff to Start-Codeman.sh,
-    // so its copy of the guard has to be early here too - Start-Codeman.sh's
-    // copy alone would only catch the collision after this script's own
-    // destructive calls already ran.
+    // Start-Codeman.sh has no such guard, so this is the only one, and it has
+    // to run before this script's own build, down and volume removal.
     const projectName = updateScript.indexOf('project_name=$(');
     const guard = updateScript.indexOf('other_working_dir=$(');
     const build = updateScript.indexOf('"${compose_command[@]}" build --no-cache');
@@ -210,14 +213,17 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
     expect(updateScript).toMatch(/grep -v -F -x -- "\$script_dir"/);
   });
 
-  it('clears the named volumes by DEFAULT; --keep-volumes opts out to a plain `down`', () => {
+  it('clears exactly the two build-artefact volumes by DEFAULT, by label, scoped to the project', () => {
     expect(updateScript).toMatch(/--keep-volumes\)\s*\n\s*keep_volumes=1/);
-    expect(updateScript).toMatch(/"\$\{compose_command\[@\]\}" down --volumes/);
-    // The keep_volumes branch must stay a plain `down` — merging the two would
-    // silently start wiping the build-artefact volumes even when asked not to.
-    expect(updateScript).toMatch(
-      /if \[\[ "\$keep_volumes" == '1' \]\]; then\s*\n\s*"\$\{compose_command\[@\]\}" down\s*\n\s*else/
-    );
+    expect(updateScript).toMatch(/for key in codeman-node-modules codeman-dist; do/);
+    expect(updateScript).toMatch(/--filter "label=com\.docker\.compose\.volume=\$key"/);
+    expect(updateScript).toMatch(/docker volume rm -- "\$volume_name"/);
+    // `down --volumes` survives only as the fallback for an unresolvable
+    // project name, where the label filter could not match anything.
+    const fallback = updateScript.indexOf('"${compose_command[@]}" down --volumes');
+    const warning = updateScript.indexOf('could not resolve the Compose project name');
+    expect(warning).toBeGreaterThan(-1);
+    expect(fallback).toBeGreaterThan(warning);
   });
 
   it('--help/-h prints usage and exits 0, rather than falling into the unrecognised-argument branch', () => {
@@ -354,6 +360,7 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
           '    exit 0',
           '  fi',
           '  if [[ " $* " == *" config "* && " $* " == *" --format json "* ]]; then',
+          '    if [[ -n "${STUB_CONFIG_JSON_FAIL:-}" ]]; then echo "unknown flag: --format" >&2; exit 1; fi',
           // Real `docker compose config --format json` pretty-prints, so
           // `"name"` starts its OWN line rather than sharing one with `{` -
           // the sed extraction both scripts use anchors on that, and a
@@ -371,7 +378,15 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
           // see no output here and proceed exactly as before; a test that
           // wants to exercise the guard itself sets STUB_PS_WORKING_DIR.
           'if [[ "$1" == "ps" && -n "${STUB_PS_WORKING_DIR:-}" ]]; then',
-          '  echo "$STUB_PS_WORKING_DIR"',
+          '  printf "%s\\n" "$STUB_PS_WORKING_DIR"',
+          '  exit 0',
+          'fi',
+          // `docker volume ls -q --filter label=com.docker.compose.volume=<key> ...`:
+          // answer with the Compose-style `<project>_<key>` name for that key.
+          'if [[ "$1" == "volume" && "$2" == "ls" ]]; then',
+          '  for a in "$@"; do',
+          '    case "$a" in label=com.docker.compose.volume=*) echo "codeman_${a#label=com.docker.compose.volume=}" ;; esac',
+          '  done',
           '  exit 0',
           'fi',
           'exit 0',
@@ -389,6 +404,7 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
           execFileSync('bash', [join(dockerDir, 'Update-Codeman.sh'), ...args], {
             env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, CMDLOG: logPath, ...extraEnv },
             encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'pipe'],
           });
         } catch (err) {
           const e = err as { status?: number; stderr?: string };
@@ -405,14 +421,21 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
       }
     }
 
-    it('default: build --no-cache, THEN down --volumes, THEN the handoff genuinely runs Start-Codeman.sh', () => {
+    it('default: build --no-cache, THEN a plain down, THEN removes exactly the two volumes, THEN the handoff runs Start-Codeman.sh', () => {
       const { status, stderr, log } = runSmokeTest([]);
 
       const buildIdx = log.findIndex((l) => l.includes('build --no-cache'));
-      const downIdx = log.findIndex((l) => l.includes(' down --volumes') || l.endsWith(' down'));
+      const downIdx = log.findIndex((l) => / down(\s|$)/.test(l));
       expect(buildIdx).toBeGreaterThan(-1);
       expect(downIdx).toBeGreaterThan(buildIdx);
-      expect(log[downIdx]).toContain('down --volumes');
+      expect(log[downIdx]).not.toContain('--volumes');
+      expect(log.some((l) => l.includes('down --volumes'))).toBe(false);
+      const removed = log.filter((l) => l.startsWith('docker volume rm'));
+      expect(removed).toEqual([
+        'docker volume rm -- codeman_codeman-node-modules',
+        'docker volume rm -- codeman_codeman-dist',
+      ]);
+      expect(log.findIndex((l) => l.startsWith('docker volume rm'))).toBeGreaterThan(downIdx);
 
       // Proof the handoff really executed Start-Codeman.sh rather than dying
       // with EACCES right after printing "Handing off...": more `docker`
@@ -434,12 +457,27 @@ describe('Update-Codeman.sh (the scripted major-update path — docker/README.md
       const downLine = log.find((l) => / down(\s|$)/.test(l));
       expect(downLine).toBeDefined();
       expect(downLine).not.toContain('--volumes');
+      expect(log.some((l) => l.startsWith('docker volume rm'))).toBe(false);
+    });
+
+    it('reports a failing first `docker compose config` call instead of exiting silently', () => {
+      const { status, stderr, log } = runSmokeTest([], { STUB_CONFIG_JSON_FAIL: '1' });
+      expect(status).not.toBe(0);
+      expect(stderr).toMatch(/docker compose config --format json` failed/);
+      expect(stderr).toMatch(/unknown flag: --format/);
+      expect(log.some((l) => l.includes('build --no-cache'))).toBe(false);
+    });
+
+    it('still refuses when an unlabelled container prints an empty line ahead of the other checkout', () => {
+      const { status, stderr, log } = runSmokeTest([], { STUB_PS_WORKING_DIR: '\n/some/other/checkout/docker' });
+      expect(status).toBe(1);
+      expect(stderr).toMatch(/already in use by a DIFFERENT checkout/);
+      expect(log.some((l) => l.includes('build --no-cache'))).toBe(false);
     });
 
     it('refuses BEFORE the --no-cache build when the resolved project belongs to a different checkout', () => {
-      // The whole reason this guard lives here rather than only in
-      // Start-Codeman.sh: this script's own build/down run before the handoff
-      // ever reaches that script's copy of the same check.
+      // Start-Codeman.sh has no such guard, so nothing downstream of this
+      // script would catch the collision.
       const { status, stderr, log } = runSmokeTest([], { STUB_PS_WORKING_DIR: '/some/other/checkout/docker' });
       expect(status).toBe(1);
       expect(stderr).toMatch(/already in use by a DIFFERENT checkout/);

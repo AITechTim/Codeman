@@ -41,6 +41,32 @@ Releases that change `server.Dockerfile`, `docker-compose.yaml`, or add a key to
 changed, and asks you to run `Start-Codeman.sh` here on the host instead. Details:
 [`../docs/docker-self-update.md`](../docs/docker-self-update.md).
 
+### Major updates
+
+`Start-Codeman.sh` rebuilds the image on every start, but with the layer cache,
+and it refreshes the build-artefact volumes selectively: `codeman-dist` when
+the checkout's HEAD moved, `codeman-node-modules` only when `package-lock.json`
+changed. That is right for an ordinary `git pull`. It is not enough when a
+`server.Dockerfile` change bumps the Node base image without touching the
+lockfile: `node-pty` is compiled from source (there is no Linux prebuild), so
+the old `codeman-node-modules` volume would keep a build made for the previous
+Node version. For that case, or whenever you want to be certain of what ships,
+`docker/Update-Codeman.sh` force-rebuilds the image with no layer cache, stops
+the stack, removes the `codeman-node-modules` and `codeman-dist` volumes, then
+hands off to `Start-Codeman.sh` for the usual start:
+
+```sh
+bash docker/Update-Codeman.sh
+```
+
+Pass `--keep-volumes` to skip clearing them (safe only if you know the
+rebuilt image's `node_modules`/`dist` did not change). The scripted default
+is the "Resetting the build artefacts" procedure in
+[`../docs/docker-self-update.md`](../docs/docker-self-update.md). Only those
+two volumes are removed, by name within this Compose project; any volume a
+`docker-compose.override.yml` adds is left alone, and application data and
+case workspaces are host bind mounts, never touched either way.
+
 ## Private repositories (GitHub and Azure DevOps)
 
 The images can include the GitHub CLI (`gh`) and the Azure CLI (`az`, with the `azure-devops` extension), wired into the system Git configuration as credential helpers, so Codeman can clone private repositories. Both are **opt-in and off by default**, and are turned on per host in `docker-compose.override.yml`.
@@ -102,29 +128,6 @@ gh skill update gh              # after a later gh release
 ### Versions
 
 Both CLIs, and the extension, are installed from their vendors' repositories with no version pinned, so they arrive at whatever is current when that build step runs. Docker caches the step, though: `Start-Codeman.sh` rebuilds with the cache, which keeps the versions from the first build until the Dockerfile changes at or above that step or the image is rebuilt with `--no-cache`. They are apt packages owned by root, so they cannot be upgraded from a session; `az extension update --name azure-devops` is the exception and works without a rebuild.
-
-### Major updates
-
-`Start-Codeman.sh` rebuilds the image on every start, but only clears the
-`codeman-node-modules`/`codeman-dist` build-artefact volumes when it detects
-the checkout's HEAD or `package-lock.json` moved — exactly right for an
-ordinary `git pull`, too narrow when a release note (or the updater's own
-blocker message) calls for starting over on a Dockerfile-only change, which
-touches neither. For that case, `docker/Update-Codeman.sh` force-rebuilds the
-image with no layer cache, clears those two volumes, stops the stack, then
-hands off to `Start-Codeman.sh` for the usual start:
-
-```sh
-bash docker/Update-Codeman.sh
-```
-
-Pass `--keep-volumes` to skip clearing them (safe only if you know the
-rebuilt image's `node_modules`/`dist` did not change) — the scripted default
-is the "Resetting the build artefacts" procedure in
-[`../docs/docker-self-update.md`](../docs/docker-self-update.md). Those two
-are the only named volumes `docker-compose.yaml` itself declares; a
-`docker-compose.override.yml` could add more, and application data and case
-workspaces are host bind mounts, never touched either way.
 
 ## Local customisation
 
