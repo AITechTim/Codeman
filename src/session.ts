@@ -4099,6 +4099,29 @@ export class Session extends EventEmitter {
   private _ptyRows = 40;
 
   /**
+   * The geometry the CLI is actually drawing for, or null when nothing is
+   * drawing.
+   *
+   * Exposed because `resize()` can decline a request outright (arbitration
+   * below) and the asking client has no other way to find out: a browser
+   * terminal that keeps a shape the PTY refused renders garbled output rather
+   * than wrong-sized output, because Claude Code's repaints are computed from
+   * the width it was told (issue #464). Both transports report this back.
+   *
+   * ⚠️ NULL WITHOUT A PANE, never the field values. `resize()` writes
+   * `_ptyCols`/`_ptyRows` only when `ptyProcess` is set, and nothing seeds them
+   * from the spawn geometry, so a session with a dead pane — or one created
+   * through the API and never started — still holds the constructor defaults
+   * of 120x40. Reporting those made a client adopt a size no process had ever
+   * been told, and on anything narrower than 120 columns it claimed another
+   * device owned the pane when none existed. `reconcilePtyGeometry` treats a
+   * report with no finite numbers as no evidence, which is the truth here.
+   */
+  get ptyGeometry(): { cols: number; rows: number } | null {
+    return this.ptyProcess ? { cols: this._ptyCols, rows: this._ptyRows } : null;
+  }
+
+  /**
    * Live WebSocket connections that have announced a desktop viewport for this
    * session. While at least one is registered, small-viewport (mobile/tablet)
    * resizes are ignored so a phone glancing at the session can't reflow the
@@ -4183,6 +4206,10 @@ export class Session extends EventEmitter {
     }
     if (isSmallViewport && this._desktopSizeClaims.size > 0) {
       if (Date.now() - this._lastDesktopActivityAt < Session.DESKTOP_CLAIM_IDLE_MS) {
+        // Declined. The caller is told nothing here on purpose — the decision
+        // belongs to the session, not the socket — but the caller MUST report
+        // `ptyCols`/`ptyRows` back afterwards so the asking client can adopt
+        // the shape it did not get. Both transports do; see issue #464.
         return;
       }
       this._mobileSizeOverride = true;

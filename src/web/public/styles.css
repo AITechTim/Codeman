@@ -3862,6 +3862,37 @@ body.solo-mode .btn-lifecycle-log {
   background: transparent !important;
 }
 
+/* The terminal is wider than the box that shows it (issue #464). Two causes,
+   one affordance: another device holds the sizing claim so this terminal has
+   adopted a width it did not ask for, or the 40-column floor has widened it
+   past a narrow container. Either way the text is rendered CORRECTLY and simply
+   does not fit, and without horizontal reach the right-hand columns sit behind
+   .terminal-container's clip with no gesture that can get to them — measured at
+   360px, font 24: 218px of the pane, 38% of it, unreachable.
+   Present only while that is true; _syncTerminalOverflowAffordance() owns it. */
+.terminal-container.term-overflows-x {
+  /* ⚠️ BOTH axes, explicitly. mobile.css loads after this file and sets
+     `.terminal-container { overflow: visible }` — a bare `overflow-x` would
+     then leave overflow-y computing to `auto` (CSS promotes a `visible` paired
+     with a non-visible axis), handing the browser a vertical scroll container
+     the terminal's own touch handler does not know about. */
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+/* xterm's own element is width:100% above, so the container would see no
+   overflow to scroll even though .xterm-screen is wider than both. */
+.terminal-container.term-overflows-x .xterm {
+  width: max-content;
+  min-width: 100%;
+}
+/* ⚠️ NO `touch-action: pan-x` here, deliberately. The terminal's own touchmove
+   handler pans this container (see `canPanHorizontally` in terminal-ui.js),
+   because `touchstart` preventDefault()s every 'content' tap and that cancels
+   a native pan before it can start. Granting the browser pan-x as well would
+   double-handle the gestures where that preventDefault does NOT run — a tap on
+   a scrolled-up viewport — moving the pane twice for one finger. The
+   `touch-action: none` the other rules set is what keeps JS the sole owner. */
+
 /* Touch devices: prevent browser from claiming the touch gesture before
    our JS touchmove handler fires. Without this, the browser starts native
    scrolling during the first few px of finger travel and ignores our
