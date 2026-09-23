@@ -1,5 +1,30 @@
 # aicodeman
 
+## 1.33.0
+
+### Minor Changes
+
+- CLI management from Settings (#476, finishing the CLI registry work from #343). `~/.codeman/clis.json` used to be hand-edit only; with the new opt-in `cliManagementEnabled` switch (synced, default OFF) App Settings → Agents & CLIs can enable or disable any CLI, install a missing stock CLI with its vetted install command, and add, edit or remove custom CLIs. Six new endpoints back it (`GET`/`POST /api/clis`, `PUT /api/clis/:id`, `POST /api/clis/:id/install`, `PUT /api/clis/custom/:id`, `DELETE /api/clis/:id`), documented in `docs/api-reference.md`. Every write is refused while the switch is off, is admin-only in multi-user mode, is serialized on one queue, and refuses to overwrite a `clis.json` that does not parse or has group/world permission bits. A custom entry is re-validated through the same schema as the stock ones and its install text is never executed. `shell` cannot be disabled. The Run menu and the welcome screen are now built from the enabled catalogue, so the welcome screen also offers Codex, Shell and any custom CLI, and the stock Claude entry is labelled "Claude Code".
+
+  Models: Opus 5.5 (`claude-opus-5-5`, 1M context capable) is offered in App Settings → Models and in task routing (#480).
+
+  Self-update: on a macOS `launchd-daemon` install, a Homebrew node upgrade could leave `update-status.json` stuck at `queued`, which made every later update fail with "An update is already in progress." The updater now falls back to `node` on PATH when the server's own node binary is gone, and an in-flight status that has not been written for 15 minutes is failed on the next read. A graceful shutdown that hangs is now force-exited after 10 s (and the launchd updater SIGKILLs a server that has not exited after 30 s), so launchd can start the new build instead of leaving the service down (#478). Both fixes protect updates that start FROM this release.
+
+  Session Manager (Cmd+K): rows keep their `mode`, `claudeSessionId` and `resumeId`, so the ⋯ menu's Resume session relaunches a Codex row as Codex on its own conversation, and the mode badge shows as it does on the home list (#477).
+
+  Maintainer fixes applied while landing #457: renaming a tab to the name it already has (the Session Options field saves on blur) is now a no-op, so it no longer pins the placeholder as the `/resume` title again; Docker sessions skip the transcript title sync, since their transcript lives in the container; and the agent skill's messaging examples no longer use a `w<N>-` name as the peer name.
+
+  Tests: the suite strips every inherited `CODEMAN_*` variable, so running it inside a Docker Compose deployment no longer writes into the deployment's real case root (#479).
+
+  ### Thanks
+  - @opticon454 for CLI management (#476), the last piece of the CLI registry, with every review item answered in one round, and for splitting the test isolation fix out into #479.
+  - @shenlvkang-collab for the `/resume` title fix (#457) and the careful diagnosis behind it.
+  - @julian3xl for the Session Manager row fix (#477), their first contribution.
+
+### Patch Changes
+
+- 69a7128: fix(sessions): stop pinning the `w1-myapp` placeholder as Claude's session title. Local Claude spawns passed the tab name as `--name`, which is also the `/resume` picker entry and the terminal title, and a pinned title stops Claude generating its own, so every conversation of a case showed up in `/resume` as the same `w1-myapp` and none got a generated title. Only a name the user chose is pinned now; placeholder and auto-named tabs let Claude title the conversation again. Renaming a Claude tab also reaches `/resume`: the new name is appended to the conversation's transcript as the `custom-title` row `/rename` writes (a tab that was spawned with `--name` keeps re-appending its own title until its next respawn, so the rename wins from then on). Orchestrators that rely on a fixed peer name should give workers a descriptive `sessionName` rather than a `w<N>-` one.
+
 ## 1.32.1
 
 ### Patch Changes
