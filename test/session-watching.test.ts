@@ -279,19 +279,23 @@ describe('Session.watching', () => {
     expect(changes).toEqual(['1 monitor']);
   });
 
-  it('keeps its last answer when the screen cannot be read', () => {
+  it('drops its answer when the screen cannot be read, and says so', () => {
     vi.useFakeTimers();
     const screen: { text: string | null } = { text: WITH_MONITOR };
     const session = withFakePane(() => screen.text as string);
+    const changes: (string | null)[] = [];
+    session.on('watchingChanged', () => changes.push(session.watching));
 
     runAndSettle(session);
     expect(session.watching).toBe('1 monitor');
 
-    // A capture that fails is not evidence that nothing is running, which is the same
-    // rule the working probe applies to its own null.
+    // A stale label would open the next idle prompt already acknowledged, so a failed
+    // capture must degrade toward the alert, not toward silence. The page is told too,
+    // or every open tab would go on drawing the badge.
     screen.text = null;
     runAndSettle(session);
-    expect(session.watching).toBe('1 monitor');
+    expect(session.watching).toBeNull();
+    expect(changes).toEqual(['1 monitor', null]);
   });
 
   it('reads Codex own row, three up from the bottom of its screen', () => {

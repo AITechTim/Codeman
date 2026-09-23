@@ -160,6 +160,13 @@ describe('a watching session raises no alert on any surface', () => {
     expect(app.approvals.get(watched.id)?.acknowledgedReason).toBe('watching 1 monitor');
   });
 
+  it('the header bell does not count the card, matching codeman tui', () => {
+    const app = loadFrontend() as FrontendApp & { pendingApprovalsCount(): number };
+    app.approvals.set('watched', watched);
+    app.approvals.set('plain', itemFor(null));
+    expect(app.pendingApprovalsCount()).toBe(1);
+  });
+
   it('so both home screens classify the session as plainly idle', () => {
     const app = loadFrontend();
     app._onHookIdlePrompt({ sessionId: SESSION, acknowledgedReason: watched.acknowledgedReason });

@@ -2991,15 +2991,18 @@ export class Session extends EventEmitter {
    * capture at exactly the moment the turn ends, which is the moment the answer starts
    * mattering.
    *
-   * A capture that could not be read leaves the last answer standing, the way the
-   * working probe treats its own null: no evidence is not evidence of none.
+   * A capture that could not be read CLEARS the label rather than keeping the last one.
+   * The two wrong answers are not symmetric: a stale label opens the next idle prompt
+   * already acknowledged, so a failed capture would silence a real alert, while a dropped
+   * label only costs a card and an alert that the next readable capture takes back.
+   * Degrading toward the alert is the rule the whole signal is built on.
    */
   private _readWatching(paneText: string | null): void {
     const pattern = this._watchingLinePattern();
-    // Called only from the probe, and only with what a capture returned: `null` is
-    // "the screen could not be read", which is not evidence that nothing is running.
-    if (!pattern || paneText === null) return;
-    const label = watchingLabel(paneText, pattern, this._watchingWindow);
+    if (!pattern) return;
+    // `null` is "the screen could not be read". That is no evidence either way, so the
+    // label falls to null (and the change is announced below like any other).
+    const label = paneText === null ? null : watchingLabel(paneText, pattern, this._watchingWindow);
     if (label === this._watching) return;
     this._watching = label;
     // ⚠️ This CHANGES while the session's status does not, so it needs an event of its

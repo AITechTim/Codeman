@@ -194,8 +194,21 @@ Object.assign(CodemanApp.prototype, {
     document.querySelector('.btn-approvals')?.setAttribute('aria-expanded', 'false');
   },
 
+  /**
+   * Items still waiting on a human. An acknowledged item (a human already looked, or the
+   * session opened it acknowledged because it is watching its own background work) keeps
+   * its card but arms no alert, so it must not light the bell either; this is the same
+   * count `pendingApprovalCount()` gives `codeman tui`.
+   */
+  pendingApprovalsCount() {
+    if (!this.approvals) return 0;
+    let count = 0;
+    for (const item of this.approvals.values()) if (!item.acknowledgedAt) count++;
+    return count;
+  },
+
   renderApprovals() {
-    const count = this.approvals ? this.approvals.size : 0;
+    const count = this.pendingApprovalsCount();
     const btn = document.querySelector('.btn-approvals');
     if (btn) {
       // Marker-class visibility (base header rules are display !important):

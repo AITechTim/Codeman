@@ -60,7 +60,6 @@ const MOBILE_OVERVIEW_RUN_MODES = [
   { mode: 'shell', label: 'Terminal / Shell', short: 'Shell' },
 ];
 
-/** Pill copy per state. Kept short: a phone row has ~90px for it. */
 /**
  * The one word every surface puts on the watching badge, and the tooltip that says
  * what the pane actually reported. Both live here so the phone overview, the desktop
@@ -69,6 +68,7 @@ const MOBILE_OVERVIEW_RUN_MODES = [
 const WATCHING_BADGE_TEXT = 'watching';
 const watchingBadgeTitle = (label) => 'Still running in the background: ' + label;
 
+/** Pill copy per state. Kept short: a phone row has ~90px for it. */
 const MOBILE_OVERVIEW_PILL_LABEL = {
   needs: 'needs you',
   error: 'error',
