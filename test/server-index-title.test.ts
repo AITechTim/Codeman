@@ -96,9 +96,9 @@ describe('WebServer index.html <title> templating (#82)', () => {
 
   it('only substitutes the <title> tag — the rest of the template is identical (modulo asset cache-busting)', async () => {
     // renderIndexHtml also appends ?v=<mtime> cache-bust params to same-origin
-    // .js/.css refs, and injects the CLI-availability flags, the custom-model
-    // Run-menu picker's CLI list and the transcript-gutter widths before </head>;
-    // strip all so the title remains the only other change.
+    // .js/.css refs, and injects the CLI-availability flags, launch catalog,
+    // custom-model Run-menu picker's CLI list and the transcript-gutter widths
+    // before </head>; strip all so the title remains the only other change.
     //
     // The flag strips are what keep this test environment-independent. The
     // CLI-availability one used to pass here by luck: that script was injected
@@ -109,6 +109,7 @@ describe('WebServer index.html <title> templating (#82)', () => {
     const html = (await render('laptop'))
       .replace(/(\.(?:js|css))\?v=[^"]*/g, '$1')
       .replace(/<script>window\.__codemanCliAvailable=\{.*?\};<\/script>\n/, '')
+      .replace(/<script>window\.__codemanCliCatalog=\[.*?\];<\/script>\n/, '')
       .replace(/<script>window\.__codemanCustomModelClis=\[.*?\];<\/script>\n/, '')
       // Injected unconditionally as an object keyed by run mode, empty when no
       // enabled CLI declares a gutter, so it needs stripping on every machine.

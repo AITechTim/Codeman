@@ -1318,6 +1318,15 @@ export const SettingsUpdateSchema = z
      */
     customModelEndpointsEnabled: z.boolean().optional(),
     /**
+     * CLI management (docs/cli-enable-disable-plan.md): the Settings UI section that
+     * lets an admin enable/disable a stock CLI, trigger its install, and add/edit/
+     * remove custom CLI entries — all previously hand-edit-only via ~/.codeman/clis.json.
+     * SYNCED, default OFF: this is a machine-configuration surface (like Custom Model
+     * Endpoints), not a display preference, and enabling it is what makes the write
+     * endpoints (PUT/POST/DELETE /api/clis...) answer instead of refusing outright.
+     */
+    cliManagementEnabled: z.boolean().optional(),
+    /**
      * Read My Mind predictor model override. Empty/absent = the AI-checker
      * default (opus: prediction quality is the product and it runs only on an
      * explicit press). Shell-safety is validated again at spawn time.
@@ -1995,6 +2004,39 @@ export const CustomModelHostSchema = z.object({
   modelContextLengths: z.record(z.string().max(200), z.number().int().positive().max(100_000_000)).optional(),
   // Same reasoning as modelContextLengths above.
   modelSizesGB: z.record(z.string().max(200), z.number().positive().max(100_000)).optional(),
+});
+
+/**
+ * A shell-safe bare word, mirroring `config/cli-registry/schema.ts`'s own `shellToken` —
+ * duplicated rather than imported, since the REAL safety boundary for anything built from
+ * this is `CliEntrySchema` itself, re-applied server-side once the full entry is assembled
+ * (`cli-registry-routes.ts`). This is a request-shape sanity check, not the security gate.
+ */
+const cliShellToken = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9._:@=+/,-]+$/, 'must be a plain word with no shell metacharacters');
+
+/** PUT /api/clis/:id (Phase 3) — enable/disable an existing entry, stock or custom; `enabled` is the ONLY thing this endpoint can flip. */
+export const CliEnableSchema = z.object({ enabled: z.boolean() });
+
+/**
+ * POST /api/clis + PUT /api/clis/custom/:id (Phase 5) — a deliberately MINIMAL custom-CLI
+ * shape (docs/cli-enable-disable-plan.md, Phase 6 checklist: "scope the FIRST version to the
+ * fields most stock entries actually use"), not the full `CliEntry`. `cli-registry-routes.ts`
+ * assembles the rest with safe, conservative capability defaults and re-validates the whole
+ * thing through `CliEntrySchema` before ever writing it — this schema exists to bound the
+ * REQUEST shape, not to BE the safety layer (Decision 3: typed-argv only, no raw shell text).
+ */
+export const CliCustomEntrySchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9-]{0,23}$/, 'id must be lowercase, start with a letter, at most 24 chars'),
+  label: z.string().min(1).max(60),
+  shortBadge: z.string().min(1).max(6),
+  enabled: z.boolean().optional(),
+  binaries: z.array(cliShellToken).min(1).max(4),
+  /** Bare argv tokens for the single launch variant — no flags-with-values, no params. */
+  argv: z.array(cliShellToken).min(1).max(16),
 });
 
 /** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */

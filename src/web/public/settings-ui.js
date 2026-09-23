@@ -410,6 +410,12 @@ Object.assign(CodemanApp.prototype, {
     // Assigning .checked above does not fire onchange, so the body's visibility
     // (and its lazy load) needs an explicit sync on every open, not just a save.
     this.applyCustomModelEndpointsVisibility();
+    // CLI management (docs/cli-enable-disable-plan.md): synced, default OFF.
+    document.getElementById('appSettingsCliManagement').checked = settings.cliManagementEnabled === true;
+    // Same reasoning as applyCustomModelEndpointsVisibility above: assigning
+    // .checked fires no onchange, so the list's visibility (and lazy load)
+    // needs an explicit sync on every open, not just a save.
+    this.applyCliManagementVisibility();
     // Read My Mind: synced, default OFF (opt-in; capture + prediction cost real tokens).
     document.getElementById('appSettingsReadMyMind').checked = settings.readMyMindEnabled === true;
     document.getElementById('appSettingsUltracodeFloatingWindows').checked =
@@ -1307,29 +1313,53 @@ Object.assign(CodemanApp.prototype, {
     return flags[tool] !== false;
   },
 
+  /** Render the registry's enabled, available CLIs as welcome-screen actions. */
+  renderWelcomeCliActions() {
+    const container = document.getElementById('welcomeCliActions');
+    if (!container) return;
+    const catalog = Array.isArray(window.__codemanCliCatalog) ? window.__codemanCliCatalog : [];
+    container.replaceChildren();
+    for (const cli of catalog) {
+      if (!cli.enabled || !this.isCliAvailable(cli.id)) continue;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `welcome-btn welcome-btn-cli welcome-btn-${cli.id}`;
+      btn.dataset.mode = cli.id;
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('width', '20');
+      icon.setAttribute('height', '20');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('fill', 'none');
+      icon.setAttribute('stroke', 'currentColor');
+      icon.setAttribute('stroke-width', '2');
+      icon.setAttribute('aria-hidden', 'true');
+      const play = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      play.setAttribute('points', '5 3 19 12 5 21 5 3');
+      icon.appendChild(play);
+      btn.appendChild(icon);
+      // Same "Run <label>" text the static buttons had ("Run Claude Code", "Run Shell"),
+      // left translatable on purpose: i18n.js carries these strings, and a custom CLI's
+      // label simply has no dictionary entry, so it renders as typed.
+      btn.append(`Run ${cli.kind === 'shell' ? 'Shell' : cli.label}`);
+      btn.onclick = () => {
+        this.setRunMode(cli.id);
+        void this.run();
+      };
+      container.appendChild(btn);
+    }
+  },
+
   /**
-   * #200: show a welcome-screen button only where the thing it launches exists.
-   * The markup ships them hidden, so an old cached page can never flash a button
-   * for a tool this server does not have.
+   * #200: show a welcome-screen action only where the thing it launches exists.
+   * The registry catalog is injected with the initial document and is updated in
+   * place after a Settings toggle, so the page never offers a disabled CLI.
    */
   applyWelcomeCliVisibility() {
-    const buttons = [
-      ['welcomeClaudeBtn', 'claude'],
-      ['welcomeOpencodeBtn', 'opencode'],
-      ['welcomeAntigravityBtn', 'antigravity'],
-      ['welcomeOmpBtn', 'omp'],
-      ['welcomeGeminiBtn', 'gemini'],
-      ['welcomePiBtn', 'pi'],
-      ['welcomeGrokBtn', 'grok'],
-      ['welcomeDeepSeekBtn', 'deepseek'],
-      // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
-      // without cloudflared can only ever produce "cloudflared not found".
-      ['welcomeTunnelBtn', 'cloudflared'],
-    ];
-    for (const [id, tool] of buttons) {
-      const btn = document.getElementById(id);
-      if (btn) btn.style.display = this.isCliAvailable(tool) ? 'flex' : 'none';
-    }
+    this.renderWelcomeCliActions();
+    // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
+    // without cloudflared can only ever produce "cloudflared not found".
+    const tunnel = document.getElementById('welcomeTunnelBtn');
+    if (tunnel) tunnel.style.display = this.isCliAvailable('cloudflared') ? 'flex' : 'none';
   },
 
   async loadTunnelStatus() {
@@ -2128,6 +2158,7 @@ Object.assign(CodemanApp.prototype, {
       showUltracodeAgents: document.getElementById('appSettingsShowUltracodeAgents').checked,
       approvalsInboxEnabled: document.getElementById('appSettingsApprovalsInbox').checked,
       customModelEndpointsEnabled: document.getElementById('appSettingsCustomModelEndpoints').checked,
+      cliManagementEnabled: document.getElementById('appSettingsCliManagement').checked,
       readMyMindEnabled: document.getElementById('appSettingsReadMyMind').checked,
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
@@ -2721,6 +2752,282 @@ Object.assign(CodemanApp.prototype, {
     } catch (err) {
       this.showToast(`Failed to delete endpoint: ${err.message}`, 'error');
     }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // CLI management (docs/cli-enable-disable-plan.md)
+  //
+  // CRUD against /api/clis, rendered into the Agents & CLIs settings section.
+  // Same load/save-pair-outside-openAppSettings reasoning as the Custom Model
+  // Endpoints block above: these are server-side registry records, not a
+  // settings-payload field — only the `cliManagementEnabled` toggle itself
+  // goes through openAppSettings/saveAppSettings.
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Same two-caller shape as applyCustomModelEndpointsVisibility (assigning
+   * .checked fires no change event, so this needs both an explicit call on
+   * open AND the checkbox's own onchange) and the same reasoning for hiding
+   * the whole list rather than showing it disabled: with the flag off the
+   * rows would be controls that only 403.
+   */
+  applyCliManagementVisibility() {
+    const enabled = document.getElementById('appSettingsCliManagement').checked;
+    const group = document.getElementById('cliListGroup');
+    if (group) group.style.display = enabled ? '' : 'none';
+    if (enabled) this.loadCliListForSettings();
+    else this.closeCliCustomForm();
+    this._applyCliManagementAdminGate();
+  },
+
+  /**
+   * Decision 5 (docs/cli-enable-disable-plan.md): hidden entirely for a
+   * non-admin in multi-user mode, not shown-empty. GET /api/clis already
+   * answers a non-admin with [], which empties the row list on its own; the
+   * "Add a custom CLI" row has no list row to hide behind, so it needs its
+   * own gate the same way the Custom Model Endpoints "+ Add" button does.
+   */
+  _applyCliManagementAdminGate() {
+    const group = document.getElementById('cliListGroup');
+    if (!group) return;
+    const me = window.__codemanUser || {};
+    const blocked = me.multiUser && me.role !== 'admin';
+    const featureOn = document.getElementById('appSettingsCliManagement')?.checked ?? false;
+    group.style.display = blocked || !featureOn ? 'none' : '';
+    const addRow = document.getElementById('cliCustomAddToggle');
+    if (addRow) addRow.style.display = blocked ? 'none' : '';
+  },
+
+  async loadCliListForSettings() {
+    // GET /api/clis wraps its body in the { success, data } envelope like every
+    // other /api route — _apiJson() unwraps it, same reasoning as the Custom
+    // Model Endpoints list load above.
+    const clis = await this._apiJson('/api/clis');
+    this._cliList = Array.isArray(clis) ? clis : [];
+    this._syncCliLaunchCatalog();
+    this.renderCliList();
+  },
+
+  /** Keep the launch surfaces in sync with Settings mutations without a reload. */
+  _syncCliLaunchCatalog() {
+    if (!Array.isArray(this._cliList) || this._cliList.length === 0) return;
+    window.__codemanCliCatalog = this._cliList.map((cli) => ({
+      id: cli.id,
+      label: cli.label,
+      shortBadge: cli.shortBadge,
+      order: cli.order,
+      kind: cli.kind,
+      enabled: cli.enabled,
+      available: cli.kind === 'shell' || (cli.enabled && cli.installed),
+    }));
+    window.__codemanCliAvailable = {
+      ...(window.__codemanCliAvailable || {}),
+      ...Object.fromEntries(this._cliList.map((cli) => [cli.id, cli.kind === 'shell' || (cli.enabled && cli.installed)])),
+    };
+    if (!window.__codemanCliCatalog.some((cli) => cli.id === this.runMode && cli.enabled)) {
+      this.setRunMode?.('claude');
+    }
+    this.applyWelcomeCliVisibility?.();
+    this.renderRegistryRunOptions?.();
+    this.renderMobileOverview?.();
+    const menu = document.getElementById('runModeMenu');
+    if (menu) this._refreshRunModeAvailability?.(menu);
+  },
+
+  renderCliList() {
+    const list = document.getElementById('cliListRows');
+    if (!list) return;
+    const clis = [...(this._cliList || [])].sort((a, b) => {
+      // Installed CLIs first, alphabetically; then not-installed, alphabetically.
+      if (a.installed !== b.installed) return a.installed ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+    if (clis.length === 0) {
+      list.innerHTML = '<p class="set-group-hint">No CLIs found.</p>';
+      return;
+    }
+    // Mirrors cli-registry-routes.ts's own isUndisableable(): a kind 'shell' entry
+    // is the one the backend refuses to ever disable (keyed on kind, never an id).
+    // Revised 2026-09-23: rather
+    // than render a permanently-greyed switch for it (which read as "broken"
+    // next to every other row's working toggle), shell gets NO switch at all —
+    // a plain "Always available" label, so there is nothing to click that
+    // could look like it should work but doesn't.
+    list.innerHTML = clis
+      .map((c) => {
+        const idArg = escapeHtml(JSON.stringify(c.id));
+        const untoggleable = c.kind === 'shell';
+        const installBtn =
+          c.stock && !c.installed
+            ? `<button type="button" class="btn-toolbar btn-sm" onclick="app.installCliEntry(${idArg})" id="cliInstallBtn-${escapeHtml(c.id)}">Install</button>`
+            : '';
+        const customActions = c.stock
+          ? ''
+          : `<button type="button" class="btn-toolbar btn-sm" onclick="app.openCliCustomForm(${idArg})">Edit</button>
+             <button type="button" class="btn-toolbar btn-danger btn-sm" onclick="app.deleteCliCustom(${idArg})">Delete</button>`;
+        const toggle = untoggleable
+          ? '<span class="set-row-desc">Always available</span>'
+          : `<label class="switch switch-sm">
+              <input type="checkbox" ${c.enabled ? 'checked' : ''} onchange="app.toggleCliEnabled(${idArg}, this)">
+              <span class="slider"></span>
+            </label>`;
+        return `
+          <div class="set-row" data-cli-id="${escapeHtml(c.id)}">
+            <div class="set-row-text">
+              <span class="set-row-label">${escapeHtml(c.label)} <span class="set-scope">${escapeHtml(c.shortBadge)}</span></span>
+              <span class="set-row-desc">${c.installed ? 'Installed' : 'Not installed'}${c.stock ? '' : ' · custom'}</span>
+            </div>
+            <div class="set-row-actions">
+              ${installBtn}
+              ${customActions}
+              ${toggle}
+            </div>
+          </div>`;
+      })
+      .join('');
+  },
+
+  /**
+   * ⚠️ A successful toggle must patch `window.__codemanCliAvailable` and refresh
+   * every surface that reads it, or the change is invisible everywhere except
+   * this settings row until the next full page reload — `window.__codemanCliAvailable`
+   * is injected ONCE at initial page render (server.ts) and nothing else refetches
+   * it. Same pattern `installDeepSeekProfile()` already uses for the same reason.
+   */
+  async toggleCliEnabled(id, checkbox) {
+    const next = checkbox.checked;
+    const res = await this._api(`/api/clis/${encodeURIComponent(id)}`, { method: 'PUT', body: { enabled: next } });
+    if (!res || !res.ok) {
+      checkbox.checked = !next; // revert on failure — the row must not lie about server state
+      let detail = '';
+      try {
+        detail = (await res?.json())?.error || '';
+      } catch {
+        /* no body to read */
+      }
+      this.showToast(`Failed to ${next ? 'enable' : 'disable'} "${id}"${detail ? `: ${detail}` : ''}`, 'error');
+      return;
+    }
+    await this.loadCliListForSettings();
+  },
+
+  async installCliEntry(id) {
+    // Installing runs a command on the server, so it never happens on a single click:
+    // the confirm names the exact command POST /api/clis/:id/install would run (the
+    // #343 review's "auto-install may end up behind an explicit confirm").
+    const entry = (this._cliList || []).find((c) => c.id === id);
+    const label = entry?.label || id;
+    const command = entry?.installCommand;
+    const prompt = command
+      ? `Install ${label}? This runs the following on the Codeman server:\n\n${command}`
+      : `Install ${label}? This runs its official install command on the Codeman server.`;
+    if (!confirm(prompt)) return;
+    const btn = document.getElementById(`cliInstallBtn-${id}`);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Installing…';
+    }
+    try {
+      const res = await this._api(`/api/clis/${encodeURIComponent(id)}/install`, { method: 'POST' });
+      if (!res || !res.ok) {
+        let detail = '';
+        try {
+          detail = (await res?.json())?.error || '';
+        } catch {
+          /* no body to read */
+        }
+        this.showToast(`Installing "${id}" failed${detail ? `: ${detail}` : ''}`, 'error');
+        return;
+      }
+      this.showToast(`Installed "${id}"`, 'success');
+    } finally {
+      await this.loadCliListForSettings();
+    }
+  },
+
+  /**
+   * Pass no id to create a new entry; pass an existing CUSTOM id to edit one.
+   * ⚠️ GET /api/clis deliberately excludes discovery/launch (Phase 2's own
+   * scope), so an edit cannot be pre-filled with the entry's existing binary
+   * or argv — those two fields start blank and must be re-entered, since the
+   * update endpoint (PUT /api/clis/custom/:id) replaces the whole launch
+   * spec rather than patching it. id/label/badge DO come from the list row.
+   */
+  openCliCustomForm(editId) {
+    const form = document.getElementById('cliCustomForm');
+    const errorEl = document.getElementById('cliCustomFormError');
+    if (!form) return;
+    const existing = editId ? (this._cliList || []).find((c) => c.id === editId) : null;
+    this._editingCliCustomId = existing ? existing.id : null;
+    document.getElementById('cliCustomId').value = existing ? existing.id : '';
+    document.getElementById('cliCustomId').disabled = !!existing; // id is immutable once created
+    document.getElementById('cliCustomLabel').value = existing ? existing.label : '';
+    document.getElementById('cliCustomBadge').value = existing ? existing.shortBadge : '';
+    document.getElementById('cliCustomBinary').value = '';
+    document.getElementById('cliCustomArgv').value = '';
+    document.getElementById('cliCustomSubmit').textContent = existing ? 'Save' : 'Create';
+    if (errorEl) errorEl.style.display = 'none';
+    form.style.display = '';
+  },
+
+  closeCliCustomForm() {
+    const form = document.getElementById('cliCustomForm');
+    if (form) form.style.display = 'none';
+    this._editingCliCustomId = null;
+  },
+
+  /** Wired to #cliCustomForm's onsubmit; `event` is the submit event. */
+  async submitCliCustomForm(event) {
+    event.preventDefault();
+    const errorEl = document.getElementById('cliCustomFormError');
+    const showError = (msg) => {
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.style.display = '';
+      }
+    };
+    const id = document.getElementById('cliCustomId').value.trim();
+    const label = document.getElementById('cliCustomLabel').value.trim();
+    const shortBadge = document.getElementById('cliCustomBadge').value.trim();
+    const binaries = document.getElementById('cliCustomBinary').value.trim().split(/\s+/).filter(Boolean);
+    const argv = document.getElementById('cliCustomArgv').value.trim().split(/\s+/).filter(Boolean);
+    if (!id || !label || !shortBadge || binaries.length === 0 || argv.length === 0) {
+      showError('All fields are required.');
+      return;
+    }
+    const editing = this._editingCliCustomId;
+    const path = editing ? `/api/clis/custom/${encodeURIComponent(editing)}` : '/api/clis';
+    const method = editing ? 'PUT' : 'POST';
+    const res = await this._api(path, { method, body: { id, label, shortBadge, binaries, argv } });
+    if (!res || !res.ok) {
+      let detail = 'Request failed';
+      try {
+        detail = (await res?.json())?.error || detail;
+      } catch {
+        /* no body to read */
+      }
+      showError(detail);
+      return;
+    }
+    this.closeCliCustomForm();
+    await this.loadCliListForSettings();
+  },
+
+  async deleteCliCustom(id) {
+    const entry = (this._cliList || []).find((c) => c.id === id);
+    if (!confirm(`Delete custom CLI "${entry?.label || id}"? This cannot be undone.`)) return;
+    const res = await this._api(`/api/clis/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res || !res.ok) {
+      let detail = '';
+      try {
+        detail = (await res?.json())?.error || '';
+      } catch {
+        /* no body to read */
+      }
+      this.showToast(`Failed to delete "${id}"${detail ? `: ${detail}` : ''}`, 'error');
+      return;
+    }
+    await this.loadCliListForSettings();
   },
 
   // ═══════════════════════════════════════════════════════════════
@@ -3798,4 +4105,5 @@ Object.assign(CodemanApp.prototype, {
 // evaluation, not just this feature.
 document.addEventListener?.('codeman:me', () => {
   window.app?._applyCustomModelAdminGate?.();
+  window.app?._applyCliManagementAdminGate?.();
 });

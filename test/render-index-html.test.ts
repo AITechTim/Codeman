@@ -23,8 +23,11 @@ import { isDeepSeekAvailable, isDeepSeekRunnable } from '../src/utils/deepseek-c
 import { isOmpAvailable } from '../src/utils/omp-cli-resolver.js';
 import { isCloudflaredAvailable } from '../src/utils/cloudflared-resolver.js';
 import { isGitAvailable } from '../src/git-clone.js';
-import { enabledClis } from '../src/config/cli-registry/registry.js';
+import { enabledClis, reloadCliRegistry } from '../src/config/cli-registry/registry.js';
 import { STOCK_CLIS } from '../src/config/cli-registry/stock.js';
+import { dataPath } from '../src/config/instance.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 // renderIndexHtml probes the real PATH for every CLI, which would make the
 // assertions below depend on whatever happens to be installed on the machine
@@ -207,7 +210,57 @@ describe('WebServer.renderIndexHtml', () => {
       omp: true,
       cloudflared: true,
       git: true,
+      shell: true,
     });
+  });
+
+  it('reads as unavailable for a CLI disabled via the registry, even though it is installed', async () => {
+    // The bug this guards: a CLI toggled off in Settings (docs/cli-enable-disable-plan.md)
+    // still offered itself in the welcome screen / Run menu / mobile overview, because
+    // window.__codemanCliAvailable was built purely from each resolver's own PATH probe —
+    // it never consulted the registry's `enabled` flag at all. Installed AND enabled must
+    // both hold for `isCliAvailable()` (the client-side gate every one of those surfaces
+    // reads) to read true.
+    vi.mocked(isCodexAvailable).mockReturnValue(true);
+    vi.mocked(isClaudeAvailable).mockReturnValue(true);
+    const path = dataPath('clis.json');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ clis: { codex: { enabled: false } } }, null, 2), { mode: 0o600 });
+    reloadCliRegistry();
+    try {
+      const { server } = makeServer({});
+      const html = await render(server);
+      const flags = JSON.parse(html.match(/window\.__codemanCliAvailable=(\{.*?\});/)![1]);
+      expect(flags.codex).toBe(false); // installed, but disabled in the registry
+      expect(flags.claude).toBe(true); // installed and enabled — unaffected by codex's override
+    } finally {
+      writeFileSync(path, JSON.stringify({ clis: {} }, null, 2), { mode: 0o600 });
+      reloadCliRegistry();
+    }
+  });
+
+  it('injects the full registry catalog for every launch surface, including disabled entries', async () => {
+    const { server } = makeServer({});
+    const html = await render(server);
+    const catalog = JSON.parse(html.match(/window\.__codemanCliCatalog=(\[.*?\]);/)![1]) as Array<{
+      id: string;
+      label: string;
+      shortBadge: string;
+      order: number;
+      kind: string;
+      enabled: boolean;
+      available: boolean;
+    }>;
+    expect(catalog.map((entry) => entry.id)).toEqual(STOCK_CLIS.map((entry) => entry.id));
+    expect(catalog.find((entry) => entry.id === 'codex')).toMatchObject({ label: 'Codex', kind: 'agent' });
+    expect(catalog.find((entry) => entry.id === 'shell')).toMatchObject({ enabled: true, available: true });
+    expect(
+      catalog.every((entry) =>
+        Object.keys(entry).every((key) =>
+          ['id', 'label', 'shortBadge', 'order', 'kind', 'enabled', 'available'].includes(key)
+        )
+      )
+    ).toBe(true);
   });
 
   it('reports which run modes the custom-model Run-menu picker may generate an entry for', async () => {
@@ -297,7 +350,7 @@ describe('WebServer.renderIndexHtml', () => {
     const html = await render(server);
     expect(html).toContain('window.__codemanCliAvailable=');
     const flags = JSON.parse(html.match(/window\.__codemanCliAvailable=(\{.*?\});/)![1]);
-    expect(Object.values(flags).every((v) => v === false)).toBe(true);
+    expect(Object.entries(flags).every(([key, value]) => key === 'shell' || value === false)).toBe(true);
   });
 
   it('skips the probe for a solo window, which has no welcome screen or run menu', async () => {
@@ -305,6 +358,7 @@ describe('WebServer.renderIndexHtml', () => {
     const { server } = makeServer({});
     const html = await render(server, 'sess-123');
     expect(html).not.toContain('__codemanCliAvailable');
+    expect(html).not.toContain('__codemanCliCatalog');
     expect(html).not.toContain('__codemanCustomModelClis');
   });
 
