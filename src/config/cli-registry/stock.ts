@@ -75,11 +75,21 @@ function agentDefaults(): Pick<
   };
 }
 
+// `accent` on every entry below (except SHELL, which the frontend renders no
+// distinct color for) is measured from the actual `.btn-toolbar.btn-run.mode-<id>`
+// CSS rule's `border-color` on the OG skin (styles.css) — the single cleanest
+// representative hex each entry's own multi-stop gradient resolves around.
+// Corrected 2026-09-21 after PR #458's review found several were simply wrong
+// (e.g. claude was registered as Anthropic's brand orange, `#d97757`, but the
+// button renders blue): `docs/cli-registry.md`'s own "transcribed, not
+// authoritative, re-measure before wiring one up" warning for this
+// DECLARED-FOR-LATER field, taken literally. This is a data-accuracy fix only —
+// `accent` still has no reader, so nothing rendered changes because of it.
 const CLAUDE: CliEntry = {
   id: 'claude' as CliEntry['id'],
   label: 'Claude',
   shortBadge: 'CC',
-  accent: '#d97757',
+  accent: '#3b82f6',
   enabled: true,
   stock: true,
   order: 0,
@@ -368,7 +378,7 @@ const OPENCODE: CliEntry = {
   id: 'opencode' as CliEntry['id'],
   label: 'OpenCode',
   shortBadge: 'OC',
-  accent: '#f59e0b',
+  accent: '#10b981',
   enabled: true,
   stock: true,
   order: 10,
@@ -454,7 +464,7 @@ const CODEX: CliEntry = {
   id: 'codex' as CliEntry['id'],
   label: 'Codex',
   shortBadge: 'CX',
-  accent: '#6b7fd7',
+  accent: '#a855f7',
   enabled: true,
   stock: true,
   order: 20,
@@ -565,7 +575,7 @@ const GEMINI: CliEntry = {
   id: 'gemini' as CliEntry['id'],
   label: 'Gemini',
   shortBadge: 'GM',
-  accent: '#4285f4',
+  accent: '#60a5fa',
   enabled: true,
   stock: true,
   order: 30,
@@ -657,7 +667,7 @@ const ANTIGRAVITY: CliEntry = {
   id: 'antigravity' as CliEntry['id'],
   label: 'Antigravity',
   shortBadge: 'AG',
-  accent: '#8b5cf6',
+  accent: '#22d3ee',
   enabled: true,
   stock: true,
   order: 40,
@@ -727,7 +737,7 @@ const PI: CliEntry = {
   id: 'pi' as CliEntry['id'],
   label: 'Pi',
   shortBadge: 'PI',
-  accent: '#10b981',
+  accent: '#f472b6',
   enabled: true,
   stock: true,
   order: 50,
@@ -854,7 +864,7 @@ const GROK: CliEntry = {
   // `accent` is a single hex, so this is the closest single value (the run-mode-dot colour,
   // zinc-400). Nothing reads `accent` yet — the frontend is untouched in this change and
   // keeps its own hand-authored CSS; the field is here so the entry is complete.
-  accent: '#a1a1aa',
+  accent: '#d4d4d8',
   enabled: true,
   stock: true,
   order: 70,
@@ -986,7 +996,7 @@ const DEEPSEEK: CliEntry = {
   id: 'deepseek' as CliEntry['id'],
   label: 'DeepSeek',
   shortBadge: 'DS',
-  accent: '#4d6bfe',
+  accent: '#7c93ff',
   enabled: true,
   stock: true,
   order: 80,
@@ -1151,7 +1161,7 @@ const OMP: CliEntry = {
   id: 'omp' as CliEntry['id'],
   label: 'OMP',
   shortBadge: 'OM',
-  accent: '#7c9cf5',
+  accent: '#818cf8',
   enabled: true,
   stock: true,
   order: 90,

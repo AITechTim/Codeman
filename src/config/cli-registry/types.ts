@@ -651,7 +651,13 @@ export interface CliEntry {
   label: string;
   /** Two-ish character tab badge, e.g. 'OC'. */
   shortBadge: string;
-  /** Single hex colour. CSS derives every per-CLI gradient from it via --cli-accent. */
+  /**
+   * Single hex colour, measured from the CLI's actual `.btn-toolbar.btn-run.mode-<id>`
+   * gradient in styles.css (see stock.ts's comment above `CLAUDE` for the exact
+   * methodology). DECLARED-FOR-LATER (below) — no code reads this yet; styles.css's
+   * gradients are still hand-authored per id, not derived from this field via any
+   * CSS custom property. There is no `--cli-accent` variable in the codebase.
+   */
   accent: string;
   enabled: boolean;
   /** Set by the loader from the shipped catalog; a user entry can never claim it. */
