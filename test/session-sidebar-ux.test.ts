@@ -84,7 +84,7 @@ describe('watching badge on a rich session row', () => {
     // pill that says which one still decides the row; this badge only adds a fact.
     const meta = app.slice(app.indexOf('_sidebarRichMetaHTML(row) {'));
     const body = meta.slice(0, meta.indexOf('_sidebarRichStampText(timestamp, format) {'));
-    expect(body).toContain('tab-pill tab-pill--${escapeHtml(row.state)}');
+    expect(body).toContain('tab-pill tab-pill--${escapeHtml(pillMod)}');
     expect(body).toContain('tab-pill tab-pill--watching');
     expect(body).toContain('Still running in the background:');
   });
@@ -93,7 +93,7 @@ describe('watching badge on a rich session row', () => {
     // The meta line is rebuilt only when this signature moves, so a badge left out of
     // it would appear and disappear a render late, or not at all.
     expect(app).toContain(
-      'const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`'
+      "const sig = `${row.state}${row.exited ? '+exited' : ''}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`"
     );
   });
 

@@ -360,6 +360,12 @@ function paneExitLabel(paneExit) {
   return 'exited';
 }
 
+// The tab's accessible name, with the exit appended when there is one. Shared
+// by the full render and applyPaneExitBadge() so the two cannot disagree.
+function paneExitAriaLabel(name, label) {
+  return label ? `${name} session, agent ${label}` : `${name} session`;
+}
+
 // Add, update or remove one tab's exited-agent badge in place. Separate from
 // the render loop so it can be exercised directly: this is the only path a
 // session going live-to-exited ever takes, since that transition adds and
@@ -371,6 +377,10 @@ function applyPaneExitBadge(tab, paneExit) {
   // `busy` for an exited pane by design, so without this a green or pulsing dot
   // sits next to a badge saying the agent is gone.
   tab.classList.toggle('tab-agent-exited', !!label);
+  // The tab's aria-label overrides its contents for the accessible name, and the
+  // badge is aria-hidden like its siblings, so the exit has to ride the label.
+  const name = tab.querySelector('.tab-name')?.dataset?.fullName;
+  if (name) tab.setAttribute('aria-label', paneExitAriaLabel(name, label));
   if (!label) {
     existing?.remove();
     return;
@@ -378,6 +388,7 @@ function applyPaneExitBadge(tab, paneExit) {
   if (!existing) {
     const badge = document.createElement('span');
     badge.className = 'tab-exited-badge';
+    badge.setAttribute('aria-hidden', 'true');
     // Generated status text, like the status pills: it carries data-i18n-skip
     // rather than a dictionary entry. Without it the translator would rewrite
     // the badge and the next render pass would rewrite it back, because the
@@ -4863,16 +4874,30 @@ class CodemanApp {
   _sidebarRichRow(id, session) {
     if (typeof this._mobileOverviewState !== 'function') return null;
     const state = this._mobileOverviewState(session, this.pendingHooks?.get(id));
+    // An exited agent (Ark0N/Codeman#446) overrides the LABEL, never the state:
+    // `state` keys SESSION_ACTIVITY_RANK and the sort, while `status` stays idle
+    // or busy for an exited pane by design, so without this the muted dot sits
+    // beside a pill saying "idle". A pending alert still wins, exactly as it
+    // does for the dot.
+    const exited = !!paneExitLabel(session.paneExit) && (state === 'idle' || state === 'working');
+    const exitAt = exited ? Number(session.paneExit.at) || 0 : 0;
     return {
       state,
-      pill: this._sidebarRichPillLabel(state),
+      exited,
+      pill: exited ? 'exited' : this._sidebarRichPillLabel(state),
       // What the pane's own footer says is still running in the background ("1 monitor",
       // "2 shells"). A row that has one went quiet because the agent is waiting for that,
       // which is a different thing from waiting for the user — so it rides BESIDE the
       // state pill and never replaces it.
       watching: typeof session.watching === 'string' ? session.watching : '',
       createdAt: Number(session.createdAt) || 0,
-      since: this._mobileOverviewSince ? this._mobileOverviewSince(state, session) : null,
+      since: exitAt
+        ? { key: 'exited', at: exitAt }
+        : exited
+          ? null
+          : this._mobileOverviewSince
+            ? this._mobileOverviewSince(state, session)
+            : null,
     };
   }
 
@@ -4905,7 +4930,8 @@ class CodemanApp {
       parts.push('<span class="tab-meta-sep" aria-hidden="true">\u00B7</span>');
       parts.push(stamp(row.since.key, row.since.at, 'for', 'tab-meta-since'));
     }
-    parts.push(`<span class="tab-pill tab-pill--${escapeHtml(row.state)}">${escapeHtml(row.pill)}</span>`);
+    const pillMod = row.exited ? 'exited' : row.state;
+    parts.push(`<span class="tab-pill tab-pill--${escapeHtml(pillMod)}">${escapeHtml(row.pill)}</span>`);
     // The word is duplicated from mobile-overview.js for the same reason the pill labels
     // above are: it is one word, and this file must render a complete row even when a
     // stale cached mobile-overview.js has arrived without it.
@@ -4958,7 +4984,7 @@ class CodemanApp {
     // that one goes through escapeHtml() because it is interpolated into markup, and the
     // browser hands the decoded string back through `dataset`. `watching` is the only
     // pane-derived value in this signature, which is why it is the only one escaped there.
-    const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`;
+    const sig = `${row.state}${row.exited ? '+exited' : ''}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`;
     if (tab.dataset.tabMetaSig === sig) return;
     tab.dataset.tabMetaSig = sig;
     tab.dataset.tabState = row.state;
@@ -5582,7 +5608,7 @@ class CodemanApp {
       const richMeta = this._sidebarRichMetaHTML(richRow);
       const richClass = richRow ? ` tab-state-${richRow.state}` : '';
       const richData = richRow
-        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}:${escapeHtml(richRow.watching)}"`
+        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}${richRow.exited ? '+exited' : ''}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}:${escapeHtml(richRow.watching)}"`
         : '';
 
       // '' whenever the server said nothing about this pane's agent, which covers
@@ -5593,7 +5619,7 @@ class CodemanApp {
       const inlineSessionActions = this.shouldInlineSessionActions();
       const tabActionsHtml = `<span class="tab-actions"><span class="tab-gear" onclick="event.stopPropagation(); app.openSessionOptions(${escapeHtml(JSON.stringify(id))})" title="Session options" aria-label="Session options" tabindex="0">&#x2699;</span><span class="tab-detach" onclick="event.stopPropagation(); app.detachSession(${escapeHtml(JSON.stringify(id))})" title="Open in a new window" aria-label="Open session in a new window" tabindex="0">&#x29C9;</span><span class="tab-close" onclick="event.stopPropagation(); app.requestCloseSession(${escapeHtml(JSON.stringify(id))})" title="Close session" aria-label="Close session" tabindex="0">&times;</span><button type="button" class="tab-more" onclick="event.stopPropagation(); app.openTabRailActionMenu(event, ${escapeHtml(JSON.stringify(id))})" title="Session actions" aria-label="Session actions">&#x22EF;</button></span>`;
 
-      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(name)} session" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
+      parts.push(`<div class="session-tab ${isActive ? 'active' : ''}${alertClass}${richClass}${paneExitBadge ? ' tab-agent-exited' : ''}${loadState ? ' tab-loading' : ''}${this.hasTabDetachOverride(id) ? ' tab-show-detach' : ''}"${richData}${railOrderStyle} data-id="${id}" data-color="${color}" ${loadState ? `data-load-phase="${escapeHtml(loadState.phase)}"` : ''} onclick="app.handleSessionTabClick(event, ${escapeHtml(JSON.stringify(id))})" oncontextmenu="event.preventDefault(); app.startInlineRename(${escapeHtml(JSON.stringify(id))})" tabindex="0" role="tab" aria-selected="${isActive ? 'true' : 'false'}" aria-busy="${loadState ? 'true' : 'false'}" aria-label="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}" ${tabTooltip ? `title="${escapeHtml(tabTooltip)}"` : ''}>
           ${_tabIdx < 9 ? '<span class="tab-number">' + (_tabIdx + 1) + '</span>' : ''}
           ${loadState ? '<span class="tab-load-spinner" aria-hidden="true"></span>' : ''}
           <span class="tab-status ${status}" aria-hidden="true"></span>
@@ -5601,7 +5627,7 @@ class CodemanApp {
             <span class="tab-name-row">
               ${mode === 'shell' ? '<span class="tab-mode shell" aria-hidden="true">sh</span>' : mode === 'opencode' ? '<span class="tab-mode opencode" aria-hidden="true">oc</span>' : mode === 'codex' ? '<span class="tab-mode codex" aria-hidden="true">cx</span>' : mode === 'gemini' ? '<span class="tab-mode gemini" aria-hidden="true">gm</span>' : mode === 'antigravity' ? '<span class="tab-mode antigravity" aria-hidden="true">ag</span>' : mode === 'pi' ? '<span class="tab-mode pi" aria-hidden="true">pi</span>' : mode === 'grok' ? '<span class="tab-mode grok" aria-hidden="true">gk</span>' : mode === 'deepseek' ? '<span class="tab-mode deepseek" aria-hidden="true">ds</span>' : mode === 'omp' ? '<span class="tab-mode omp" aria-hidden="true">om</span>' : ''}
               <span class="tab-name" data-session-id="${id}" data-full-name="${escapeHtml(name)}">${tabLabel}</span>
-              ${paneExitBadge ? `<span class="tab-exited-badge" data-i18n-skip>${escapeHtml(paneExitBadge)}</span>` : ''}
+              ${paneExitBadge ? `<span class="tab-exited-badge" data-i18n-skip aria-hidden="true">${escapeHtml(paneExitBadge)}</span>` : ''}
               ${inlineSessionActions ? tabActionsHtml : ''}
               <span class="tab-detached-badge" aria-hidden="true">detached</span>
             </span>

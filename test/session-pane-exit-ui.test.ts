@@ -60,6 +60,7 @@ describe('the exited-agent badge in a tab', () => {
   const appJs = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
   const source = [
     appJs.match(/function paneExitLabel\([\s\S]*?\n\}/)?.[0],
+    appJs.match(/function paneExitAriaLabel\([\s\S]*?\n\}/)?.[0],
     appJs.match(/function applyPaneExitBadge\([\s\S]*?\n\}/)?.[0],
   ].join('\n');
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>');
@@ -71,7 +72,8 @@ describe('the exited-agent badge in a tab', () => {
   const makeTab = () => {
     const tab = dom.window.document.createElement('div');
     tab.className = 'session-tab';
-    tab.innerHTML = '<span class="tab-name">w1-case</span>';
+    tab.setAttribute('aria-label', 'w1-case session');
+    tab.innerHTML = '<span class="tab-name" data-full-name="w1-case">w1-case</span>';
     return tab;
   };
   const badge = (tab: { querySelector: (s: string) => { textContent: string | null } | null }) =>
@@ -94,6 +96,27 @@ describe('the exited-agent badge in a tab', () => {
     const tab = makeTab();
     applyPaneExitBadge(tab, { status: 0, at: 1 });
     expect(badge(tab)?.hasAttribute('data-i18n-skip')).toBe(true);
+  });
+
+  it('hides the badge from assistive technology, like its sibling badges', () => {
+    const tab = makeTab();
+    applyPaneExitBadge(tab, { status: 0, at: 1 });
+    expect(badge(tab)?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('carries the exit on the tab accessible name instead, and drops it again', () => {
+    // The tab's aria-label overrides its contents, so the badge alone would leave
+    // a screen reader announcing an exited tab exactly like a live one.
+    const tab = makeTab();
+    applyPaneExitBadge(tab, { status: 137, at: 1 });
+    expect(tab.getAttribute('aria-label')).toBe('w1-case session, agent exited (137)');
+    applyPaneExitBadge(tab, undefined);
+    expect(tab.getAttribute('aria-label')).toBe('w1-case session');
+  });
+
+  it('builds the full render path accessible name from the same helper', () => {
+    expect(appJs).toContain('aria-label="${escapeHtml(paneExitAriaLabel(name, paneExitBadge))}"');
+    expect(appJs).toContain('<span class="tab-exited-badge" data-i18n-skip aria-hidden="true">');
   });
 
   it('updates the text in place rather than stacking a second badge', () => {
@@ -132,6 +155,72 @@ describe('the exited-agent badge in a tab', () => {
 
   it('is what the incremental render path calls', () => {
     expect(appJs).toContain('applyPaneExitBadge(tab, session.paneExit)');
+  });
+});
+
+describe('the rich row pill of an exited session', () => {
+  // The detailed sidebar and rail classify rows through `_mobileOverviewState()`,
+  // which reads `status` and knows nothing about the exit, so without an override
+  // the muted dot sat beside a pill saying "idle".
+  const appJs = readFileSync(resolve(import.meta.dirname, '../src/web/public/app.js'), 'utf8');
+  const fn = (re: RegExp, name: string) => {
+    const m = appJs.match(re)?.[0];
+    if (!m) throw new Error(`${name} not found in app.js`);
+    return m;
+  };
+  type Row = { state: string; exited: boolean; pill: string; since: { key: string; at: number } | null };
+  const host = new Function(
+    `${fn(/function paneExitLabel\([\s\S]*?\n\}/, 'paneExitLabel')}
+    return {
+      ${fn(/ {2}_sidebarRichPillLabel\(state\) \{[\s\S]*?\n {2}\}/, '_sidebarRichPillLabel')},
+      ${fn(/ {2}_sidebarRichRow\(id, session\) \{[\s\S]*?\n {2}\}/, '_sidebarRichRow')},
+      _mobileOverviewState(session, hooks) {
+        if (hooks && hooks.has('permission_prompt')) return 'needs';
+        if (hooks && hooks.has('idle_prompt')) return 'waiting';
+        return session.status === 'busy' ? 'working' : 'idle';
+      },
+      _mobileOverviewSince(state, session) {
+        return { key: state, at: session.lastActivityAt };
+      },
+    };`
+  )() as { pendingHooks?: Map<string, Set<string>>; _sidebarRichRow: (id: string, s: unknown) => Row };
+
+  it('says exited, measured from when the exit was observed', () => {
+    const row = host._sidebarRichRow('s1', { status: 'idle', lastActivityAt: 5, paneExit: { status: 137, at: 42 } });
+    expect(row.state).toBe('idle');
+    expect(row.exited).toBe(true);
+    expect(row.pill).toBe('exited');
+    expect(row.since).toEqual({ key: 'exited', at: 42 });
+  });
+
+  it('keeps the classified state for sorting, so the home-screen order is unchanged', () => {
+    const row = host._sidebarRichRow('s1', { status: 'busy', lastActivityAt: 5, paneExit: { at: 42 } });
+    expect(row.state).toBe('working');
+    expect(row.pill).toBe('exited');
+  });
+
+  it('lets a pending permission dialog keep its own pill', () => {
+    host.pendingHooks = new Map([['s1', new Set(['permission_prompt'])]]);
+    try {
+      const row = host._sidebarRichRow('s1', { status: 'idle', lastActivityAt: 5, paneExit: { status: 0, at: 42 } });
+      expect(row.exited).toBe(false);
+      expect(row.pill).toBe('needs you');
+    } finally {
+      host.pendingHooks = undefined;
+    }
+  });
+
+  it('reads idle for a live session', () => {
+    const row = host._sidebarRichRow('s1', { status: 'idle', lastActivityAt: 5 });
+    expect(row.exited).toBe(false);
+    expect(row.pill).toBe('idle');
+    expect(row.since).toEqual({ key: 'idle', at: 5 });
+  });
+
+  it('styles the exited pill on both rich surfaces', () => {
+    const css = readFileSync(resolve(import.meta.dirname, '../src/web/public/styles.css'), 'utf8');
+    expect(css).toContain('html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--exited');
+    expect(css).toContain('.tab-rail .tab-pill--exited');
   });
 });
 

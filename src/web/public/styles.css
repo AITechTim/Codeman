@@ -18429,6 +18429,15 @@ html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail
   color: color-mix(in srgb, var(--green) 45%, var(--text-muted));
 }
 
+/* An exited agent (Ark0N/Codeman#446): neutral, like the muted dot beside it.
+   No green at all, since nothing is running behind this row. */
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--exited,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--exited {
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+  border-color: color-mix(in srgb, var(--text-muted) 30%, var(--border));
+  color: var(--text-muted);
+}
+
 /* Accent, deliberately none of the three above: a watching session is waiting for
    work it started itself, not for the user, and the red and yellow here are spoken
    for by sessions that ARE waiting for the user. */

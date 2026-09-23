@@ -1003,6 +1003,11 @@ describe('parsePaneRows', () => {
     expect(row.exitStatus).toBe(0);
   });
 
+  it('still reads the pid when a trailing field is junk', () => {
+    // Carried over from the retired parsePaneList case 'splits on the first separator only'.
+    expect(pids('codeman-aaaa|1234|extra-field').get('codeman-aaaa')).toBe(1234);
+  });
+
   it('calls a non-numeric dead flag unknown rather than false', () => {
     const [row] = parsePaneRows('codeman-aaaa|1234|?||');
     expect(row.dead).toBeUndefined();
