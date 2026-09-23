@@ -220,6 +220,21 @@ const CLAUDE: CliEntry = {
     workDetect: {
       promptGlyph: '❯',
       workingLine: String.raw`…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b|esc to interrupt`,
+      // Claude prints what it started in the background on the footer row beneath its
+      // composer, as `⏵⏵ bypass permissions on · 1 monitor · ← for agents`. The labels are
+      // the CLI's own words for each kind of background task, and group 1 is the one
+      // Codeman badges the session with. Verified against a live 2.1.278 pane on
+      // 2026-09-21.
+      // ⚠️ Two things keep an agent from writing its own label here, and both matter.
+      // The footer is the LAST row, so the default one-row window (`WATCHING_TAIL_LINES`)
+      // holds nothing but Ink's own chrome — in particular it leaves out the status line
+      // directly above, whose content comes from a `statusLine` command a bypassed
+      // session can write into its own `.claude/settings.json`. And the leading `·` keeps
+      // the match on the footer's own item list rather than on any text that happens to
+      // carry a count. A footer that ever drew the chip as its only item would report no
+      // watching rather than open that door. See `watchingLabel()` in
+      // `session-activity.ts`.
+      watchingLine: String.raw`·\s*(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?|Artifact comment monitors?))`,
     },
     requiresMux: false,
     // Claude installs Codeman's own hooks block into every workspace it runs in, so its
@@ -532,7 +547,37 @@ const CODEX: CliEntry = {
     // `Working (2m 49s • esc to interrupt)` above it while a turn runs. It animates no
     // braille spinner, and it never prints `esc to interrupt` at rest, so that phrase
     // alone separates a running turn from an idle one.
-    workDetect: { promptGlyph: '›', workingLine: '[Ee]sc to interrupt' },
+    // Codex pins a row of its own while a background terminal it started is still
+    // running: `  1 background terminal running · /ps to view · /stop to close`. Unlike
+    // Claude's footer chip that row sits ABOVE the composer, which puts it third from the
+    // bottom once the status line and the composer are counted, hence `watchingLines`.
+    // Measured against a live codex-cli 0.154.0 pane on 2026-09-22: the row appears when
+    // the terminal starts, follows the composer down as the conversation grows, and is
+    // gone after `/stop`.
+    // ⚠️ This entry CANNOT promise what Claude's does, and the difference is Codex's
+    // layout rather than its pattern. The third row from the bottom is the chip only
+    // while a terminal runs; with none running it is the last row of the transcript,
+    // which the agent writes. Matching the complete row raises the bar — an assistant
+    // message has to end with this exact line, to the character — but nothing here makes
+    // forging it impossible, so do not read the Claude comment above as applying here.
+    // What contains it is that codex declares `hooks: 'none'`: no hook event from a codex
+    // session ever reaches `notePrompt()`, so there is no idle item to pre-acknowledge
+    // and a forged label costs a wrong badge and nothing else. A CLI that gains hook
+    // signals must not keep a pattern this soft.
+    // ⚠️ Background TERMINALS are the only background work codex advertises on screen.
+    // A sub-agent started without waiting outlives the turn just as a terminal does —
+    // measured 2026-09-22, the sandboxed process was still running — and the pane shows
+    // nothing at all for it: the last rows are the composer and the status line, and
+    // `Sub-agents running` lives in the on-demand `/subagents` panel, not above the
+    // composer. So a codex session waiting on a sub-agent reads as plainly idle here.
+    // Nothing is misfiled by that (codex raises no idle prompts), and there is no row to
+    // match until codex pins one.
+    workDetect: {
+      promptGlyph: '›',
+      workingLine: '[Ee]sc to interrupt',
+      watchingLine: String.raw`^\s{0,4}(\d+ background terminals?) running · /ps to view · /stop to close$`,
+      watchingLines: 3,
+    },
     // Two columns, like claude's, measured on a live 0.154.0 answer: the `•`/`›`/`⚠`
     // markers sit in the gutter, prose continuations sit at 2, and a nested YAML block
     // the model wrote rendered at 2/4/6/8 for its own 0/2/4/6. Replayed at 100, 120,

@@ -4623,6 +4623,11 @@ class CodemanApp {
     return {
       state,
       pill: this._sidebarRichPillLabel(state),
+      // What the pane's own footer says is still running in the background ("1 monitor",
+      // "2 shells"). A row that has one went quiet because the agent is waiting for that,
+      // which is a different thing from waiting for the user — so it rides BESIDE the
+      // state pill and never replaces it.
+      watching: typeof session.watching === 'string' ? session.watching : '',
       createdAt: Number(session.createdAt) || 0,
       since: this._mobileOverviewSince ? this._mobileOverviewSince(state, session) : null,
     };
@@ -4658,6 +4663,17 @@ class CodemanApp {
       parts.push(stamp(row.since.key, row.since.at, 'for', 'tab-meta-since'));
     }
     parts.push(`<span class="tab-pill tab-pill--${escapeHtml(row.state)}">${escapeHtml(row.pill)}</span>`);
+    // The word is duplicated from mobile-overview.js for the same reason the pill labels
+    // above are: it is one word, and this file must render a complete row even when a
+    // stale cached mobile-overview.js has arrived without it.
+    // The visible text is that constant. The pane-derived label appears only in the
+    // tooltip, where escapeHtml() (which escapes both quote characters) is what this file
+    // already relies on for every untrusted string it puts in an attribute, and where the
+    // source caps it at MAX_WATCHING_LABEL_CHARS before it ever gets here.
+    if (row.watching) {
+      const title = escapeHtml(`Still running in the background: ${row.watching}`);
+      parts.push(`<span class="tab-pill tab-pill--watching" title="${title}">watching</span>`);
+    }
     // Both absolute stamps ALSO on the line itself, not only on the two items.
     // Below 288px the rail hides `.tab-meta-created` (the `tab-rail-tight`
     // rule), and a tooltip on a `display: none` element has no hover target —
@@ -4695,7 +4711,11 @@ class CodemanApp {
     const prev = tab.dataset.tabState;
     // The since ANCHOR moves without the state changing (each new turn re-stamps
     // lastSubmitAt), so key the compare on both.
-    const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}`;
+    // Unescaped on purpose, and it still matches the attribute the initial render wrote:
+    // that one goes through escapeHtml() because it is interpolated into markup, and the
+    // browser hands the decoded string back through `dataset`. `watching` is the only
+    // pane-derived value in this signature, which is why it is the only one escaped there.
+    const sig = `${row.state}:${row.since ? row.since.at : 0}:${row.createdAt}:${row.watching}`;
     if (tab.dataset.tabMetaSig === sig) return;
     tab.dataset.tabMetaSig = sig;
     tab.dataset.tabState = row.state;
@@ -5319,7 +5339,7 @@ class CodemanApp {
       const richMeta = this._sidebarRichMetaHTML(richRow);
       const richClass = richRow ? ` tab-state-${richRow.state}` : '';
       const richData = richRow
-        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}"`
+        ? ` data-tab-state="${richRow.state}" data-tab-meta-sig="${richRow.state}:${richRow.since ? richRow.since.at : 0}:${richRow.createdAt}:${escapeHtml(richRow.watching)}"`
         : '';
 
       // '' whenever the server said nothing about this pane's agent, which covers

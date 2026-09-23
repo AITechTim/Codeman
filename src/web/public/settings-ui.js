@@ -14,6 +14,14 @@
 Object.assign(CodemanApp.prototype, {
   // Hooks (Claude Code hook events)
   _onHookIdlePrompt(data) {
+    // A prompt the server opened ALREADY acknowledged raises no alert here. Today that
+    // means the session is watching work it started itself (`acknowledgedReason` reads
+    // "watching 1 monitor"), so the pane is quiet because the agent is waiting for its
+    // own monitor, not for you. The item still exists and still shows in the drawer;
+    // only the tab alert and the desktop notification are declined. A page that reloads
+    // instead of receiving this event reaches the same conclusion from `acknowledgedAt`
+    // in seedApprovals (approvals-ui.js).
+    if (data.acknowledgedReason) return;
     // Always track pending hook - alert will show when switching away from session
     if (data.sessionId) {
       this.setPendingHook(data.sessionId, 'idle_prompt');

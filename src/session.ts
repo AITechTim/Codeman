@@ -84,6 +84,8 @@ import {
   trackActivityStreak,
   isSustainedActivity,
   isPaneQuiet,
+  watchingLabel,
+  WATCHING_TAIL_LINES,
   IDLE_RECHECK_MS,
   PANE_PROBE_MIN_INTERVAL_MS,
   PANE_PROBE_RECHECK_MS,
@@ -500,8 +502,35 @@ export class Session extends EventEmitter {
   private _activityStreak: ActivityStreak | null = null; // Unbroken run of PTY repaints (working detection)
   private _lastPaneProbeAt = 0; // Throttle for the tmux screen probe
   private _lastPaneProbeWorking: boolean | null = null; // Its last verdict (null = could not read)
+  /**
+   * Background work the pane's own footer reports, e.g. `1 monitor`; null for none.
+   *
+   * Cached BESIDE `_lastPaneProbeWorking` and refreshed only by a capture that really
+   * happened, so it goes stale exactly as that verdict does. The probe returns its
+   * cached boolean without re-capturing inside `PANE_PROBE_MIN_INTERVAL_MS`, and a
+   * label derived from a capture nobody took would be a guess wearing a fact's clothes.
+   *
+   * ⚠️ It then FREEZES once `_confirmIdle()` concludes: `activityTimeout` is null from
+   * there, and nothing looks at the pane again until it produces output. That is
+   * correct rather than merely tolerable, because work ending repaints the pane either
+   * way — a monitor firing wakes the agent, and codex drops its background-terminal row
+   * on its own. Do not add a timer to keep this fresh; it would spend a `capture-pane`
+   * per idle session per tick to learn nothing.
+   *
+   * A server restart is not a hole in that either, though it looks like one: this field
+   * is live state and starts empty. Reconciliation re-attaches the pane, the attach
+   * repaint carries the composer glyph, and the idle confirmation that arms on it probes
+   * and re-reads the label with no input from anyone — measured 2026-09-23 on a restarted
+   * instance, back within ~20 s for a session whose background terminal was still
+   * running. A session that comes back with no label has no chip on its screen.
+   */
+  private _watching: string | null = null;
   /** Lazily compiled `capabilities.workDetect.workingLine`. See _workingLinePattern(). */
   private _workingLineRe: RegExp | undefined = undefined;
+  /** Lazily compiled `capabilities.workDetect.watchingLine`. See _watchingLinePattern(). */
+  private _watchingLineRe: RegExp | null | undefined = undefined;
+  /** Resolved with the pattern above: how many rows at the foot of the screen to search. */
+  private _watchingWindow = WATCHING_TAIL_LINES;
   private _trustDialogAccepted: boolean = false; // Stops the trust-dialog scan (answered, or given up)
   private _trustDialogAttempts = 0; // Keystrokes sent at the trust dialog
   private _lastTrustDialogScanAt = 0; // Throttle for the trust-dialog screen read
@@ -1219,6 +1248,16 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * What the pane says is still running in the background, e.g. `1 monitor`, or null when
+   * nothing is. A session with a label here has ended its turn without wanting anything
+   * from the user, so a surface that would otherwise file it under "needs you" can say
+   * what it is waiting for instead.
+   */
+  get watching(): string | null {
+    return this._watching;
+  }
+
+  /**
    * Check if the session's process tree has active child processes beyond Claude itself.
    * Detects running bash tools, test suites, builds, servers, etc. that Claude spawned.
    *
@@ -1779,6 +1818,7 @@ export class Session extends EventEmitter {
       totalCost: this._totalCost,
       messageCount: this._messages.length,
       isWorking: this._isWorking,
+      watching: this._watching,
       lastPromptTime: this._lastPromptTime,
       // Buffer statistics for monitoring long-running sessions
       bufferStats: {
@@ -2937,7 +2977,58 @@ export class Session extends EventEmitter {
     this._lastPaneProbeAt = now;
     const text = this._mux.capturePaneText?.(this._muxSession.muxName) ?? null;
     this._lastPaneProbeWorking = text === null ? null : this._workingLinePattern().test(text);
+    this._readWatching(text);
     return this._lastPaneProbeWorking;
+  }
+
+  /**
+   * Read the background-work chip off the same capture the working probe just took.
+   *
+   * The two questions are different. A turn that is running is work the user is waiting
+   * for; a monitor, a backgrounded shell or a cloud session the agent started is work
+   * the AGENT is waiting for, and it is the reason a pane can sit at its composer with
+   * nothing to say and still not want anything from the user. `_confirmIdle` takes this
+   * capture at exactly the moment the turn ends, which is the moment the answer starts
+   * mattering.
+   *
+   * A capture that could not be read leaves the last answer standing, the way the
+   * working probe treats its own null: no evidence is not evidence of none.
+   */
+  private _readWatching(paneText: string | null): void {
+    const pattern = this._watchingLinePattern();
+    // Called only from the probe, and only with what a capture returned: `null` is
+    // "the screen could not be read", which is not evidence that nothing is running.
+    if (!pattern || paneText === null) return;
+    const label = watchingLabel(paneText, pattern, this._watchingWindow);
+    if (label === this._watching) return;
+    this._watching = label;
+    // ⚠️ This CHANGES while the session's status does not, so it needs an event of its
+    // own. The label is usually set on the idle transition, which broadcasts anyway, but
+    // it CLEARS when the work ends — and for a CLI whose background work ends without
+    // taking a turn (measured on codex: a background terminal finishing repaints the row
+    // away and nothing else happens) the session is idle before and after. Without this,
+    // the server knew the badge was gone and every open page went on drawing it until
+    // some unrelated event arrived.
+    this.emit('watchingChanged');
+  }
+
+  /**
+   * The regex matching this CLI's background-work chip, or null for a CLI whose registry
+   * entry declares none. Compiled once per session, like the working-line pattern, and
+   * null rather than a fallback: no other CLI has been measured drawing such a chip, and
+   * guessing one would badge sessions on the strength of an unread screen.
+   */
+  private _watchingLinePattern(): RegExp | null {
+    if (this._watchingLineRe === undefined) {
+      // The pattern and the window it runs over are one decision, so they are resolved
+      // together: how far up the screen a CLI's row can sit is as much a property of its
+      // layout as the row itself. Claude writes on the last row and keeps the default,
+      // Codex pins one above its composer and declares more.
+      const detect = getCli(this.mode)?.capabilities.workDetect;
+      this._watchingLineRe = detect?.watchingLine ? compileVersionRegex(detect.watchingLine) : null;
+      this._watchingWindow = detect?.watchingLines ?? WATCHING_TAIL_LINES;
+    }
+    return this._watchingLineRe;
   }
 
   /**
@@ -4191,6 +4282,9 @@ export class Session extends EventEmitter {
   async stop(killMux: boolean = true): Promise<void> {
     // Set stopped flag first to prevent new timers from being created
     this._isStopped = true;
+    // A pane that is gone is watching nothing. Nothing probes a stopped session, so
+    // without this the last chip it drew would ride along on its row forever.
+    this._watching = null;
 
     this._clearAllTimers();
 

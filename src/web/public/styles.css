@@ -12427,6 +12427,17 @@ kbd {
   color: var(--text-dim);
   font-size: 0.68rem;
 }
+/* Why this card is not blinking at anyone: the session is watching work it
+   started itself. Accent, like the watching badge on a session row, and never
+   the red or yellow that mean a human is needed. */
+.approval-quiet {
+  margin-bottom: 6px;
+  color: var(--accent);
+  font-size: 0.68rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .approval-summary {
   color: var(--text);
   font-size: 0.76rem;
@@ -16314,6 +16325,17 @@ html[data-tab-orientation='vertical'] .home-sessions {
   color: color-mix(in srgb, var(--green) 45%, var(--text-muted));
 }
 
+/* Accent, deliberately none of the three above: a session that is watching something
+   it started (a monitor, a backgrounded shell, a cloud session) is not asking for
+   anything, so it must not borrow the red or the yellow that mean it is. This badge
+   sits BESIDE the state pill rather than replacing it, since an agent can arm a
+   monitor and ask a question in the same breath. */
+.home-sessions-pill--watching {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+
 /* Row accents: same language as the session tabs and the phone overview — red
    means a question is pending, yellow means it wants input, green means work is
    happening. Nothing else on this screen may reuse these colors. */
@@ -18374,6 +18396,16 @@ html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail
   background: color-mix(in srgb, var(--green) 7%, transparent);
   border-color: color-mix(in srgb, var(--green) 18%, var(--border));
   color: color-mix(in srgb, var(--green) 45%, var(--text-muted));
+}
+
+/* Accent, deliberately none of the three above: a watching session is waiting for
+   work it started itself, not for the user, and the red and yellow here are spoken
+   for by sessions that ARE waiting for the user. */
+html[data-sidebar-detail="rich"] .session-sidebar .tab-pill--watching,
+html[data-tab-orientation='vertical'][data-tab-rail-detail='rich']:not(.tab-rail-compact) .tab-rail .tab-pill--watching {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
 }
 
 /* Three lines of content per row instead of two, so give them room to breathe

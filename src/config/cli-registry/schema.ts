@@ -325,8 +325,29 @@ const capabilitiesSchema = z
             (src) => compileVersionRegex(src) !== null,
             'workingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
           ),
+        // Same guard, same reasons: this one runs over the foot of a pane capture every
+        // time a session settles, and ~/.codeman/clis.json can set it.
+        watchingLine: z
+          .string()
+          .min(1)
+          .refine(
+            (src) => compileVersionRegex(src) !== null,
+            'watchingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
+          )
+          .optional(),
+        // Bounded hard: this is how far up the screen a config file may push the search,
+        // and every row it adds is one more row the agent itself may be able to write.
+        watchingLines: z.number().int().min(1).max(8).optional(),
       })
       .strict()
+      // A window with nothing to search is a typo, not a configuration. Refused at LOAD
+      // time for the same reason `privilegedParams[].param` is checked against the params
+      // the entry declares: the failure is otherwise silent and looks like a feature that
+      // simply never fires.
+      .refine(
+        (v) => v.watchingLines === undefined || v.watchingLine !== undefined,
+        'watchingLines has nothing to bound without a watchingLine'
+      )
       .optional(),
     model: z
       .object({ source: z.enum(['flag', 'claude-settings-file', 'none']), param: z.string().optional() })
