@@ -14,6 +14,8 @@ import { basename, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { dataPath } from './config/instance.js';
 import { getCli } from './config/cli-registry/index.js';
+import type { CliCapabilities, CliEntry } from './config/cli-registry/types.js';
+import { buildEffortCliArgs } from './session-cli-builder.js';
 import type {
   CreateSessionOptions,
   MuxSession,
@@ -52,6 +54,9 @@ interface PersistedHerdrMapping extends WorkspaceOrigin {
   observedPaneLabel?: string;
   observedAgentName?: string;
   pendingPaneLabel?: string;
+  projectAlias?: string;
+  agentNameAlias?: string;
+  lastReportedTitle?: string;
 }
 
 function record(value: unknown): JsonRecord {
@@ -91,6 +96,53 @@ function sessionMode(kind: string): SessionMode {
 
 function isShellMode(mode: SessionMode): boolean {
   return getCli(mode)?.kind === 'shell';
+}
+
+function codexNativeArgs(options: CreateSessionOptions): string[] {
+  const args: string[] = [];
+  if (options.codexConfig?.dangerouslyBypassApprovals) args.push('--dangerously-bypass-approvals-and-sandbox');
+  if (options.codexConfig?.animations !== undefined) {
+    args.push('--config', `tui.animations=${options.codexConfig.animations ? 'true' : 'false'}`);
+  }
+  if (options.codexConfig?.model) args.push('--model', options.codexConfig.model);
+  if (options.codexConfig?.resumeSessionId) args.push('resume', options.codexConfig.resumeSessionId);
+  return args;
+}
+
+// Mirrors the registry's claude `new`/`resume` launch variants. Herdr passes these
+// as argv, so values need no shell quoting. `--session-id` pins the conversation
+// to the Codeman session id, which is what the claude-jsonl transcript reader keys on.
+function claudeNativeArgs(options: CreateSessionOptions): string[] {
+  const args: string[] = [];
+  const mode = options.claudeMode || 'dangerously-skip-permissions';
+  if (mode === 'dangerously-skip-permissions') args.push('--dangerously-skip-permissions');
+  else if (mode === 'auto') args.push('--permission-mode', 'auto');
+  else if (mode === 'allowedTools' && options.allowedTools) args.push('--allowedTools', options.allowedTools);
+  if (options.resumeSessionId) args.push('--resume', options.resumeSessionId);
+  else args.push('--session-id', options.sessionId);
+  if (options.model) args.push('--model', options.model);
+  args.push(...buildEffortCliArgs(options.effort));
+  return args;
+}
+
+// Herdr starts an agent by its own kind name. The CLI is matched by its transcript
+// capability (registry data), which is also what Codeman reads the conversation from.
+const HERDR_AGENT_LAUNCHERS: Partial<
+  Record<CliCapabilities['transcript'], { kind: string; args: (options: CreateSessionOptions) => string[] }>
+> = {
+  'codex-rollout': { kind: 'codex', args: codexNativeArgs },
+  'claude-jsonl': { kind: 'claude', args: claudeNativeArgs },
+};
+
+// `herdr agent start` reports a detected agent sitting on a startup prompt as
+// agent_not_ready "blocked during startup"; every other failure keeps failing.
+function isBlockedAtStartup(error: unknown): boolean {
+  const detail = `${(error as { stderr?: unknown })?.stderr ?? ''}${error instanceof Error ? error.message : String(error)}`;
+  return detail.includes('agent_not_ready') && detail.includes('blocked during startup');
+}
+
+function herdrAgentLauncher(cli: CliEntry | undefined) {
+  return cli ? HERDR_AGENT_LAUNCHERS[cli.capabilities.transcript] : undefined;
 }
 
 function defaultPaneName(pane: JsonRecord, paneId: string, mode: SessionMode, tabLabel?: string): string {
@@ -138,23 +190,55 @@ function stableDiscoveredId(terminalId: string): string {
   return `herdr-${createHash('sha256').update(terminalId).digest('hex').slice(0, 32)}`;
 }
 
-const NAME_VERSION = 3;
+const NAME_VERSION = 4;
 const WORKSPACE_ALIASES: Record<string, string> = {
   workspaces: 'ws',
+  'cancilico-devbox': 'db',
   'knowledge-base': 'kb',
   cvision_v01: 'cv01',
   cvision_v02: 'cv02',
+  cvision_superrepo_v01: 'cv01',
+  cvision_superrepo_v02: 'cv02',
   'annotation-platform': 'ap',
 };
 
 export function workspaceAlias(label: string): string {
   const normalized = label
     .toLowerCase()
-    .replace(/^w\d+-/, '')
+    .replace(/^w[0-9a-z]+-/, '')
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^[-_]+|[-_]+$/g, '');
   const alias = WORKSPACE_ALIASES[normalized] || normalized || 'ws';
   return (/^[a-z]/.test(alias) ? alias : `w-${alias}`).slice(0, 8).replace(/[-_]+$/, '');
+}
+
+export function projectAlias(cwd: string, workspaceLabel?: string): string | undefined {
+  // Prefer the nearest recognized project, including nested monorepo directories.
+  const parts = cwd.replace(/\\/g, '/').split('/').filter(Boolean).reverse();
+  for (const part of parts) {
+    const alias = WORKSPACE_ALIASES[part.toLowerCase()];
+    if (alias && part.toLowerCase() !== 'workspaces') return alias;
+  }
+  return workspaceLabel ? workspaceAlias(workspaceLabel) : undefined;
+}
+
+function conversationTitle(agent: JsonRecord, mapping: PersistedHerdrMapping): string | undefined {
+  const raw = stringValue(agent.title) || stringValue(agent.terminal_title_stripped);
+  if (!raw) return undefined;
+  const title = raw.replace(/\s+\|\s+[^|]+$/, '').trim();
+  const cwd = stringValue(agent.foreground_cwd) || stringValue(agent.cwd) || '';
+  if (
+    !title ||
+    title === mapping.agentName ||
+    title === mapping.name ||
+    title === stringValue(agent.name) ||
+    title === cwd ||
+    title === basename(cwd) ||
+    /\bw[0-9a-z]+:(?:t[0-9a-z]+:)?p[0-9a-z]+\b/i.test(title) ||
+    /^(?:codex|shell|agent|terminal|new (?:session|tab)|w[0-9a-z]+-.+)$/i.test(title)
+  )
+    return undefined;
+  return title;
 }
 const FILLER_WORDS = new Set(
   (
@@ -358,6 +442,14 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
       Number.isFinite(reportedCreatedAt) ? reportedCreatedAt : Date.now()
     );
     if (this.captureWorkspaceOrigin(mapping, stringValue(pane.workspace_id), workspaces)) this.saveMappings();
+    const currentAlias = projectAlias(
+      stringValue(pane.foreground_cwd) || stringValue(pane.cwd) || '',
+      workspaces.get(stringValue(pane.workspace_id) || '')
+    );
+    if (currentAlias && currentAlias !== mapping.projectAlias) {
+      mapping.projectAlias = currentAlias;
+      this.saveMappings();
+    }
     const kind = agentKind(pane).toLowerCase();
     const mode = sessionMode(kind);
     const state = agentState(pane);
@@ -514,13 +606,15 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
     if (
       mapping?.nameVersion === NAME_VERSION &&
       mapping.agentNameTitle === title &&
+      (mapping.nameSource === 'manual' || mapping.agentNameAlias === mapping.projectAlias) &&
       mapping.agentName &&
       available(mapping.agentName)
     ) {
       return mapping.agentName;
     }
     const automatic = mapping?.nameSource !== 'manual';
-    const prefix = automatic && mapping?.originWorkspaceAlias ? `${mapping.originWorkspaceAlias}-` : '';
+    const alias = mapping?.projectAlias || mapping?.originWorkspaceAlias;
+    const prefix = automatic && alias ? `${alias}-` : '';
     const task = normalizeAgentName(title, automatic);
     const fit = (limit: number) => `${prefix}${fitName(task.split('-'), Math.max(1, limit - prefix.length))}`;
     const base = fit(32);
@@ -543,10 +637,12 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
       mapping.name !== name ||
       mapping.agentName !== name ||
       mapping.agentNameTitle !== title ||
+      mapping.agentNameAlias !== mapping.projectAlias ||
       mapping.nameVersion !== NAME_VERSION;
     mapping.name = name;
     mapping.agentName = name;
     mapping.agentNameTitle = title;
+    mapping.agentNameAlias = mapping.projectAlias;
     mapping.nameSource ??= 'auto';
     mapping.nameVersion = NAME_VERSION;
     session.name = name;
@@ -572,9 +668,12 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
       const mapping = this.mappingsByTerminal.get(terminalId);
       const session = mapping && this.sessions.get(mapping.sessionId);
       if (!mapping || !session) continue;
+      // The starter owns its temporary name until Herdr finishes the handshake.
+      // Do not turn that temporary ownership name into a permanent manual name.
+      if (agent.interactive_ready === false) continue;
       const observed = stringValue(agent.name) || '';
       if (
-        mapping.nameVersion === NAME_VERSION &&
+        (mapping.nameVersion ?? 0) >= 3 &&
         mapping.agentName &&
         mapping.observedAgentName !== undefined &&
         observed &&
@@ -594,11 +693,20 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
         }
       }
       mapping.observedAgentName = observed;
-      if (mapping.nameSource !== 'manual' && !mapping.originWorkspaceAlias) continue;
+      if (mapping.nameSource !== 'manual' && !mapping.projectAlias) continue;
+      const reportedTitle = conversationTitle(agent, mapping);
+      const changedTitle =
+        mapping.lastReportedTitle !== undefined && reportedTitle !== mapping.lastReportedTitle
+          ? reportedTitle
+          : undefined;
+      const savedTitle = conversationTitle(
+        { ...agent, title: mapping.agentNameTitle, terminal_title_stripped: '' },
+        mapping
+      );
       const title =
         mapping.nameSource === 'manual'
           ? mapping.manualName || mapping.name || ''
-          : displayNames.get(session.sessionId) || mapping.agentNameTitle || mapping.name || session.name || '';
+          : displayNames.get(session.sessionId) || changedTitle || savedTitle || reportedTitle || 'Codex';
       const name = this.chooseAgentName(title, session.sessionId, terminalId, occupied, mapping);
       try {
         if (agent.name !== name) {
@@ -610,6 +718,7 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
         }
         // A manual rename can arrive while Herdr is acknowledging this command.
         if (mapping.nameSource !== 'manual' || title === mapping.manualName) {
+          if (reportedTitle) mapping.lastReportedTitle = reportedTitle;
           this.publishName(session, mapping, title, name);
         }
       } catch (error) {
@@ -621,9 +730,12 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
   }
 
   async createSession(options: CreateSessionOptions): Promise<MuxSession> {
-    if (getCli(options.mode)?.capabilities.transcript !== 'codex-rollout') {
-      throw new Error('The Herdr backend currently supports Codex sessions only');
+    const cli = getCli(options.mode);
+    const launcher = herdrAgentLauncher(cli);
+    if (!cli || (!launcher && cli.kind !== 'shell')) {
+      throw new Error('The Herdr backend supports Codex, Claude and shell sessions');
     }
+    const defaultLabel = cli.label || cli.id;
     // Workspace list intentionally omits cwd. Pane list carries both cwd and
     // workspace_id, so it is the authoritative way to reuse an existing
     // workspace for another Codeman tab.
@@ -651,7 +763,7 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
             '--cwd',
             options.workingDir,
             '--label',
-            options.name || 'Codex',
+            options.name || defaultLabel,
             '--no-focus',
           ])
         );
@@ -682,40 +794,56 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
         return new Map<string, string>();
       });
       this.captureWorkspaceOrigin(origin, workspaceId, workspaceLabels);
+      origin.projectAlias = projectAlias(options.workingDir, workspaceLabels.get(workspaceId));
 
-      const nativeArgs: string[] = [];
-      if (options.codexConfig?.dangerouslyBypassApprovals)
-        nativeArgs.push('--dangerously-bypass-approvals-and-sandbox');
-      if (options.codexConfig?.animations !== undefined) {
-        nativeArgs.push('--config', `tui.animations=${options.codexConfig.animations ? 'true' : 'false'}`);
+      if (!launcher) {
+        // A shell session is the tab's root pane itself; its name follows the
+        // Herdr tab label, so no agent start or agent rename is involved.
+        const match = (await this.panes()).find((candidate) => stringValue(record(candidate).pane_id) === paneId);
+        const session = this.sessionFromPane(match, options.sessionId, workspaceLabels);
+        if (!session) throw new Error('Herdr created a shell pane but did not expose its terminal identity');
+        this.sessions.set(session.sessionId, session);
+        this.emit('sessionCreated', session);
+        return session;
       }
-      if (options.codexConfig?.model) nativeArgs.push('--model', options.codexConfig.model);
-      if (options.codexConfig?.resumeSessionId) nativeArgs.push('resume', options.codexConfig.resumeSessionId);
+
+      const nativeArgs = launcher.args(options);
       const agentName = this.chooseAgentName(
-        options.name || 'Codex',
+        options.name || defaultLabel,
         options.sessionId,
         undefined,
         this.occupiedAgentNames(await this.agents()),
         origin
       );
       this.pendingAgentNames.set(options.sessionId, agentName);
-      const startArgs = ['agent', 'start', agentName, '--kind', 'codex', '--pane', paneId, '--timeout', '45000'];
+      const startArgs = ['agent', 'start', agentName, '--kind', launcher.kind, '--pane', paneId, '--timeout', '45000'];
       if (nativeArgs.length) startArgs.push('--', ...nativeArgs);
-      const started = record(await this.run(startArgs));
+      let started: Record<string, unknown> = {};
+      try {
+        started = record(await this.run(startArgs));
+      } catch (error) {
+        // Herdr refuses to call an agent ready while it is blocked on a startup
+        // prompt (Claude's workspace-trust dialog in a new directory). The agent
+        // is running and waiting for input, so keep its pane: the session's own
+        // trust-dialog handling or the user answers it.
+        if (!isBlockedAtStartup(error)) throw error;
+      }
       const rawAgent = record(started.agent);
       let session = this.sessionFromPane({ ...rawAgent, pane_id: rawAgent.pane_id || paneId }, options.sessionId);
       if (!session) {
         const match = (await this.panes()).find((candidate) => stringValue(record(candidate).pane_id) === paneId);
         session = this.sessionFromPane(match, options.sessionId);
       }
-      if (!session) throw new Error('Herdr started Codex but did not expose its terminal identity');
+      if (!session) throw new Error(`Herdr started ${defaultLabel} but did not expose its terminal identity`);
       session.name = agentName;
       const mapping = this.mappingsByTerminal.get(session.terminalId!);
       if (mapping) {
         this.captureWorkspaceOrigin(mapping, workspaceId, workspaceLabels);
+        mapping.projectAlias = origin.projectAlias;
+        mapping.agentNameAlias = origin.projectAlias;
         mapping.name = agentName;
         mapping.agentName = agentName;
-        mapping.agentNameTitle = options.name || 'Codex';
+        mapping.agentNameTitle = options.name || defaultLabel;
         mapping.nameSource = 'auto';
         mapping.nameVersion = mapping.originWorkspaceAlias ? NAME_VERSION : undefined;
         this.saveMappings();
@@ -795,7 +923,9 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
     }
     const submit = /[\r\n]$/.test(input);
     const text = input.replace(/[\r\n]+$/, '');
-    if (submit && session.runtimeAgentKind) await this.run(['agent', 'prompt', session.paneId, text]);
+    // A bare Enter answers a dialog (e.g. Claude's workspace trust prompt); Herdr
+    // rejects `agent prompt` while the agent is blocked, so send it as a key.
+    if (submit && text && session.runtimeAgentKind) await this.run(['agent', 'prompt', session.paneId, text]);
     else {
       if (text) await this.run(['pane', 'send-text', session.paneId, text]);
       if (submit) await this.run(['pane', 'send-keys', session.paneId, 'enter']);
