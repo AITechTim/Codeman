@@ -39,6 +39,7 @@ RUN apt-get update \
       curl \
       g++ \
       git \
+      libsecret-1-0 \
       make \
       openssh-client \
       procps \
@@ -212,13 +213,25 @@ RUN set -eux; \
 # minimal image of this exact shape). The four CLIs live only in this prefix,
 # so they still resolve; entrypoint.sh additionally pins its own PATH to the
 # system directories for the root part of the start.
+# uv/uvx: MCP servers are commonly launched with `uvx <package>` (e.g. the Nginx
+# Proxy Manager MCP), and Codex failed to enable them with "uvx not found". Copied
+# from the pinned upstream image into root-owned /usr/local/bin, never pip-installed.
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /usr/local/bin/
 ENV NPM_CONFIG_PREFIX=/opt/codeman-cli
 ENV PATH=$PATH:/opt/codeman-cli/bin
+# pnpm is not an agent CLI: it is here because `dsh plugin` (DeepSeek Harness, which
+# this image leaves to be installed at runtime, see SERVER_INTENTIONAL_OMISSIONS in
+# test/docker-agent-image-coverage.test.ts) spawns a literal `pnpm` with no npm
+# fallback, so the Run menu's "DeepSeek - add a terminal profile" button failed
+# with `dsh: pnpm not found on PATH` (exit 127) on this image. The agent image
+# already carries it for the same reason (#352). It lives in the same
+# runtime-writable prefix as the CLIs, so a session can update it in place.
 RUN npm install --global \
       @anthropic-ai/claude-code@2.1.258 \
       @google/gemini-cli@0.58.0 \
       @openai/codex@0.152.1 \
       opencode-ai@1.18.26 \
+      pnpm@12.6.0 \
  && npm cache clean --force
 
 # Keep the web server and every local Codeman session unprivileged. PUID and
