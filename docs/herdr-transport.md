@@ -28,21 +28,20 @@ seconds remains a barrier rather than allowing another attachment to overlap.
 ## Shared session names
 
 Automatic Codeman titles and Herdr agent names use `<workspace-alias>-<task>`.
-The mapping captures the original Herdr workspace group, independent of the
-foreground working directory, and retains it through workspace renames, pane
-moves, and restarts. New groups created by Codeman use the starting folder name.
+The mapping preserves the original workspace as history while deriving the prefix
+from the current project. Last-published aliases distinguish automatic labels
+from manual renames across workspace moves and restarts.
 
-Aliases are `ws` (workspaces), `kb` (knowledge-base), `cv01`/`cv02`
-(cvision_v01/v02), and `ap` (annotation-platform). Generated `w1-` style prefixes
-are removed before matching. Other labels normalize to at most eight characters.
-Task shortening removes conversational filler and retains up to four meaningful
-words. The total name fits Herdr's 32-character limit at word/hyphen boundaries,
-including the workspace prefix and any stable collision suffix.
+Aliases include `ws` (workspaces), `db` (cancilico-devbox), `kb` (knowledge-base),
+`cv01`/`cv02` (cvision versions), and `ap` (annotation-platform). Other labels
+normalize to at most eight characters. Titles use up to four meaningful words
+within Herdr's 32-character name limit, including deterministic collision suffixes.
 
-Name version 3 migrates automatic names once. Existing mappings without origin
-information adopt their workspace at migration time. Manual names retain the
-existing manual-name rules. Missing workspace labels and failed lookups defer
-automatic renaming; the initial workspace ID is retained for a later retry.
+Name version 4 migrates automatic names once. Native thread titles take precedence;
+Herdr conversation titles cover existing sessions without resolved provider identity.
+Generated labels and generic startup titles are not conversation titles. Manual
+names and shell labels remain protected. Transient lookup failures and panes that
+are not interactively ready defer renaming without marking placeholders manual.
 
 Herdr's devbox sidebar places `state_icon` and `agent` together on one row,
 with the agent token styled `fg = "#cdd6f4", bold = true, dim = false`. Each name

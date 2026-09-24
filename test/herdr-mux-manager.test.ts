@@ -3,7 +3,13 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { HerdrMuxManager, normalizeAgentName, parseHerdrJson, workspaceAlias } from '../src/herdr-mux-manager.js';
+import {
+  HerdrMuxManager,
+  normalizeAgentName,
+  parseHerdrJson,
+  projectAlias,
+  workspaceAlias,
+} from '../src/herdr-mux-manager.js';
 
 const codexAgent = {
   terminal_id: 'term_123',
@@ -69,6 +75,99 @@ function namingFixture(mappingPath = join(mkdtempSync(join(tmpdir(), 'herdr-name
 
 describe('Herdr agent name synchronization', () => {
   it.each([
+    ['/workspaces/cancilico-devbox/codeman-source', 'workspaces', 'db'],
+    ['/workspaces/knowledge-base/vaults', 'workspaces', 'kb'],
+    ['/workspaces/cvision/cvision_superrepo_v01/js_ts', 'workspaces', 'cv01'],
+    ['/workspaces/cvision/cvision_superrepo_v02/rust', 'workspaces', 'cv02'],
+    ['/tmp/project-worktree', 'cvision_v02', 'cv02'],
+    ['/workspaces/unknown', 'long-workspace-label', 'long-wor'],
+  ])('resolves project %s before workspace %s', (cwd, label, expected) => {
+    expect(projectAlias(cwd, label)).toBe(expected);
+  });
+
+  it('replaces an existing startup placeholder with the live title and current project', async () => {
+    const fixture = namingFixture();
+    fixture.agents[0].foreground_cwd = '/workspaces/cancilico-devbox';
+    fixture.agents[0].title = 'cancilico-devbox wA:p1';
+    delete fixture.agents[0].agent_session;
+    await fixture.manager.reconcileSessions();
+    const id = fixture.manager.getSessions()[0].sessionId;
+    const saved = JSON.parse(readFileSync(fixture.mappingPath, 'utf8'));
+    Object.assign(saved.mappings[0], {
+      nameVersion: 3,
+      name: 'ws-cancilico-devbox-wa-p1',
+      agentName: 'ws-cancilico-devbox-wa-p1',
+      agentNameTitle: 'cancilico-devbox wA:p1',
+      observedAgentName: 'ws-cancilico-devbox-wa-p1',
+      originWorkspaceAlias: 'ws',
+    });
+    writeFileSync(fixture.mappingPath, JSON.stringify(saved));
+    const restored = namingFixture(fixture.mappingPath);
+    Object.assign(restored.agents[0], {
+      ...fixture.agents[0],
+      name: 'ws-cancilico-devbox-wa-p1',
+      title: 'Fix ctrl+click links in Herdr',
+    });
+    await restored.manager.reconcileSessions();
+    expect(restored.agents[0].name).toBe('db-fix-ctrl-click-links');
+    expect(restored.manager.getSessions()[0].sessionId).toBe(id);
+    const calls = restored.calls.length;
+    await restored.manager.reconcileSessions();
+    expect(restored.calls.slice(calls).some((args) => args[1] === 'rename')).toBe(false);
+    expect(JSON.parse(readFileSync(fixture.mappingPath, 'utf8')).mappings[0]).toMatchObject({
+      nameVersion: 4,
+      nameSource: 'auto',
+      projectAlias: 'db',
+      originWorkspaceAlias: 'ws',
+    });
+  });
+
+  it('waits for startup readiness and follows the first prompt without making the initial name manual', async () => {
+    const fixture = namingFixture();
+    Object.assign(fixture.agents[0], { interactive_ready: false, title: 'Codex' });
+    await fixture.manager.reconcileSessions();
+    expect(fixture.agents[0].name).toBe('c-generated');
+    expect(fixture.calls.some((args) => args[1] === 'rename')).toBe(false);
+    Object.assign(fixture.agents[0], { interactive_ready: true, title: 'Fix the login redirect' });
+    await fixture.manager.reconcileSessions();
+    expect(fixture.agents[0].name).toBe('ws-fix-login-redirect');
+    expect(JSON.parse(readFileSync(fixture.mappingPath, 'utf8')).mappings[0].nameSource).toBe('auto');
+    fixture.agents[0].title = 'Repair OAuth callback handling';
+    await fixture.manager.reconcileSessions();
+    expect(fixture.agents[0].name).toBe('ws-repair-oauth-callback');
+  });
+
+  it('keeps a manual rename when migrating a v3 mapping to a different project', async () => {
+    const fixture = namingFixture();
+    await fixture.manager.reconcileSessions();
+    const saved = JSON.parse(readFileSync(fixture.mappingPath, 'utf8'));
+    saved.mappings[0].nameVersion = 3;
+    writeFileSync(fixture.mappingPath, JSON.stringify(saved));
+    const restored = namingFixture(fixture.mappingPath);
+    Object.assign(restored.agents[0], { name: 'my-manual-name', foreground_cwd: '/workspaces/knowledge-base' });
+    await restored.manager.reconcileSessions();
+    expect(restored.agents[0].name).toBe('my-manual-name');
+    expect(restored.calls).toContainEqual(['pane', 'rename', String(restored.agents[0].pane_id), 'my-manual-name']);
+  });
+
+  it('does not generate recursive names from generic or already generated terminal titles', async () => {
+    const fixture = namingFixture();
+    fixture.agents[0].title = 'Fix login redirect';
+    await fixture.manager.reconcileSessions();
+    for (const title of [
+      'Codex',
+      'wA-cancilico-devbox',
+      '/workspaces/project',
+      'project wA:p1',
+      fixture.agents[0].name,
+    ]) {
+      fixture.agents[0].title = title;
+      await fixture.manager.reconcileSessions();
+      expect(fixture.agents[0].name).toBe('ws-fix-login-redirect');
+    }
+  });
+
+  it.each([
     ['w1-workspaces', 'fix-mobile-codeman-voice', 'ws-fix-mobile-codeman-voice'],
     ['w1-knowledge-base', 'explain-active-work-items', 'kb-explain-active-work-items'],
     ['w1-cvision_v01', 'fix-gpu-2-vmic-resolution', 'cv01-fix-gpu-2-vmic-resolution'],
@@ -88,7 +187,7 @@ describe('Herdr agent name synchronization', () => {
     expect(calls.some((args) => args[1] === 'rename')).toBe(false);
   });
 
-  it('remembers the group through cwd changes, group renames, moves and restart', async () => {
+  it('updates the current group through moves and restart while preserving origin metadata', async () => {
     const fixture = namingFixture();
     fixture.workspaces[0].label = 'w1-cvision_v01';
     fixture.agents[0].foreground_cwd = '/workspaces/temporary-worktree';
@@ -101,12 +200,13 @@ describe('Herdr agent name synchronization', () => {
     fixture.agents[0].pane_id = 'w9:p4';
     fixture.workspaces.push({ workspace_id: 'w9', label: 'annotation-platform' });
     await fixture.manager.reconcileSessions();
-    expect(fixture.agents[0].name).toBe('cv01-fix-viewer');
+    expect(fixture.agents[0].name).toBe('ap-fix-viewer');
     const restarted = namingFixture(fixture.mappingPath);
     restarted.agents[0] = { ...fixture.agents[0] };
+    restarted.workspaces.push({ workspace_id: 'w9', label: 'annotation-platform' });
     restarted.manager.setAgentTitleResolver(async () => new Map([[id, 'Fix mobile viewer']]));
     await restarted.manager.reconcileSessions();
-    expect(restarted.agents[0].name).toBe('cv01-fix-mobile-viewer');
+    expect(restarted.agents[0].name).toBe('ap-fix-mobile-viewer');
     expect(JSON.parse(readFileSync(fixture.mappingPath, 'utf8')).mappings[0]).toMatchObject({
       originWorkspaceId: 'w1',
       originWorkspaceLabel: 'w1-cvision_v01',
@@ -139,7 +239,7 @@ describe('Herdr agent name synchronization', () => {
     expect(manual.agents[0].name).toBe('my-custom-name');
   });
 
-  it('defers naming on workspace lookup failure and remembers the first group during a move', async () => {
+  it('defers naming on workspace lookup failure and uses the current group after a move', async () => {
     const fixture = namingFixture();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -149,14 +249,14 @@ describe('Herdr agent name synchronization', () => {
       fixture.agents[0].workspace_id = 'w9';
       fixture.workspaces.push({ workspace_id: 'w9', label: 'knowledge-base' });
       await fixture.manager.reconcileSessions();
-      expect(fixture.agents[0].name).toBe('ws-project-agent');
+      expect(fixture.agents[0].name).toBe('kb-project-agent');
       const id = fixture.manager.getSessions()[0].sessionId;
       fixture.manager.setAgentTitleResolver(async () => new Map([[id, 'Changed title']]));
       fixture.failWorkspaceLookup();
       await fixture.manager.reconcileSessions();
-      expect(fixture.agents[0].name).toBe('ws-project-agent');
+      expect(fixture.agents[0].name).toBe('kb-project-agent');
       await fixture.manager.reconcileSessions();
-      expect(fixture.agents[0].name).toBe('ws-changed-title');
+      expect(fixture.agents[0].name).toBe('kb-changed-title');
     } finally {
       warn.mockRestore();
     }
@@ -182,6 +282,7 @@ describe('Herdr agent name synchronization', () => {
     const hash = createHash('sha256').update(id).digest('hex').slice(0, 8);
     expect(agents[1].name).toBe(`long-wor-fix-mobile-${hash}`);
     const restarted = namingFixture(mappingPath);
+    restarted.workspaces[0].label = workspaces[0].label;
     restarted.agents.splice(0, restarted.agents.length, { ...agents[1] });
     await restarted.manager.reconcileSessions();
     expect(restarted.agents[0].name).toBe(agents[1].name);
@@ -328,7 +429,7 @@ describe('Herdr agent name synchronization', () => {
     const restored = namingFixture(mappingPath);
     restored.agents[0] = { ...agents[0] };
     await restored.manager.reconcileSessions();
-    expect(restored.agents[0].name).toBe('ws-saved-tab-title');
+    expect(restored.agents[0].name).toBe('ws-project-agent');
     expect(restored.manager.getSessions()[0].sessionId).toBe(saved.mappings[0].sessionId);
   });
 });
@@ -603,6 +704,148 @@ describe('HerdrMuxManager', () => {
     expect(calls.some((args) => args[0] === 'workspace' && args[1] === 'create')).toBe(false);
   });
 
+  function createFixture(startAgent: () => unknown = () => ({ agent: codexAgent })) {
+    const mappingPath = join(mkdtempSync(join(tmpdir(), 'codeman-herdr-')), 'mappings.json');
+    const calls: string[][] = [];
+    const manager = new HerdrMuxManager({
+      mappingPath,
+      asyncRunner: vi.fn(async (args) => {
+        if (args[0] === 'workspace' && args[1] === 'list')
+          return { workspaces: [{ workspace_id: 'w1', label: 'project' }] };
+        if (args[0] === 'agent' && args[1] === 'list') return { agents: [] };
+        calls.push(args);
+        if (args[0] === 'pane' && args[1] === 'list') {
+          const created = calls.some((call) => call[0] === 'workspace' && call[1] === 'create');
+          return {
+            panes: created
+              ? [{ terminal_id: 'term_new', pane_id: 'w1:t1:p1', workspace_id: 'w1', cwd: '/workspaces/project' }]
+              : [],
+          };
+        }
+        if (args[0] === 'workspace' && args[1] === 'create') {
+          return { workspace: { workspace_id: 'w1' }, root_pane: { pane_id: 'w1:t1:p1' } };
+        }
+        if (args[0] === 'agent' && args[1] === 'start') return startAgent();
+        if (args[0] === 'workspace' && args[1] === 'close') return {};
+        throw new Error(`unexpected call: ${args.join(' ')}`);
+      }),
+      syncRunner: vi.fn(() => ({ running: true, compatible: true })),
+    });
+    return { manager, calls };
+  }
+
+  const claudeAgent = { ...codexAgent, terminal_id: 'term_claude', agent: 'claude', agent_session: undefined };
+
+  it('starts Claude with the registry launch flags and the Codeman session id', async () => {
+    const { manager, calls } = createFixture(() => ({ agent: claudeAgent }));
+
+    const created = await manager.createSession({
+      sessionId: 'session-claude',
+      workingDir: '/workspaces/project',
+      mode: 'claude',
+      name: 'Review',
+      model: 'opus',
+      effort: 'high',
+    });
+
+    expect(created).toMatchObject({ sessionId: 'session-claude', mode: 'claude', terminalId: 'term_claude' });
+    const start = calls.find((args) => args[0] === 'agent' && args[1] === 'start');
+    expect(start?.slice(3)).toEqual([
+      '--kind',
+      'claude',
+      '--pane',
+      'w1:t1:p1',
+      '--timeout',
+      '45000',
+      '--',
+      '--dangerously-skip-permissions',
+      '--session-id',
+      'session-claude',
+      '--model',
+      'opus',
+      '--effort',
+      'high',
+    ]);
+  });
+
+  it('resumes Claude conversations and honours the permission mode', async () => {
+    const { manager, calls } = createFixture(() => ({ agent: claudeAgent }));
+
+    await manager.createSession({
+      sessionId: 'session-claude',
+      workingDir: '/workspaces/project',
+      mode: 'claude',
+      claudeMode: 'auto',
+      resumeSessionId: 'conversation-9',
+    });
+
+    const start = calls.find((args) => args[0] === 'agent' && args[1] === 'start');
+    expect(start?.slice(start.indexOf('--') + 1)).toEqual(['--permission-mode', 'auto', '--resume', 'conversation-9']);
+  });
+
+  it('creates a shell session from the new pane without starting an agent', async () => {
+    const { manager, calls } = createFixture();
+    const created: unknown[] = [];
+    manager.on('sessionCreated', (session) => created.push(session));
+
+    const session = await manager.createSession({
+      sessionId: 'session-shell',
+      workingDir: '/workspaces/project',
+      mode: 'shell',
+      name: 's1-project',
+    });
+
+    expect(session).toMatchObject({
+      sessionId: 'session-shell',
+      mode: 'shell',
+      terminalId: 'term_new',
+      paneId: 'w1:t1:p1',
+    });
+    expect(created).toEqual([session]);
+    expect(calls.some((args) => args[0] === 'agent' && args[1] === 'start')).toBe(false);
+    expect(manager.getSessions().map((item) => item.sessionId)).toEqual(['session-shell']);
+  });
+
+  const herdrFailure = (code: string, message: string) =>
+    Object.assign(new Error(`Command failed: herdr agent start`), {
+      stderr: JSON.stringify({ error: { code, message }, id: 'cli:agent:start' }),
+    });
+
+  it('keeps a Claude pane that is blocked on a startup prompt', async () => {
+    const { manager, calls } = createFixture(() => {
+      throw herdrFailure('agent_not_ready', 'agent kb-review is blocked during startup and is not ready for prompts');
+    });
+
+    const session = await manager.createSession({
+      sessionId: 'session-trust',
+      workingDir: '/workspaces/project',
+      mode: 'claude',
+    });
+
+    expect(session).toMatchObject({ sessionId: 'session-trust', terminalId: 'term_new', paneId: 'w1:t1:p1' });
+    expect(calls.some((args) => args[0] === 'workspace' && args[1] === 'close')).toBe(false);
+  });
+
+  it('closes the new workspace when the agent fails to start', async () => {
+    const { manager, calls } = createFixture(() => {
+      throw herdrFailure('agent_start_failed', 'agent exited before becoming ready');
+    });
+
+    await expect(
+      manager.createSession({ sessionId: 'session-fail', workingDir: '/workspaces/project', mode: 'claude' })
+    ).rejects.toThrow('Command failed');
+    expect(calls).toContainEqual(['workspace', 'close', 'w1']);
+  });
+
+  it('rejects modes Herdr cannot launch before creating anything', async () => {
+    const { manager, calls } = createFixture();
+
+    await expect(
+      manager.createSession({ sessionId: 'session-x', workingDir: '/workspaces/project', mode: 'opencode' })
+    ).rejects.toThrow('The Herdr backend supports Codex, Claude and shell sessions');
+    expect(calls).toEqual([]);
+  });
+
   it('publishes every successful roster and updates a pane in place', async () => {
     const mappingPath = join(mkdtempSync(join(tmpdir(), 'codeman-herdr-')), 'mappings.json');
     let panes = [codexAgent];
@@ -658,6 +901,31 @@ describe('HerdrMuxManager', () => {
 
     expect(calls).toContainEqual(['pane', 'send-text', 'w1:p1', 'echo safe']);
     expect(calls).toContainEqual(['pane', 'send-keys', 'w1:p1', 'enter']);
+  });
+
+  it('prompts agents with text but answers dialogs with a bare Enter key', async () => {
+    const mappingPath = join(mkdtempSync(join(tmpdir(), 'codeman-herdr-')), 'mappings.json');
+    const calls: string[][] = [];
+    const manager = new HerdrMuxManager({
+      mappingPath,
+      asyncRunner: vi.fn(async (args) => {
+        if (args[0] === 'workspace' && args[1] === 'list') return { workspaces: [] };
+        if (args[0] === 'agent' && args[1] === 'list') return { agents: [] };
+        calls.push(args);
+        if (args[0] === 'pane' && args[1] === 'list') return { panes: [{ ...codexAgent, agent: 'claude' }] };
+        return {};
+      }),
+      syncRunner: vi.fn(() => ({ running: true, compatible: true })),
+    });
+
+    await manager.reconcileSessions();
+    const [session] = manager.getSessions();
+    await manager.sendInput(session.sessionId, 'fix the build\r');
+    await manager.sendInput(session.sessionId, '\r');
+
+    expect(calls).toContainEqual(['agent', 'prompt', 'w1:t1:p1', 'fix the build']);
+    expect(calls).toContainEqual(['pane', 'send-keys', 'w1:t1:p1', 'enter']);
+    expect(calls).not.toContainEqual(['agent', 'prompt', 'w1:t1:p1', '']);
   });
 });
 
