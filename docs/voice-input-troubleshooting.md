@@ -65,7 +65,7 @@ newline normalization, and bracketed paste through `terminal.paste()`.
 
 The Herdr browser integration lives in the Cancilico runtime overlay, outside
 this upstream application tree. Its changes and regression tests are preserved in
-the `cancilico-openshell` repository's
+the `cancilico-devbox` repository's
 `docs/patches/codeman-input-repair.patch`; its runbook is
 `docs/runbooks/codeman-input-repair.md`.
 

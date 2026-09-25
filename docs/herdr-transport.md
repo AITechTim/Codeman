@@ -64,7 +64,7 @@ Never run these actions against a user's pane.
 
 For Cancilico images, build the pinned source with `codeman-herdr.patch`, then
 run `scripts/build-codeman-transport-overrides.mjs <built-checkout>` in
-cancilico-openshell. The generated override JSON and mux manager must accompany
+cancilico-devbox. The generated override JSON and mux manager must accompany
 the updated source patch. The runtime patcher checks the package version,
 installs these compiled modules, updates compressed assets, and remains
 idempotent. All inputs contribute to the staged runtime's content hash.
