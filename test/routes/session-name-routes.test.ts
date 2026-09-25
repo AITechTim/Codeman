@@ -82,7 +82,7 @@ describe('PUT /api/sessions/:id/name', () => {
     expect(session.applyAutoName('w1-demo: fix it')).toBe(false);
     expect(session.name).toBe('my window');
 
-    expect(updateSessionName).toHaveBeenCalledWith(session.id, 'my window');
+    expect(updateSessionName).toHaveBeenCalledWith(session.id, 'my window', 'manual');
     expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(session);
     expect(harness.ctx.broadcast).toHaveBeenCalledWith(
       SseEvent.SessionUpdated,
