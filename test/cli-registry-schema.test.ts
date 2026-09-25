@@ -35,6 +35,26 @@ function expectRejected(mutate: (entry: Record<string, unknown>) => void, becaus
   expect(result.success, `expected rejection: ${because}`).toBe(false);
 }
 
+describe('customModelInjection.launchModel', () => {
+  it('rejects a template with characters the argv engine would have to quote', () => {
+    expectRejected((e) => {
+      const caps = e.capabilities as Record<string, unknown>;
+      caps.customModelInjection = { ...(caps.customModelInjection as object), launchModel: 'custom/{modelId} --yolo' };
+    }, 'a space in the launch-model template');
+    expectRejected((e) => {
+      const caps = e.capabilities as Record<string, unknown>;
+      caps.customModelInjection = { ...(caps.customModelInjection as object), launchModel: '' };
+    }, 'an empty launch-model template');
+  });
+
+  it('accepts the placeholder form the stock entries use', () => {
+    const entry = baseEntry();
+    const caps = entry.capabilities as Record<string, unknown>;
+    caps.customModelInjection = { ...(caps.customModelInjection as object), launchModel: 'custom/{modelId}' };
+    expect(CliEntrySchema.safeParse(entry).success).toBe(true);
+  });
+});
+
 describe('the shipped catalog', () => {
   it('validates every stock entry exactly as shipped', () => {
     // If this fails, the catalog cannot load at all — every other test here is downstream.
@@ -100,6 +120,49 @@ describe('workDetect.workingLine is guarded like every other config regex', () =
       const src = entry.capabilities.workDetect?.workingLine;
       if (!src) continue;
       expect(compileVersionRegex(src), `${entry.id} declares a workingLine the guard refuses`).not.toBeNull();
+    }
+  });
+
+  it('holds the optional watchingLine to the same guard', () => {
+    expectRejected((e) => {
+      (e.capabilities as Record<string, unknown>).workDetect = {
+        promptGlyph: '>',
+        workingLine: 'working',
+        watchingLine: '(a+)+b',
+      };
+    }, 'this one runs over a pane capture every time a session settles, so it can freeze the event loop the same way');
+  });
+
+  it('bounds how far up the screen a config file may search', () => {
+    // The window is the injection guard: every row it adds is another row the agent
+    // itself may be able to write, and the label is what silences an idle alert.
+    for (const lines of [0, 9, 2.5]) {
+      expectRejected((e) => {
+        (e.capabilities as Record<string, unknown>).workDetect = {
+          promptGlyph: '>',
+          workingLine: 'working',
+          watchingLine: 'chip (\\d+)',
+          watchingLines: lines,
+        };
+      }, 'a config file must not be able to widen the search to the whole pane');
+    }
+  });
+
+  it('refuses a window with no pattern to bound', () => {
+    expectRejected((e) => {
+      (e.capabilities as Record<string, unknown>).workDetect = {
+        promptGlyph: '>',
+        workingLine: 'working',
+        watchingLines: 3,
+      };
+    }, 'a window with nothing to search is a typo whose failure is otherwise silent');
+  });
+
+  it('accepts every shipped watchingLine', () => {
+    for (const entry of STOCK_CLIS) {
+      const src = entry.capabilities.workDetect?.watchingLine;
+      if (!src) continue;
+      expect(compileVersionRegex(src), `${entry.id} declares a watchingLine the guard refuses`).not.toBeNull();
     }
   });
 });

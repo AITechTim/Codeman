@@ -75,11 +75,24 @@ function agentDefaults(): Pick<
   };
 }
 
+// `accent` on every entry below (except SHELL, which the frontend renders no
+// distinct color for) is measured from the actual `.btn-toolbar.btn-run.mode-<id>`
+// CSS rule's `border-color` on the OG skin (styles.css) — the single cleanest
+// representative hex each entry's own multi-stop gradient resolves around.
+// Corrected 2026-09-21 after PR #458's review found several were simply wrong
+// (e.g. claude was registered as Anthropic's brand orange, `#d97757`, but the
+// button renders blue): `docs/cli-registry.md`'s own "transcribed, not
+// authoritative, re-measure before wiring one up" warning for this
+// DECLARED-FOR-LATER field, taken literally. The one exception is GEMINI, whose
+// run-button border (#60a5fa) is the only one that disagrees with its own tab badge
+// and run-mode dot (#8ab4f8); it takes the badge colour, so every accent names the
+// same hex the frontend uses as that CLI's flat identity. This is a data-accuracy fix only —
+// `accent` still has no reader, so nothing rendered changes because of it.
 const CLAUDE: CliEntry = {
   id: 'claude' as CliEntry['id'],
-  label: 'Claude',
+  label: 'Claude Code',
   shortBadge: 'CC',
-  accent: '#d97757',
+  accent: '#3b82f6',
   enabled: true,
   stock: true,
   order: 0,
@@ -189,17 +202,42 @@ const CLAUDE: CliEntry = {
     unset: ['CLAUDECODE'],
     tmuxSetenvKeys: [],
     dockerExecEnvNames: [],
+    // Deliberately excludes ANTHROPIC_* (base URL / API key / default-model overrides):
+    // custom-model-injection.ts's claude recipe uses those names, but they must reach a
+    // session ONLY through the admin-configured, SSRF-guarded custom-model route, never
+    // through a plain client-supplied envOverrides field. Widening this prefix would let
+    // any session-create caller redirect a session's Anthropic traffic and credentials to
+    // an arbitrary, unvalidated URL.
     allowedPrefixes: ['CLAUDE_CODE_'],
     allowedKeys: ['CLAUDE_CONFIG_DIR'],
   },
   capabilities: {
     external: false,
+    // Claude indents its transcript body two columns and puts its own ●/✻/❯ markers
+    // in them, so a copy can drop two and paste flush. Claude and codex are the only
+    // entries that declare this, because theirs are the only gutters that have been measured.
+    transcriptGutter: 2,
     // The historical hard-coded pair, now stated as data. `workingLine` matches both the
     // `✻ Actualizing… (39s · ↓ 2.0k tokens)` status line and the bare `esc to interrupt`
     // footer, because tmux repaints partially and only one of the two may land in a chunk.
     workDetect: {
       promptGlyph: '❯',
       workingLine: String.raw`…\s*\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b|esc to interrupt`,
+      // Claude prints what it started in the background on the footer row beneath its
+      // composer, as `⏵⏵ bypass permissions on · 1 monitor · ← for agents`. The labels are
+      // the CLI's own words for each kind of background task, and group 1 is the one
+      // Codeman badges the session with. Verified against a live 2.1.278 pane on
+      // 2026-09-21.
+      // ⚠️ Two things keep an agent from writing its own label here, and both matter.
+      // The footer is the LAST row, so the default one-row window (`WATCHING_TAIL_LINES`)
+      // holds nothing but Ink's own chrome — in particular it leaves out the status line
+      // directly above, whose content comes from a `statusLine` command a bypassed
+      // session can write into its own `.claude/settings.json`. And the leading `·` keeps
+      // the match on the footer's own item list rather than on any text that happens to
+      // carry a count. A footer that ever drew the chip as its only item would report no
+      // watching rather than open that door. See `watchingLabel()` in
+      // `session-activity.ts`.
+      watchingLine: String.raw`·\s*(\d+ (?:monitors?|shells?|teams?|local agents?|cloud sessions?|MCP tasks?|background tasks?|(?:background|remote) dynamic workflows?|Artifact comment monitors?))`,
     },
     requiresMux: false,
     // Claude installs Codeman's own hooks block into every workspace it runs in, so its
@@ -220,8 +258,70 @@ const CLAUDE: CliEntry = {
     statusLineTelemetry: true,
     model: { source: 'claude-settings-file' },
     privilegedParams: [],
-    privilegedEnvKeys: [],
+    // ANTHROPIC_* is NOT in allowedPrefixes/allowedKeys above (deliberately — see the
+    // allowedPrefixes comment nearby), so these are unreachable via plain envOverrides
+    // today. privilegedEnvKeys has exactly one consumer, ownerClampedEnvKeys() in
+    // session-env-clamp.ts, which feeds the generic envOverrides clamp on
+    // POST /api/sessions, POST /api/quick-start and reboot-restore — no custom-model
+    // route reads this field at all, and the values it injects are merged in AFTER
+    // that clamp runs regardless of what's listed here.
+    privilegedEnvKeys: [
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_API_KEY',
+      'ANTHROPIC_DEFAULT_SONNET_MODEL',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_DEFAULT_OPUS_MODEL',
+      // CLAUDE_CODE_MAX_CONTEXT_TOKENS already matches the CLAUDE_CODE_* allowedPrefix, and
+      // CLAUDE_CONFIG_DIR is already an allowed exact key (docs/wiki/Agent-CLIs.md), so both
+      // were already reachable via plain envOverrides before this pair existed and this
+      // feature does not strictly need either listed. They stay listed anyway, because
+      // types.ts's rule ("every traffic-redirecting var this feature introduces MUST also
+      // appear in privilegedEnvKeys") is meant to hold literally, not with an exception
+      // carved out for the two vars that happen not to need it today. The real
+      // consequence lands on the GENERIC envOverrides clamp above, not on this feature:
+      // a non-granted multi-user owner can no longer set CLAUDE_CONFIG_DIR through
+      // envOverrides at all (the per-client-account override, #255), and a PERSISTED one
+      // is now stripped on reboot-restore for such an owner too — see
+      // session-env-clamp.ts's own fileoverview.
+      'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+      'CLAUDE_CONFIG_DIR',
+    ],
     gates: { nameFlag: { minVersion: '2.1.224', failClosed: true } },
+    // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — verified by hand against a real
+    // llama.cpp server. Claude reads these at process start only, so switching requires a
+    // respawn, never a live hot-swap.
+    customModelInjection: {
+      kind: 'env',
+      baseUrlVar: 'ANTHROPIC_BASE_URL',
+      apiKeyVar: 'ANTHROPIC_API_KEY',
+      modelVars: ['ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL'],
+      // Verified via Claude Code's own docs: CLAUDE_CODE_MAX_CONTEXT_TOKENS overrides the
+      // assumed context window and applies directly for a model name Claude Code doesn't
+      // recognize as one of its own — exactly the custom-model case. Without it, Claude Code
+      // assumes a large (200k) window for any unrecognized model id and never compacts,
+      // eventually overflowing a much smaller real local context (see plan doc reasoning
+      // above the interface for the confirmed failure).
+      contextLengthVar: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
+      // Isolates this session's config/credential directory so an injected ANTHROPIC_API_KEY
+      // never shares a directory with a stored claude.ai OAuth login — see the doc comment on
+      // customModelInjection in cli-registry/types.ts for the traded-off side effect.
+      configDirVar: 'CLAUDE_CONFIG_DIR',
+      // ⚠️ Required alongside configDirVar, not optional in practice: verified live that an
+      // isolated, otherwise-empty config directory makes claude stop at an interactive
+      // "Detected a custom API key — use it?" prompt on EVERY launch, defaulting to "No" with
+      // no one at the TTY to answer — silently refusing the very key this feature injected.
+      // Pre-seeding this file's customApiKeyResponses.approved list (verified against a real
+      // ~/.claude.json after answering the prompt once by hand) answers it in advance instead.
+      apiKeyTrustFile: { relPath: '.claude.json', shape: 'claude-api-key-responses' },
+      // ⚠️ Same isolated-directory root cause, one step further: verified live that on top
+      // of the API-key prompt above, a fresh CLAUDE_CONFIG_DIR also replays claude's ENTIRE
+      // first-run sequence on every launch — the theme picker, the security-notes screen,
+      // the per-project "trust this folder?" dialog, and (running with
+      // --dangerously-skip-permissions) a one-time bypass-permissions warning — none of
+      // which a real, already-onboarded profile shows again. Pre-seeds that same
+      // already-onboarded state instead of leaving a human to click through it.
+      skipFirstRunPrompts: true,
+    },
   },
   overlays: {
     // Mirrors the local default so the remote/in-container agent runs non-interactively
@@ -287,6 +387,7 @@ const SHELL: CliEntry = {
     privilegedParams: [],
     privilegedEnvKeys: [],
     gates: {},
+    customModelInjection: { kind: 'unsupported' }, // a raw shell has no "model" concept
   },
   overlays: {
     // No `remote` entry: defaultRemoteCommandForMode special-cases kind==='shell' directly
@@ -299,7 +400,7 @@ const OPENCODE: CliEntry = {
   id: 'opencode' as CliEntry['id'],
   label: 'OpenCode',
   shortBadge: 'OC',
-  accent: '#f59e0b',
+  accent: '#10b981',
   enabled: true,
   stock: true,
   order: 10,
@@ -366,6 +467,15 @@ const OPENCODE: CliEntry = {
     ...agentDefaults(),
     altScreen: 'strip-mux-only',
     echo: { policy: 'buffer', anchor: { kind: 'cursor' }, predictProfile: undefined },
+    // Verified by hand against a real llama.cpp server. Reuses the SAME env var opencode's
+    // own `env.configContentVar` already declares — the builder in custom-model-injection.ts
+    // must merge into whatever opencode config Codeman would otherwise send, not clobber it.
+    customModelInjection: { kind: 'configContentEnv', envVar: 'OPENCODE_CONFIG_CONTENT', template: 'opencode-json' },
+    // OPENCODE_CONFIG_CONTENT already matches the OPENCODE_ allowedPrefix above, so it was
+    // ALREADY reachable via plain envOverrides before this feature existed — it replaces
+    // opencode's whole config, provider api keys included, so a non-granted multi-user owner
+    // sending it is a pre-existing credential-redirection gap, not one this feature opens.
+    privilegedEnvKeys: ['OPENCODE_CONFIG_CONTENT'],
   },
   overlays: {
     credStore: { rel: '.config/opencode', seedWhole: true },
@@ -376,7 +486,7 @@ const CODEX: CliEntry = {
   id: 'codex' as CliEntry['id'],
   label: 'Codex',
   shortBadge: 'CX',
-  accent: '#6b7fd7',
+  accent: '#a855f7',
   enabled: true,
   stock: true,
   order: 20,
@@ -440,7 +550,43 @@ const CODEX: CliEntry = {
     // `Working (2m 49s • esc to interrupt)` above it while a turn runs. It animates no
     // braille spinner, and it never prints `esc to interrupt` at rest, so that phrase
     // alone separates a running turn from an idle one.
-    workDetect: { promptGlyph: '›', workingLine: '[Ee]sc to interrupt' },
+    // Codex pins a row of its own while a background terminal it started is still
+    // running: `  1 background terminal running · /ps to view · /stop to close`. Unlike
+    // Claude's footer chip that row sits ABOVE the composer, which puts it third from the
+    // bottom once the status line and the composer are counted, hence `watchingLines`.
+    // Measured against a live codex-cli 0.154.0 pane on 2026-09-22: the row appears when
+    // the terminal starts, follows the composer down as the conversation grows, and is
+    // gone after `/stop`.
+    // ⚠️ This entry CANNOT promise what Claude's does, and the difference is Codex's
+    // layout rather than its pattern. The third row from the bottom is the chip only
+    // while a terminal runs; with none running it is the last row of the transcript,
+    // which the agent writes. Matching the complete row raises the bar — an assistant
+    // message has to end with this exact line, to the character — but nothing here makes
+    // forging it impossible, so do not read the Claude comment above as applying here.
+    // What contains it is that codex declares `hooks: 'none'`: no hook event from a codex
+    // session ever reaches `notePrompt()`, so there is no idle item to pre-acknowledge
+    // and a forged label costs a wrong badge and nothing else. A CLI that gains hook
+    // signals must not keep a pattern this soft.
+    // ⚠️ Background TERMINALS are the only background work codex advertises on screen.
+    // A sub-agent started without waiting outlives the turn just as a terminal does —
+    // measured 2026-09-22, the sandboxed process was still running — and the pane shows
+    // nothing at all for it: the last rows are the composer and the status line, and
+    // `Sub-agents running` lives in the on-demand `/subagents` panel, not above the
+    // composer. So a codex session waiting on a sub-agent reads as plainly idle here.
+    // Nothing is misfiled by that (codex raises no idle prompts), and there is no row to
+    // match until codex pins one.
+    workDetect: {
+      promptGlyph: '›',
+      workingLine: '[Ee]sc to interrupt',
+      watchingLine: String.raw`^\s{0,4}(\d+ background terminals?) running · /ps to view · /stop to close$`,
+      watchingLines: 3,
+    },
+    // Two columns, like claude's, measured on a live 0.154.0 answer: the `•`/`›`/`⚠`
+    // markers sit in the gutter, prose continuations sit at 2, and a nested YAML block
+    // the model wrote rendered at 2/4/6/8 for its own 0/2/4/6. Replayed at 100, 120,
+    // 160, 198, 235 and 282 columns the indents were 0, 2, 4, 6 and 8 at every one,
+    // never 1, so the width is not a function of the pane.
+    transcriptGutter: 2,
     transcript: 'codex-rollout',
     altScreen: 'strip-full',
     echo: { policy: 'predict', anchor: { kind: 'cursor' }, predictProfile: 'codex' },
@@ -455,6 +601,23 @@ const CODEX: CliEntry = {
     // `dangerouslyBypassApprovals` on the wire), so it is the one that would have caught a
     // regression; `schema.ts` now rejects a name that is not a declared param.
     privilegedParams: [{ param: 'bypassApprovals', clampTo: false }],
+    // Verified by hand against a real llama.cpp server. Written to an isolated CODEX_HOME
+    // so the user's real ~/.codex/config.toml is never touched.
+    customModelInjection: {
+      kind: 'configDir',
+      dirEnvVar: 'CODEX_HOME',
+      fileName: 'config.toml',
+      template: 'codex-toml',
+    },
+    // CODEX_HOME already matches the CODEX_ allowedPrefix above, so it was ALREADY
+    // reachable via plain envOverrides before this feature existed. It is arguably
+    // MORE sensitive than a bare base-url var: a redirected CODEX_HOME points codex at a
+    // config.toml a non-granted owner fully controls, which can restate sandbox/approval
+    // policy INSIDE that file — a path the argv-level `bypassApprovals` clamp above
+    // cannot see or stop.
+    // CODEMAN_CUSTOM_MODEL_API_KEY: the credential config.toml's env_key references
+    // (see custom-model-injection.ts) — same reasoning as CODEX_HOME above.
+    privilegedEnvKeys: ['CODEX_HOME', 'CODEMAN_CUSTOM_MODEL_API_KEY'],
   },
   overlays: {
     credStore: {
@@ -470,7 +633,8 @@ const GEMINI: CliEntry = {
   id: 'gemini' as CliEntry['id'],
   label: 'Gemini',
   shortBadge: 'GM',
-  accent: '#4285f4',
+  // The tab badge / run-mode-dot colour, not the run-button border (see the note above CLAUDE).
+  accent: '#8ab4f8',
   enabled: true,
   stock: true,
   order: 30,
@@ -538,6 +702,20 @@ const GEMINI: CliEntry = {
     // MATERIALIZE a config (not just touch an already-sent one) or a non-granted owner who
     // sends no geminiConfig at all would still get yolo for free.
     privilegedParams: [{ param: 'approvalMode', clampTo: 'auto_edit', materializeWhenAbsent: true }],
+    // Web-researched, unverified — needs a restart to pick up (CLI reads these at process
+    // start). Confirm the exact model-override env var name against the installed
+    // gemini-cli version before shipping.
+    customModelInjection: {
+      kind: 'env',
+      baseUrlVar: 'GOOGLE_GEMINI_BASE_URL',
+      apiKeyVar: 'GEMINI_API_KEY',
+      modelVars: ['GEMINI_MODEL'],
+    },
+    // All three already match the GEMINI_/GOOGLE_ allowedPrefixes above, so they were
+    // ALREADY reachable via plain envOverrides before this feature existed — a non-granted
+    // multi-user owner redirecting a gemini session's endpoint/credentials is a
+    // pre-existing gap this feature's analysis surfaced, not one it opens.
+    privilegedEnvKeys: ['GOOGLE_GEMINI_BASE_URL', 'GEMINI_API_KEY', 'GEMINI_MODEL'],
   },
   overlays: {
     credStore: { rel: '.gemini', seedWhole: true }, // also covers antigravity — see its own entry
@@ -548,7 +726,7 @@ const ANTIGRAVITY: CliEntry = {
   id: 'antigravity' as CliEntry['id'],
   label: 'Antigravity',
   shortBadge: 'AG',
-  accent: '#8b5cf6',
+  accent: '#22d3ee',
   enabled: true,
   stock: true,
   order: 40,
@@ -603,6 +781,10 @@ const ANTIGRAVITY: CliEntry = {
     // Like codex: an ABSENT config already defaults safe (no bypass flag), so only a
     // SENT config needs the flag forced off — nothing is materialized.
     privilegedParams: [{ param: 'dangerouslySkipPermissions', clampTo: false }],
+    // No known CLI/env/config mechanism — Antigravity's own docs describe a GUI-only
+    // custom-endpoint setting and explicitly say it "cannot currently" become the core
+    // reasoning model. Toolbar entry stays disabled for this mode.
+    customModelInjection: { kind: 'unsupported' },
   },
   overlays: {
     // No credStore of its own: agy nests its whole state under ~/.gemini/antigravity-cli/,
@@ -614,7 +796,7 @@ const PI: CliEntry = {
   id: 'pi' as CliEntry['id'],
   label: 'Pi',
   shortBadge: 'PI',
-  accent: '#10b981',
+  accent: '#f472b6',
   enabled: true,
   stock: true,
   order: 50,
@@ -693,6 +875,34 @@ const PI: CliEntry = {
     // just answer "yes" to, so omitting --approve is not itself a clamp — MATERIALIZE
     // approveProjectTrust:false so buildPiCommand emits --no-approve outright.
     privilegedParams: [{ param: 'approveProjectTrust', clampTo: false, materializeWhenAbsent: true }],
+    // CORRECTED after live-testing: `PI_CONFIG_DIR` does NOT exist anywhere in pi's own
+    // bundled source (grepped the installed package directly) — it does nothing for pi
+    // itself, despite being a real Codeman env var that OTHER things (omp) read. The
+    // confirmed working redirect is `HOME` itself: pi hardcodes `~/.pi/agent/models.json`
+    // with no dedicated override, so redirecting the CHILD PROCESS's HOME is what
+    // actually relocates it (verified: a model written under an isolated HOME's
+    // `.pi/agent/models.json` shows up in `pi --list-models` and answers a real prompt
+    // against a real llama-swap server; PI_CONFIG_DIR alone left it silently unable to
+    // see any provider). ⚠️ This is a bigger blast radius than a dedicated config-dir
+    // var: it also redirects pi's real sessions/auth/extensions for the DURATION of a
+    // custom-model session, not just its provider config — document this trade-off
+    // wherever this capability is surfaced.
+    customModelInjection: {
+      kind: 'configDir',
+      dirEnvVar: 'HOME',
+      fileName: '.pi/agent/models.json',
+      template: 'pi-models-json',
+      // Writing models.json is not enough: without `--model custom/<id>` pi stays on its
+      // own default provider and fails with "No API key found for the selected model"
+      // (confirmed live). `custom` is the provider name pi-models-json declares.
+      launchModel: 'custom/{modelId}',
+    },
+    // HOME is not `PI_`-prefixed, so unlike the old (wrong) PI_CONFIG_DIR guess this was
+    // never reachable via the generic envOverrides allowlist at all — listed here anyway,
+    // matching the documented pattern for every other CLI's dir-redirect var, since a
+    // redirected HOME is at least as sensitive as CODEX_HOME/GROK_HOME (pi executes
+    // repo-local .pi/extensions TypeScript — see the External CLI modes note in CLAUDE.md).
+    privilegedEnvKeys: ['HOME'],
   },
   overlays: {
     credStore: {
@@ -710,10 +920,10 @@ const GROK: CliEntry = {
   shortBadge: 'GK',
   // Upstream hand-authored a charcoal GRADIENT across 4+ CSS spots (welcome button, tab
   // badge, run-mode dot, mobile skin overrides) rather than one flat colour; our registry's
-  // `accent` is a single hex, so this is the closest single value (the run-mode-dot colour,
-  // zinc-400). Nothing reads `accent` yet — the frontend is untouched in this change and
-  // keeps its own hand-authored CSS; the field is here so the entry is complete.
-  accent: '#a1a1aa',
+  // `accent` is a single hex, so this is the closest single value (zinc-300, the run-button
+  // border and tab-badge colour). Nothing reads `accent` yet: the frontend keeps its own
+  // hand-authored CSS; the field is here so the entry is complete.
+  accent: '#d4d4d8',
   enabled: true,
   stock: true,
   order: 70,
@@ -788,6 +998,28 @@ const GROK: CliEntry = {
     // already its safe interactive ask-mode, so the multi-user clamp only needs to force an
     // EXPLICITLY-SENT bypass flag back off — nothing is materialized when config is absent.
     privilegedParams: [{ param: 'alwaysApprove', clampTo: false }],
+    // CORRECTED after live-testing against a real grok binary: the original `env` kind
+    // (GROK_BASE_URL/GROK_MODEL/XAI_API_KEY) produced "Not signed in" — those env vars
+    // are NOT grok's real custom-endpoint mechanism. The real one (verified against
+    // xAI's own docs) is a `[model.<name>]` block in a config.toml under GROK_HOME,
+    // the same configDir shape as codex/pi/omp. `api_backend = "chat_completions"` is
+    // explicitly supported (unlike codex, which dropped it) — grok CAN talk to a plain
+    // OpenAI Chat-Completions server directly.
+    customModelInjection: {
+      kind: 'configDir',
+      dirEnvVar: 'GROK_HOME',
+      fileName: 'config.toml',
+      template: 'grok-toml',
+      // The `[model.<name>]` block the grok-toml template writes; `--model <name>` is what
+      // selects it (GROK_CUSTOM_MODEL_NAME in custom-model-injection.ts, pinned equal by
+      // test/custom-model-injection.test.ts so the two cannot drift).
+      launchModel: 'codeman-custom',
+    },
+    // GROK_HOME already matches the GROK_ allowedPrefix above, so it was ALREADY
+    // reachable via plain envOverrides before this feature existed — same reasoning
+    // as CODEX_HOME: a redirected config dir can restate policy the argv-level
+    // `alwaysApprove` clamp above cannot see.
+    privilegedEnvKeys: ['GROK_HOME'],
   },
   overlays: {
     // ~/.grok also holds sessions/, memory/, downloads/ (the ~160MB binary), completions/,
@@ -823,7 +1055,7 @@ const DEEPSEEK: CliEntry = {
   id: 'deepseek' as CliEntry['id'],
   label: 'DeepSeek',
   shortBadge: 'DS',
-  accent: '#4d6bfe',
+  accent: '#7c93ff',
   enabled: true,
   stock: true,
   order: 80,
@@ -943,7 +1175,36 @@ const DEEPSEEK: CliEntry = {
     // The half no other CLI needs. `DSH_*` is an allowlisted envOverrides prefix and
     // applyEnvOverrides() runs LAST, so without this a non-granted owner could send
     // DSH_PERMISSION_MODE on the same request and land after the config clamp.
+    // ⚠️ DEEPSEEK_API_KEY deliberately stays OUT of this list (see the docstring on
+    // clampEnvOverridesForOwner() in session-routes.ts): _configureCliEnv() forwards the
+    // SERVER's own key into every dsh pane, so DEEPSEEK_BASE_URL is the exfiltration
+    // vector, not the key itself — a non-granted owner supplying THEIR OWN key removes
+    // privilege rather than granting it, and clamping it here was a real regression
+    // (test/deepseek-mode.test.ts) fixed before this shipped.
     privilegedEnvKeys: ['DSH_PERMISSION_MODE', 'DSH_HOME', 'DEEPSEEK_BASE_URL'],
+    // Reuses the already-existing DEEPSEEK_BASE_URL/DEEPSEEK_API_KEY keys above. No
+    // modelVars — dsh's model is a profile-composition entry (see `model: { source: 'none'
+    // }` above), not an env var, so forcing a specific model name may not fully work;
+    // verify against a real profile before shipping.
+    //
+    // ⚠️ appendV1Suffix is REQUIRED, not optional-nice-to-have: without it every request
+    // 404s. Confirmed live and by reading dsh's own bundled source
+    // (@deepseek-ai/dsh-llm-deepseek): it builds the request URL as
+    // `${DEEPSEEK_BASE_URL}/chat/completions` with no "/v1" of its own (its real public
+    // API, https://api.deepseek.com, expects the caller's base URL to already carry any
+    // needed prefix), while llama-swap/llama.cpp only serves the OpenAI-conventional
+    // "/v1/chat/completions" — a bare POST to ".../chat/completions" 404s live, and the
+    // 404 reported here originally ("dsh: HTTP_404: DeepSeek API error (HTTP 404)")
+    // matches dsh's own error-message template for exactly this failure. See the
+    // customModelInjection doc comment in cli-registry/types.ts for the full reasoning,
+    // including why claude/gemini must NOT get this.
+    customModelInjection: {
+      kind: 'env',
+      baseUrlVar: 'DEEPSEEK_BASE_URL',
+      apiKeyVar: 'DEEPSEEK_API_KEY',
+      modelVars: [],
+      appendV1Suffix: true,
+    },
   },
   overlays: {
     // No credStore: dsh keeps everything under $DSH_HOME (default ~/.dsh), which is
@@ -959,7 +1220,7 @@ const OMP: CliEntry = {
   id: 'omp' as CliEntry['id'],
   label: 'OMP',
   shortBadge: 'OM',
-  accent: '#7c9cf5',
+  accent: '#818cf8',
   enabled: true,
   stock: true,
   order: 90,
@@ -1045,7 +1306,25 @@ const OMP: CliEntry = {
     // Where omp resolves its auth from. No known concrete exfiltration path today (omp
     // forwards no operator-held key into a pane), but a non-granted owner redirecting where
     // a shared multi-tenant deployment resolves auth is not something to allow silently.
-    privilegedEnvKeys: ['OMP_AUTH_BROKER_URL', 'OMP_AUTH_BROKER_TOKEN'],
+    // HOME added for custom-model-injection.ts's omp recipe (see below). Unlike pi,
+    // PI_CONFIG_DIR genuinely IS one of the env vars omp reads (per the DeepSeek/OMP
+    // note in CLAUDE.md) — but live-testing this feature found it did NOT relocate
+    // omp's model config the way expected, while redirecting HOME itself (like pi)
+    // worked immediately (verified end-to-end: a real "hello world" reply came back).
+    privilegedEnvKeys: ['OMP_AUTH_BROKER_URL', 'OMP_AUTH_BROKER_TOKEN', 'HOME'],
+    // Verified end-to-end against a real llama-swap server (live-tested, not just
+    // researched — a real "hello world" reply came back). Same HOME-redirect mechanism
+    // as pi (see its customModelInjection comment for the full reasoning) — omp hardcodes
+    // `~/.omp/agent/models.yml` with no dedicated config-dir override either.
+    customModelInjection: {
+      kind: 'configDir',
+      dirEnvVar: 'HOME',
+      fileName: '.omp/agent/models.yml',
+      template: 'omp-models-yml',
+      // Same as pi: omp's own default model has no credential, so without an explicit
+      // `--model custom/<id>` it never reaches the injected provider at all.
+      launchModel: 'custom/{modelId}',
+    },
   },
   overlays: {
     // `~/.omp/agent` also holds agent.db/history.db/models.db (SQLite caches) and

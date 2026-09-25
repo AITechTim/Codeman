@@ -11,6 +11,7 @@ export { registerCronRoutes } from './cron-routes.js';
 export { registerSystemRoutes } from './system-routes.js';
 export { registerHookEventRoutes } from './hook-event-routes.js';
 export { registerApprovalRoutes } from './approval-routes.js';
+export { registerRebootRestoreRoutes } from './reboot-restore-routes.js';
 export { registerReadMyMindRoutes } from './readmymind-routes.js';
 export { registerStatusTelemetryRoutes } from './status-telemetry-routes.js';
 export { registerCaseRoutes } from './case-routes.js';
@@ -27,3 +28,14 @@ export { registerWsRoutes } from './ws-routes.js';
 export { registerVoiceRoutes } from './voice-routes.js';
 export { registerWebviewRoutes, tryWebviewRefererFallback } from './webview-routes.js';
 export { registerTabLayoutRoutes } from './tab-layout-routes.js';
+export {
+  registerCustomModelRoutes,
+  refreshAllCustomModelHosts,
+  readCustomModelEndpointsEnabled,
+  closeAllLlamaSwapLogTails,
+  detectCustomModelSwapDisplacements,
+  pruneIdleLlamaSwapLogTails,
+  type CustomModelSessionLike,
+  type CustomModelSwapDisplacement,
+} from './custom-model-routes.js';
+export { registerCliRegistryRoutes, readCliManagementEnabled, type CliListItem } from './cli-registry-routes.js';

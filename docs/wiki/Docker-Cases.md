@@ -4,7 +4,7 @@ Run a case inside its own container instead of directly on your host: for isolat
 reproducible toolchain, and for the ability to pick the whole environment up and move it to
 another machine.
 
-A docker case is a **location overlay**, not a run mode. All seven run modes work inside a
+A docker case is a **location overlay**, not a run mode. All ten run modes work inside a
 container. See [Core Concepts](Core-Concepts).
 
 ## One-time setup: the base image
@@ -26,7 +26,7 @@ A zero exit code proves the layers ran, not that the toolchain works. Verify:
 
 ```bash
 docker run --rm codeman/agent:base bash -lc \
-  'for c in claude codex gemini opencode agy pi; do printf "%-9s " $c; $c --version 2>&1 | head -1; done'
+  'for c in claude codex gemini opencode agy pi grok dsh omp; do printf "%-9s " $c; $c --version 2>&1 | head -1; done'
 ```
 
 The image is secret-free. Credentials are delivered at runtime, never baked in, so exports
@@ -79,6 +79,25 @@ Exactly one long-lived container per case, shared by every session in it.
   conversation** from the bind-mounted transcript.
 - Deleting the case removes the container. The workspace on the host survives.
 
+## Attaching to a container you already run
+
+Tick **Attach to an existing container** on **Add Case → Docker** to link a case to a
+container that already exists instead of creating one. Codeman only `exec`s into it and
+never creates, starts, stops, restarts or removes it, so a container that is missing or
+stopped fails with a message rather than being fixed for you. Drift detection does not
+apply (the container carries no Codeman configuration label). The full-image export is
+refused, since it would `docker commit` someone else's container, and the workspace export
+skips the pause that keeps an owned container consistent during the capture.
+
+One adopted container can back several cases at different in-container directories, and
+**copy an existing case** pre-fills the form from a sibling on the same container. An exact
+twin (the same container and the same directory) is refused, as is a container another
+user adopted.
+
+Adoption is **admin-only in multi-user mode**. Linking creates Codeman's own container
+with one bind mount that has already been checked; an adopted container's mounts belong to
+whoever started it, and one that mounts `/` hands the adopter the host.
+
 ## Credentials
 
 Your existing host logins work inside the container without logging in again. Credentials
@@ -92,10 +111,41 @@ the container instead.
 
 Bind mounts are excluded from image capture, so exports stay secret-free.
 
-One consequence worth knowing: Pi's credentials are seeded per file rather than as a whole
-directory, because that directory also holds sessions, extensions, and installed packages,
-which can be gigabytes. So in-container Pi sessions are invisible from the host, and `pi -c`
-inside a docker case sees only that container's history.
+One consequence worth knowing: Pi, Grok and OMP credentials are seeded per file rather than
+as whole directories, because those directories also hold sessions, extensions, downloads and
+installed packages, which can be gigabytes. So in-container Pi and Grok sessions are
+invisible from the host (`pi -c` and `grok -c` inside a docker case see only that
+container's history). OMP's `sessions/` is the exception and is shared read-write, because
+Codeman reads it host-side for history and resume.
+
+**Git hosts.** The agent image can also include the GitHub CLI (`gh`) and the Azure CLI (`az`,
+with the `azure-devops` extension), off by default, and its git then uses them as credential
+helpers for github.com and Azure DevOps. When the matching switch is on, their sign-ins are
+seeded like everything else, file by file: `~/.config/gh/hosts.yml` and `config.yml`, and the
+sign-in files from `~/.azure` (not its logs or extensions). With a switch off they are never
+copied in, even if the files exist. So once a switch is on and `gh auth login` / `az login`
+have been run where Codeman runs, agents in a Docker case can clone and push private repos on
+those hosts. Two limits:
+
+- A token held in a desktop keyring or an encrypted token cache (Windows, macOS) is not
+  inside those files and does not carry in. Sign in inside the container instead. The Docker
+  server image and a headless Linux host keep it in the files, so they carry.
+- The sign-ins are mounted when a case container is **created**, so an existing container
+  never picks them up. After turning a switch on, signing in, or rebuilding the agent image,
+  **recreate the case container**: remove it, and the next session in that case creates a
+  fresh one. (Or sign in inside the existing container instead.)
+
+This hands a GitHub token and an Azure sign-in to every agent in a seeded Docker case, the
+same trust you already give it with Claude, Codex or gcloud. Turn seeding off for a case that
+should not have them.
+
+Both CLIs are opt-in. To build the agent image with them, set
+`CODEMAN_AGENT_IMAGE_INSTALL_GH=1` and/or `CODEMAN_AGENT_IMAGE_INSTALL_AZ=1` where the image
+is built: in front of `node scripts/build-agent-image.mjs`, or in the Codeman server's
+environment for the image it builds automatically (in the Docker deployment, `environment:`
+in `docker-compose.override.yml`), then rebuild the image with `--no-cache`.
+`docker/README.md` ("Private repositories") has the details and the matching switches for
+the server image.
 
 ## Isolation
 

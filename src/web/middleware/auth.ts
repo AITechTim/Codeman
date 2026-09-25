@@ -23,7 +23,14 @@ import { getHookSecret, HOOK_SECRET_HEADER } from '../../config/hook-secret.js';
 import { isMultiUserMode } from '../../config/multiuser.js';
 import { findUser, setPassword, touchLastLogin, verifyPassword } from '../../user-store.js';
 import { webviewCapabilities } from '../../webview-capabilities.js';
-import { capabilityFromProxyPath, capabilityFromReferer } from '../webview-proxy.js';
+import {
+  capabilityFromProxyPath,
+  capabilityFromReferer,
+  carriesAuthCredentials,
+  isLostWebviewFrameNavigation,
+  lostWebviewFramePage,
+  LOST_FRAME_PAGE_CSP,
+} from '../webview-proxy.js';
 import { ApiErrorCode, createErrorResponse, type AuthUser } from '../../types.js';
 
 // Request-scoped identity (multi-user). Single-user leaves it undefined and the
@@ -177,6 +184,65 @@ function hasValidWebviewCapability(req: FastifyRequest, basePath = ''): boolean 
 }
 
 /**
+ * A web-tab frame that navigated itself off the proxy prefix (see
+ * isLostWebviewFrameNavigation). It cannot authenticate: opaque origin, no cookie,
+ * no capability left in the URL. Answer with the static recovery page here, BEFORE
+ * the credential checks, so the reload of a proxied dashboard neither shows a
+ * login challenge inside the tab nor counts as a failed attempt against the
+ * caller's IP — a dev server that full-reloads on every save would otherwise
+ * rate-limit its own user out of Codeman. Fenced like the Referer exemption: a
+ * path that resolves to a real route (/api, /q, a registered handler) is never
+ * answered this way, so a genuine unauthenticated navigation still gets the 401.
+ *
+ * `/` is the one registered route that IS answered here, and only when the
+ * request carries neither the session cookie nor an Authorization header. The
+ * shim maps `/webview/<cap>/` to exactly `/`, so a dashboard that reloads on its
+ * landing page (a Vite dev server on a config change) asks for Codeman's root
+ * as an iframe navigation; answering that with the app shell put Codeman inside
+ * its own web tab, and with a password it was a 401 in the frame. Nothing in
+ * Codeman frames its own root and the sandboxed frame has no credentials, so the
+ * credential-free form can only be that frame; a framed `/` WITH credentials is
+ * still the shell. Property worth knowing: a non-browser client can set these
+ * headers too, so an unauthenticated caller can tell a registered route (401)
+ * from a non-route (200) and enumerate the route table. Accepted, because the
+ * routes are public in docs/api-reference.md.
+ *
+ * @returns true when the reply was sent.
+ */
+function serveLostWebviewFrame(req: FastifyRequest, reply: FastifyReply): boolean {
+  if (!isLostWebviewFrameNavigation(req)) return false;
+  const url = (req.url ?? '').split('?')[0];
+  if (url.startsWith('/api/') || url.startsWith('/ws/') || url.startsWith('/q/')) return false;
+  if (url === '/') {
+    if (carriesAuthCredentials(req.headers, AUTH_COOKIE_NAME)) return false;
+  } else if (matchesRegisteredRoute(req, url)) {
+    return false;
+  }
+  sendLostWebviewFramePage(reply);
+  return true;
+}
+
+/**
+ * The landing-page case of serveLostWebviewFrame, for the index route. Without
+ * CODEMAN_PASSWORD no auth hook runs at all, so a lost frame's reload of `/`
+ * reaches `GET /` directly and the route asks this before rendering the shell.
+ * Under a password the hook has already answered a credential-free lost frame,
+ * so here it only ever sees the credentialed form, which stays the shell.
+ */
+export function isLostWebviewRootFrame(req: FastifyRequest): boolean {
+  if (!isLostWebviewFrameNavigation(req)) return false;
+  if ((req.url ?? '').split('?')[0] !== '/') return false;
+  return !carriesAuthCredentials(req.headers, AUTH_COOKIE_NAME);
+}
+
+/** Send the static recovery page (lostWebviewFramePage) with its own CSP, uncached. */
+export function sendLostWebviewFramePage(reply: FastifyReply): FastifyReply {
+  reply.header('content-security-policy', LOST_FRAME_PAGE_CSP);
+  reply.header('cache-control', 'no-store');
+  return reply.type('text/html; charset=utf-8').send(lostWebviewFramePage());
+}
+
+/**
  * Whether `url` resolves to a route Codeman actually registered.
  *
  * `hasRoute()` is the wrong tool: it matches the registered PATTERN literally, so
@@ -302,6 +368,8 @@ export function registerAuthMiddleware(app: FastifyInstance, https: boolean, bas
       done();
       return;
     }
+    // A web-tab frame that lost its prefix: hand it back to its tab, no credentials involved.
+    if (serveLostWebviewFrame(req, reply)) return;
 
     const clientIp = req.ip;
 
@@ -439,6 +507,8 @@ function registerMultiUserAuthHook(
     // ownership against the identity BOUND TO THE CAPABILITY, which is stricter
     // than re-deriving it from a request that carries no credentials.
     if (hasValidWebviewCapability(req, basePath)) return;
+    // A web-tab frame that lost its prefix: hand it back to its tab, no credentials involved.
+    if (serveLostWebviewFrame(req, reply)) return;
 
     const clientIp = req.ip;
 

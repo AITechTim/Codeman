@@ -74,6 +74,15 @@ echo "[self-update] $(date) start tag=$TAG supervisor=$SUPERVISOR repo=$REPO"
 export PATH="$(dirname "$NODE"):$HOME/.local/bin:$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 export GIT_TERMINAL_PROMPT=0
 
+# --node is the server's process.execPath, a VERSIONED path (Homebrew resolves it
+# into Cellar/node/<ver>/). A `brew upgrade node` under a long-running server
+# deletes it, and every status write then failed, so the status stayed "queued"
+# forever. Fall back to whatever node is on PATH.
+if [ ! -x "$NODE" ]; then
+  echo "[self-update] WARN: $NODE is not executable, falling back to node on PATH"
+  NODE="$(command -v node || echo node)"
+fi
+
 TO_VERSION="${TAG##*@}"   # codeman@0.9.4 → 0.9.4 (tag is validated upstream)
 STASH_REF=""
 MANUAL_CMD=""
@@ -193,6 +202,29 @@ run_step "installing" "Installing dependencies" npm install --no-fund --no-audit
 # 5) Build (gate the restart on success — never restart into a torn dist/).
 run_step "building" "Building" npm run build || rollback_and_fail "Build failed"
 
+# Docker Compose only: record what HEAD/package-lock.json the freshly-built
+# codeman-dist/codeman-node-modules volumes now reflect. `Start-Codeman.sh`
+# reads this same file (`$appdata_path/.codeman/…`, i.e. this container's own
+# $HOME/.codeman since that path IS the appdata bind mount) to detect source
+# changes an EXTERNAL `docker compose build` made and refresh those volumes —
+# without this, the next plain `Start-Codeman.sh` run would see the HEAD this
+# update just checked out, not recognise it as already accounted for, and wipe
+# the volumes this update just correctly rebuilt right back to the OLDER image.
+if [[ "$SUPERVISOR" == "docker-compose" ]]; then
+  build_source_file="$HOME/.codeman/docker-build-source.json"
+  mkdir -p -- "$HOME/.codeman"
+  build_head=$(git rev-parse HEAD 2>/dev/null || true)
+  build_lockfile_sha=''
+  if command -v sha256sum >/dev/null 2>&1; then
+    build_lockfile_sha=$(sha256sum -- package-lock.json 2>/dev/null | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    build_lockfile_sha=$(shasum -a 256 package-lock.json 2>/dev/null | cut -d' ' -f1)
+  fi
+  printf '{\n  "headCommit": "%s",\n  "lockfileSha256": "%s"\n}\n' \
+    "$build_head" "$build_lockfile_sha" >"$build_source_file.tmp" \
+    && mv -- "$build_source_file.tmp" "$build_source_file"
+fi
+
 # 6) Restart the service so the new code loads. Write the terminal pre-restart
 #    marker FIRST so the freshly-booted server can reconcile it deterministically.
 write_status "restarting" "Restarting Codeman…"
@@ -253,7 +285,17 @@ case "$SUPERVISOR" in
     # domain needs root, but we don't need it — kill the server and launchd
     # respawns it on the new dist/ within ThrottleInterval seconds.
     if [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null; then
-      : # respawn is launchd's job from here
+      # Respawn is launchd's job, but only once the old process EXITS. A graceful
+      # shutdown that hangs leaves the port closed and the service down, so
+      # escalate to SIGKILL (tmux sessions live outside the server and survive).
+      for _ in $(seq 1 30); do
+        kill -0 "$SERVER_PID" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "[self-update] server pid $SERVER_PID still alive 30s after SIGTERM, sending SIGKILL"
+        kill -9 "$SERVER_PID" 2>/dev/null || true
+      fi
     else
       MANUAL_CMD="sudo launchctl kickstart -k system/com.codeman.web"
       write_status "completed-needs-manual-restart" "Update staged — restart Codeman to apply v$TO_VERSION."

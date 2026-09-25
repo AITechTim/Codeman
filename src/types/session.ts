@@ -58,6 +58,24 @@ export type SessionMode =
   | 'deepseek'
   | 'omp';
 
+/**
+ * Who owns a session's name. `placeholder`: Codeman's own `w<n>-<case>` (or no
+ * name at all), still eligible for auto-naming. `auto`: titled after its first
+ * prompt (`w<n>-<case>: <title>`), which happens once. `manual`: set by a
+ * person; auto-naming never touches it.
+ */
+export type SessionNameSource = 'placeholder' | 'auto' | 'manual';
+
+/** Options for `Session.write()` / `Session.writeViaMux()`. */
+export interface SessionWriteOptions {
+  /**
+   * The bytes were typed by a person, or sent by an agent on their behalf
+   * (browser keystrokes, `POST /api/sessions/:id/input`). Only such input can
+   * name a tab; Ralph, respawn, cron and approval writes leave this unset.
+   */
+  fromUser?: boolean;
+}
+
 export type RemoteCommandMode = Extract<
   SessionMode,
   'shell' | 'claude' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'pi' | 'grok' | 'deepseek' | 'omp'
@@ -97,6 +115,25 @@ export interface RemoteHost extends RemoteSshOptions {
   username: string;
   port?: number;
   commands?: Partial<Record<RemoteCommandMode, string>>;
+  /**
+   * Optional Wake-on-LAN MAC address(es), comma-separated (e.g.
+   * `04:d9:f5:80:c6:58`). Codeman sends the magic packet itself (UDP port 9
+   * broadcast), so the common case needs no external script. A SLEEPING host's
+   * port-22 probe still fails, which is what triggers the wake — this only
+   * controls HOW the host is woken.
+   */
+  wakeMac?: string;
+  /**
+   * Optional Wake-on-LAN command that powers this host on from SLEEP (e.g. a
+   * wrapper script like `/home/joe/bin/whuff`). TAKES PRECEDENCE over `wakeMac`
+   * (an explicit override for hosts that need a router/other-host wake). Absent
+   * = no wake support and today's behavior exactly. Executed WITHOUT a shell (a
+   * single executable path, never a command line), only from user input or an
+   * explicit wake request on a session whose host is unreachable — never from
+   * the auto-reconnect/boot-recovery path, which would re-wake a host seconds
+   * after each suspend.
+   */
+  wakeCommand?: string;
 }
 
 export interface RemoteCase {
@@ -137,6 +174,13 @@ export interface SessionRemote extends RemoteSshOptions {
    * session was created elsewhere. Only meaningful when `owned === false`.
    */
   remoteSessionName?: string;
+  /**
+   * Wake-on-LAN command carried over from the host config (see `RemoteHost.wakeCommand`)
+   * so the input route can wake a sleeping host without re-reading the host list.
+   */
+  wakeCommand?: string;
+  /** Wake-on-LAN MAC address(es) from the host config (see `RemoteHost.wakeMac`). */
+  wakeMac?: string;
 }
 
 /**
@@ -558,6 +602,78 @@ export interface SessionAttachmentHistoryItem {
 /**
  * Current state of a session
  */
+/** The public half of a session's custom-model selection (on the wire, in `SessionState`). */
+export interface CustomModelSelection {
+  endpointId: string;
+  modelId: string;
+  label?: string;
+}
+
+/**
+ * The full custom-model selection a session keeps: the public selection plus the
+ * bookkeeping `Session.setCustomModel()` needs to UNDO it later without guessing what
+ * it once wrote. Persisted to state.json only as the disk-only `__customModel` field
+ * (never broadcast); the injected env VALUES are not in here at all, since they carry
+ * the endpoint's API key, and are re-derived from the endpoint store on recovery.
+ */
+export interface CustomModelBookkeeping extends CustomModelSelection {
+  /** Env keys the selection injected into the session's envOverrides / tmux session. */
+  envKeys: string[];
+  /** Isolated per-session config directory written for a `configDir`-kind CLI. */
+  configDir?: string;
+  /** Value forced onto the CLI's `model` launch param (pi/omp `custom/<id>`, grok's block name). */
+  launchModel?: string;
+}
+
+/**
+ * The agent inside a LOCAL tmux pane has exited, and the pane survived it.
+ *
+ * Codeman creates every pane with `remain-on-exit on`, so `/exit` ends the CLI
+ * while tmux keeps the pane, the tmux session and the `tmux attach-session`
+ * process Codeman records as the session's pid. No PTY exit handler runs, so
+ * without this record the session reads as a live idle one (Ark0N/Codeman#446).
+ *
+ * The field is TRI-STATE, and the third state is the absence of the field:
+ * `undefined` means Codeman does not know, and it must never be rendered as
+ * "alive". It is absent for a direct-PTY session (no pane exists), for a remote
+ * SSH session (the local pane holds the ssh client, whose death means transport
+ * drop OR exit) and for a docker case (the local pane holds a `docker exec`
+ * into the container's own tmux).
+ *
+ * `status` and `signal` are independently optional because tmux may know that
+ * the pane died without reporting how. Measured on tmux 3.2a: a SIGKILLed pane
+ * reports `pane_dead=1` with BOTH `#{pane_dead_status}` and `#{pane_dead_signal}`
+ * empty, and `#{pane_dead_signal}` does not exist at all before tmux 3.4. So an
+ * absent `status` means "the exit code is unknown", never "the exit code is 0".
+ *
+ * ⚠ AN ABSENT `status` STAYS ABSENT. Never write `status ?? 0`, and never read
+ * "no signal was reported" as "the exit must have been clean". On tmux 3.2a
+ * the absent status IS how a signal death presents, so absent-stays-absent is
+ * the only thing keeping the clean-exit sweep (`pane-exit-sweep.ts`) away
+ * from crashed agents: an agent SIGKILLed by the OOM killer would otherwise
+ * read as a user typing `/exit` and be closed. Nothing here fails when
+ * somebody adds that `??` — the types allow it and the label still renders.
+ * The rule is enforced in `derivePaneExits()` (`tmux-manager.ts`), which omits
+ * the key rather than defaulting it, and again in `isCleanPaneExit()`, which
+ * accepts only an explicit 0.
+ */
+export interface PaneExit {
+  /**
+   * tmux `#{pane_dead_status}` — the command's exit code. Absent when tmux
+   * reported none, which means UNKNOWN and never 0. See the ⚠ above before
+   * giving this a default anywhere.
+   */
+  status?: number;
+  /** tmux `#{pane_dead_signal}` — the signal that killed the command. Absent when unsignalled or unsupported. */
+  signal?: number;
+  /**
+   * Wall-clock ms when THIS server process first observed the pane dead. It is
+   * not when the agent exited, which nothing records, and a restart that finds
+   * the pane still dead respawns it rather than re-timing the old exit.
+   */
+  at: number;
+}
+
 export interface SessionState {
   /** Unique session identifier */
   id: string;
@@ -604,6 +720,8 @@ export interface SessionState {
   lastActivityAt: number;
   /** Session display name */
   name?: string;
+  /** Who owns the name (see `SessionNameSource`); absent on states persisted before auto-naming existed. */
+  nameSource?: SessionNameSource;
   /** Session mode */
   mode?: SessionMode;
   /** Auto-clear enabled */
@@ -690,6 +808,15 @@ export interface SessionState {
   resumeSessionId?: string;
   /** Claude CLI effort level (soft default via --settings, switchable in-session via /effort) */
   effort?: EffortLevel;
+  /**
+   * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): the custom
+   * OpenAI-compatible endpoint (local or cloud) this session's CLI is currently pointed
+   * at, if any. Undefined = the harness's native cloud default. No secrets here — the
+   * endpoint's base URL/api key live only in Session._envOverrides, never in this public
+   * state. The internal half (which env keys were injected, which config dir was
+   * written) is {@link CustomModelBookkeeping}, persisted disk-only like `__envOverrides`.
+   */
+  customModel?: CustomModelSelection;
   /** Sanitized per-session attachment history. */
   attachmentHistory?: SessionAttachmentHistoryItem[];
   /**
@@ -715,6 +842,21 @@ export interface SessionState {
    * (COD-118). Runtime-only: never restored on boot (fresh server = fresh breaker).
    */
   respawnBlocked?: boolean;
+  /**
+   * The agent in this session's LOCAL tmux pane has exited (Ark0N/Codeman#446).
+   * See {@link PaneExit} for the tri-state rule and for which session shapes
+   * leave it absent. `status` and `pid` are deliberately untouched by it: the
+   * PTY-exit breaker owns `status: 'error'`, and a null `pid` is what makes the
+   * browser re-attach and launch a fresh CLI.
+   *
+   * Persisted so a reboot restore can tell a session whose agent exited from one
+   * that was merely idle when the power went. `reboot-restore.ts` reads the
+   * persisted record and never builds a `Session`, so the record is the only
+   * place that survives the reboot to carry it. Nothing reads it there YET:
+   * making the restore refuse such a session is a behavior change, and it
+   * belongs with the part of Ark0N/Codeman#446 that closes exited sessions.
+   */
+  paneExit?: PaneExit;
 }
 
 /**

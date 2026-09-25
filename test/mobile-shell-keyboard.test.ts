@@ -597,6 +597,34 @@ describe('composer nav keys from the bar', () => {
   const sentKeys = (fetchMock: { mock: { calls: unknown[][] } }) =>
     fetchMock.mock.calls.map((call) => JSON.parse((call[1] as { body: string }).body).input);
 
+  it.each(['simple', 'extended'])('exposes Shift arrows in the %s agent layout', (mode) => {
+    const { bar, barElement } = loadBar('codex');
+    bar.setMode(mode);
+    expect(barElement.actions).toContain('shift-left');
+    expect(barElement.actions).toContain('shift-right');
+  });
+
+  it.each([
+    ['shift-left', '\x1b[1;2D'],
+    ['shift-right', '\x1b[1;2C'],
+  ])('%s flushes the draft before navigation and hands editing to the PTY', (action, sequence) => {
+    const { bar, app, overlay, fetchMock } = barWithDraft('unfinished follow-up');
+    const events: string[] = [];
+    app.sendInput = vi.fn(() => events.push('draft'));
+    fetchMock.mockImplementation(() => {
+      events.push('key');
+      return Promise.resolve({ ok: true, catch: () => {} });
+    });
+
+    bar.handleAction(action);
+
+    expect(app.sendInput).toHaveBeenCalledWith('unfinished follow-up');
+    expect(events).toEqual(['draft', 'key']);
+    expect(sentKeys(fetchMock)).toEqual([sequence]);
+    expect(overlay.pendingText).toBe('');
+    expect([...(app._echoPassthroughSessions as Set<string>)]).toEqual(['session-1']);
+  });
+
   it('flushes the unsent draft before sending the arrow', () => {
     // On a phone the typed text lives in the overlay and has NEVER reached the
     // PTY, so an arrow sent on its own arrives at a composer the CLI still
@@ -638,5 +666,77 @@ describe('composer nav keys from the bar', () => {
 
     expect(sentKeys(fetchMock)).toEqual(['\x1b[A', '\x1b[B', '\x1b[D', '\x1b[C']);
     expect(app.sendInput).not.toHaveBeenCalled();
+  });
+});
+
+describe('Codex shift-arrow keys are gated on the active session', () => {
+  // ⇧←/⇧→ are Codex bindings. They ship in both agent templates, but a tap in
+  // any other CLI would do nothing AND hand the session to PTY echo
+  // (sendNavKey adds it to _echoPassthroughSessions), so on a phone a dead key
+  // would also switch local echo off for the rest of the prompt. The reveal
+  // follows the 🧠 key's shape: a marker class on the BAR element, because
+  // setMode() rebuilds the buttons' innerHTML on every layout switch.
+  const stylesSource = readFileSync(resolve('src/web/public/styles.css'), 'utf8');
+
+  it('marks both shift keys in both agent templates so one CSS rule can hide them', () => {
+    const simple = keyboardSource.match(/_simpleButtons\s*:\s*`([\s\S]*?)`/)?.[1] ?? '';
+    const extended = keyboardSource.match(/_extendedButtons\s*:\s*`([\s\S]*?)`/)?.[1] ?? '';
+    for (const template of [simple, extended]) {
+      expect(template).toMatch(/accessory-btn-codex[^>]*data-action="shift-left"/);
+      expect(template).toMatch(/accessory-btn-codex[^>]*data-action="shift-right"/);
+    }
+  });
+
+  it('hides the keys in styles.css until the bar carries codex-enabled', () => {
+    expect(stylesSource).toMatch(/\.keyboard-accessory-bar \.accessory-btn-codex \{\s*display: none;/);
+    expect(stylesSource).toMatch(
+      /\.keyboard-accessory-bar\.codex-enabled \.accessory-btn-codex \{\s*display: inline-flex;/
+    );
+  });
+
+  it.each(['simple', 'extended'])('carries codex-enabled for a codex session in the %s layout', (mode) => {
+    const { bar, barElement } = loadBar('codex');
+    bar.setMode(mode);
+    expect(barElement.classList.contains('codex-enabled')).toBe(true);
+    // The buttons themselves are still in the DOM; the class is what reveals them.
+    expect(barElement.actions).toContain('shift-left');
+    expect(barElement.actions).toContain('shift-right');
+  });
+
+  it.each(['claude', 'shell', 'pi', 'omp', 'deepseek'])(
+    'does not carry codex-enabled for a %s session',
+    (sessionMode) => {
+      const { bar, barElement } = loadBar(sessionMode);
+      bar.setMode('extended');
+      expect(barElement.classList.contains('codex-enabled')).toBe(false);
+    }
+  );
+
+  it('re-syncs the class on a session switch, in both directions', () => {
+    const { app, bar, barElement } = loadBar('codex');
+    expect(barElement.classList.contains('codex-enabled')).toBe(true);
+
+    app.sessions.set('session-2', { mode: 'claude' });
+    app.activeSessionId = 'session-2';
+    bar.refreshForActiveSession();
+    expect(barElement.classList.contains('codex-enabled')).toBe(false);
+
+    app.activeSessionId = 'session-1';
+    bar.refreshForActiveSession();
+    expect(barElement.classList.contains('codex-enabled')).toBe(true);
+  });
+
+  it('drops the class when no session is active (welcome screen)', () => {
+    const { app, bar, barElement } = loadBar('codex');
+    app.activeSessionId = '';
+    bar.refreshForActiveSession();
+    expect(barElement.classList.contains('codex-enabled')).toBe(false);
+  });
+
+  it('is wired at init and on every session switch, like the 🧠 key', () => {
+    const initBody = keyboardSource.match(/\n  init\(\) \{([\s\S]*?)\n  \},/)?.[1] ?? '';
+    const refreshBody = keyboardSource.match(/\n  refreshForActiveSession\(\) \{([\s\S]*?)\n  \},/)?.[1] ?? '';
+    expect(initBody).toContain('this.syncCodexKeys();');
+    expect(refreshBody).toContain('this.syncCodexKeys();');
   });
 });

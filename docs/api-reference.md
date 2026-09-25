@@ -324,6 +324,30 @@ from the session's current state rather than requiring a new transition: the
 original turn may be long over. It comes back as
 `"delivered": false, "duplicate": true`.
 
+**Wake-on-LAN hosts** (`docs/remote-sessions.md` §Wake-on-LAN): when the session's
+remote host has a wake target and is asleep, the non-wait form answers `200` with
+`{"buffered": true}` — the bytes are held and flushed after the host is back — or
+`{"buffered": true, "dropped": true}` for a chunk over the 4 KB wake buffer, which
+is gone (never delivered as a fragment). Both fields are additive to the historical
+bare `{}`. With `wait`, the route blocks on the wake instead and answers
+`422 OPERATION_FAILED` ("did not come back after a wake-on-LAN request — nothing was
+sent") when the host never returns, rather than writing into the stalled pane and
+reporting `delivered:true` plus a timeout.
+
+Two endpoints back that flow directly, both scoped to one session's remote host and
+both refusing a session that is not remote (`400 INVALID_INPUT`):
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/sessions/:id/reachability` | Whether the session's remote host answers SSH right now, plus whether a wake target is configured. Read-only: it never wakes. `{"reachable": true\|false\|null, "wakeConfigured": "mac"\|"command"\|"none"}`, where `null` means the answer is unknown (a proxied host, where a TCP probe proves nothing). |
+| `POST` | `/api/sessions/:id/wake` | Wake the host and wait for it to accept SSH again, bounded by the request budget. `422 OPERATION_FAILED` when it does not come back; `400 INVALID_INPUT` with "No wake-on-LAN target configured for this host" when nothing is set. |
+
+⚠️ Waking is deliberately reachable only from an explicit user action (this route, a
+session create/attach, or typing into a sleeping session). No watcher, dropped-session
+handler or boot-recovery path may wake a host, or a suspended machine would be woken
+again seconds after every suspend; `test/remote-wake.test.ts` pins that as an import
+fence around `src/remote-wake.ts`.
+
 ### Response
 
 All three nest the wait result under `data.wait`, so one client helper works against
@@ -479,6 +503,48 @@ re-captured, or the item acknowledged), `approval:resolved` (`{ id, sessionId, k
 `resolution` one of `answered | resolved_in_terminal | superseded |
 session_ended | dismissed | expired`).
 
+## Reboot restore
+
+A host reboot takes the tmux server down with it, so every pane dies and the
+board comes up empty. At boot Codeman works out which sessions the reboot
+destroyed and holds that plan in memory, and these endpoints let a client offer
+it to the user. Nothing creates a pane until the user asks: the boot-time reboot
+heuristic decides whether to ASK, never whether to act.
+
+Claude-mode sessions only (others carry their conversation id in their own
+config object); remote and docker sessions are never offered, because both need
+another host or container to be up. The plan is in-memory, so a server restart
+drops it and the offer is gone; the conversations themselves are unaffected,
+since they live in the CLI's own transcript store and stay reachable from the
+Resume list. A plan nobody spends expires after 24 hours.
+
+- `GET /api/v1/reboot-restore` → `{ sessions: RestorableSession[],
+  scrollbackRestored: false }`, ownership-scoped in multi-user mode.
+  `RestorableSession`: `{ id, name?, workingDir, mode, owner? }`. The persisted
+  record itself is never sent. `scrollbackRestored` is always `false` and exists
+  so a client states it: a restored session is a NEW pane, so the conversation
+  continues and the terminal history does not.
+- `POST /api/v1/reboot-restore/restore` with `{ sessionIds?: string[] }` (omit
+  to restore everything the caller can see) → `{ restored: RestorableSession[],
+  skipped: { sessionId, reason }[] }`. `reason` is one of `workspace-missing`
+  (the directory is gone), `workspace-forbidden` (in multi-user mode it is
+  outside the workspace of the user the session belongs to, re-checked against
+  that owner's current grant rather than the caller's), `already-live` (the conversation is already
+  open, typically resumed by hand from the Resume list), `capacity-reached`
+  (the global or per-user session cap), or `rebuild-failed` (the agent would not
+  start, most often a CLI binary missing from the server's PATH).
+  `409 CONFLICT` when that caller already has a restore running. Entries are
+  removed from the plan before any pane is built, so a double-click cannot put
+  two panes on one conversation; anything that never became a pane goes back on
+  offer, except `already-live`, which cannot stop being true. A restored session
+  comes back attached, idle and disarmed: respawn controllers and Ralph loops
+  are never re-armed automatically.
+- `POST /api/v1/reboot-restore/dismiss` → `{ dismissed: n }`. Drops the offer
+  for everything the caller can see.
+
+Each rebuilt session also emits the ordinary `session:created` SSE event, so
+clients other than the one that clicked pick it up without refetching.
+
 ## Read My Mind intent profiles
 
 Per-case profiles of what the user is trying to accomplish: user/agent-stated
@@ -515,6 +581,128 @@ user guide: [`readmymind.md`](readmymind.md).
 All four enforce session ownership in multi-user mode; a foreign session id
 answers `404 NOT_FOUND` (no existence leak), and profiles of two owners of the
 same directory are distinct by construction.
+
+## Custom Model Endpoints
+
+Points a session's harness at a user-configured OpenAI-compatible endpoint —
+local (llama.cpp, vLLM, DGX Spark) or cloud (Azure AI Foundry, OpenRouter) —
+instead of its native cloud backend, gated by the opt-in
+`customModelEndpointsEnabled` setting (default OFF). Endpoints are
+machine-level infra, like remote/docker hosts: writes are admin-only in
+multi-user mode. Design: [`custom-model-endpoints-plan.md`](custom-model-endpoints-plan.md);
+user guide: [`custom-model-endpoints.md`](custom-model-endpoints.md).
+
+- `GET /api/v1/model-endpoints` -> `CustomModelHost[]`, an unwrapped bare
+  array like every other list route (still riding the standard `{success,
+data}` envelope on the wire — unwrap it the same way). Answers `[]` for a
+  non-admin in multi-user mode. `apiKey` is never returned; `apiKeySet:
+boolean` reports whether one is stored, so a client can render "unchanged
+  if left blank" without ever holding the real value.
+- `POST /api/v1/model-endpoints` with `{ id, label, baseUrl, apiKey?,
+authStyle?, defaultModelId? }` creates one. `id` must match
+  `^[a-zA-Z0-9_-]+$`; `authStyle` is `bearer` (default) or `api-key`, never
+  both (a real server hung indefinitely when sent both headers on one
+  request); `baseUrl` must be `http(s)`, carry no embedded credentials, and
+  is refused if it points at (or resolves to) a link-local or
+  cloud-metadata address. `409 ALREADY_EXISTS` on a duplicate id.
+- `PUT /api/v1/model-endpoints/:id` updates one. An **absent** `apiKey`
+  keeps the stored one rather than clearing it — the client never receives
+  the real value to resend deliberately unchanged, so omission is the only
+  way to say "leave it alone"; there is no way to clear a key back to unset
+  this way. `defaultModelId`, when set, must be one of that endpoint's own
+  `models` (`400 INVALID_INPUT` otherwise).
+- `DELETE /api/v1/model-endpoints/:id` removes one.
+- `POST /api/v1/model-endpoints/:id/discover-models` fetches the endpoint's
+  own `GET /v1/models` and stores the result as `models`, updating
+  `lastDiscoveredAt`, plus (best-effort, only for a model llama-swap's own
+  response already reports loaded) `modelContextLengths` and `modelSizesGB`.
+  A `defaultModelId` that no longer appears in the fresh list is dropped
+  rather than carried forward invalid. Failures answer `422 OPERATION_FAILED`
+  with the underlying connection error, or a named egress refusal if the
+  resolved address turned out to be blocked. The same refresh also runs
+  automatically for every saved endpoint every 5 minutes in the background
+  (`refreshAllCustomModelHosts()`, `custom-model-routes.ts`, started from
+  `server.ts`), so there is no route for triggering "refresh all" — one
+  endpoint being unreachable on a cycle never blocks the others.
+- `GET /api/v1/model-endpoints/:id/running-status` -> `{ isLlamaSwap,
+running: [{model, state}], logLine? }`, read-only, no admin gate
+  (any session owner who could already point a session at this endpoint can
+  equally ask what it currently has loaded). `isLlamaSwap` is
+  feature-detected via the endpoint's own `GET /running` — a plain
+  llama.cpp/OpenAI-compatible server has none and always answers `false`.
+  `logLine`, present only when `isLlamaSwap` is true, is the most recent
+  REAL backend `llama-server` process log line (`load_model: ...`,
+  `llama_server: model loaded`, etc.), sourced from the endpoint's own
+  `GET /api/events` SSE stream and filtered to `source: "upstream"` frames
+  only (never llama-swap's own `source: "proxy"` request-access log) — one
+  connection is held open per endpoint and reused across every poller,
+  idle-closed after 30s of nobody asking. This is what the Run-menu
+  picker's loading banner polls once a second while a model is loading.
+- `POST /api/v1/sessions/:id/custom-model` with `{ endpointId, modelId,
+confirmed? } | { clear: true }` applies (or clears) the session's
+  selection and **restarts the session's CLI process in place** — every
+  supported harness reads its endpoint config at process start, never per
+  turn, so there is no live hot-swap. (`POST /api/v1/quick-start`'s own
+  `customModel: { endpointId, modelId, confirmed? }` field is the
+  no-restart equivalent for a session that doesn't exist yet — see below.)
+  A Claude session resumes its existing conversation across the restart;
+  pi/omp/grok additionally get a forced `--model`/`-m` value, since for
+  those three the config file alone does not select it. `400 INVALID_INPUT`
+  for a remote (SSH) or Docker session — both restart their agent
+  differently under the hood, and applying to one would report success
+  while changing nothing. Two more responses replace the normal
+  `{customModel, restarted}` shape, neither an error, and neither restarts
+  or creates anything on the first ask. ⚠️ **Each is answered by its OWN
+  flag on the retry, and answering one is not consent to the other**: they
+  are questions about different people, and while they shared a single flag
+  a caller who confirmed the context warning silently agreed to evict
+  another session's model as well. Send `confirmedContext: true` to proceed
+  past the context warning, `confirmedSwap: true` past the swap conflict,
+  and both when both were asked (they accumulate, so the second retry still
+  carries the first answer). The original `confirmed: true` still means
+  BOTH and is still accepted, because it shipped in this feature's
+  HTTP-API-only cut; new callers should send the specific one:
+  - `{requiresConfirmation: true, currentlyLoadedModel, affectedSessions}` —
+    llama.cpp/llama-swap only runs one model at a time, and switching would
+    unload a model another **live session's own selection** is actively
+    using. Never returned for a plain (non-llama-swap) server, and never
+    just because a swap is needed at all — only when it would disrupt
+    someone else.
+  - `{requiresContextWarning: true, modelId, contextLength,
+minSafeContextTokens}` — Claude Code's own fixed per-turn overhead
+    (system prompt + tool schemas) can exceed a small model's entire
+    discovered context on its own, before any conversation history exists
+    to compact, guaranteeing the very first message fails regardless of
+    `CLAUDE_CODE_MAX_CONTEXT_TOKENS`. Gated on the CLI registry declaring a
+    `contextLengthVar` (claude only today), so it never fires for another
+    harness.
+- `POST /api/v1/quick-start`'s `customModel: { endpointId, modelId,
+confirmed?, confirmedContext?, confirmedSwap? }` field (alongside its
+normal `caseName`/`mode`/etc. body)
+  computes the same injection **before** the session exists and launches
+  directly on the endpoint — no restart, because there was never a
+  native-backend boot to restart away from. Runs the identical checks as
+  the dedicated route above (`requiresConfirmation`/`requiresContextWarning`,
+  same shapes, same per-question `confirmedContext`/`confirmedSwap` retry),
+  and is refused the same way
+  for a remote or Docker case. This is what the Run-menu picker uses for
+  opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP; Claude still uses the
+  dedicated restart route above (its `--resume`-based restart is far less
+  jarring than a full relaunch, and folding it into the one-shot path is
+  separate work — see `docs/custom-model-endpoints-plan.md`).
+
+## CLI management
+
+Read and write the CLI registry (`docs/cli-registry.md`). Every **write** route answers `403 FORBIDDEN` while `cliManagementEnabled` is off (the default), and for a non-admin in multi-user mode. A write that would overwrite a `clis.json` which does not parse, or which has group/world permission bits, is refused with `409 CONFLICT` and a message naming the fix; the file is left untouched.
+
+| Method   | Path                          | Body                                                    | Notes                                                                                                   |
+| -------- | ----------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/clis`                   | none                                                    | Every entry, disabled ones included: `id`, `label`, `shortBadge`, `order`, `kind`, `enabled`, `stock`, `installed`, and `installCommand` for a stock entry. Not gated; a non-admin in multi-user mode gets `[]`. |
+| `PUT`    | `/api/clis/:id`               | `{ enabled }`                                           | Toggle an existing entry, stock or custom. `404` for an unknown id; `400 INVALID_INPUT` when disabling a `kind: 'shell'` entry. |
+| `POST`   | `/api/clis/:id/install`       | none                                                    | Run a **stock** entry's install command (never a custom one: `400`). `409 CONFLICT` while an install for the same id is running; `422 OPERATION_FAILED` with the output tail when it fails. Never enables the entry. |
+| `POST`   | `/api/clis`                   | `{ id, label, shortBadge, binaries, argv, enabled? }`   | Create a custom entry. `409 ALREADY_EXISTS` for a stock id or an existing custom id. `enabled` defaults to `true`. |
+| `PUT`    | `/api/clis/custom/:id`        | `{ label, shortBadge, binaries, argv, enabled? }`       | Replace an existing custom entry. An absent `enabled` keeps the entry's current state. `400` for a stock id, `404` for an unknown one. |
+| `DELETE` | `/api/clis/:id`               | none                                                    | Delete a custom entry. `400` for a stock id, `404` for an unknown one.                                  |
 
 ## Voice dictation
 

@@ -48,6 +48,10 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Local Compose customisation (host-specific, not part of the project)
+docker-compose.override.yml
+docker-compose.override.yaml
+
 # State files (local to each machine)
 .claude/ralph-loop.local.md
 
@@ -105,3 +109,7 @@ readme-preview.mjs
 
 # Uploaded images land here under each session working dir (runtime artifact)
 .claude-images/
+
+# Local-LLM harness smoke-test config (real IPs/keys) — see the .example.json
+# alongside it in scripts/, which IS tracked as the template.
+scripts/local-llm-test.config.json

@@ -42,13 +42,14 @@ const MOBILE_OVERVIEW_PHONE_QUERY = '(max-width: 599px)';
 
 /** How many past conversations show before the "Show all" toggle. */
 const MOBILE_OVERVIEW_PAST_LIMIT = 8;
+const SHELL_KIND = 'shell';
 
 /**
  * Backends offered by the Run picker, mirroring the toolbar's run-mode menu
  * (`#runModeMenu` in index.html). `short` is the badge on the Run button itself.
  */
 const MOBILE_OVERVIEW_RUN_MODES = [
-  { mode: 'claude', label: 'Claude Code', short: 'Claude' },
+  { mode: 'claude', label: 'Claude Code', short: 'Claude Code' },
   { mode: 'opencode', label: 'OpenCode', short: 'OpenCode' },
   { mode: 'codex', label: 'Codex', short: 'Codex' },
   { mode: 'gemini', label: 'Gemini', short: 'Gemini' },
@@ -59,6 +60,31 @@ const MOBILE_OVERVIEW_RUN_MODES = [
   { mode: 'omp', label: 'OMP', short: 'OMP' },
   { mode: 'shell', label: 'Terminal / Shell', short: 'Shell' },
 ];
+
+/**
+ * The one word every surface puts on the watching badge, and the tooltip that says
+ * what the pane actually reported. Both live here so the phone overview, the desktop
+ * home rail and the rich sidebar rows cannot word the same badge three ways.
+ */
+const WATCHING_BADGE_TEXT = 'watching';
+const watchingBadgeTitle = (label) => 'Still running in the background: ' + label;
+
+function mobileOverviewRunModes() {
+  const catalog =
+    typeof window !== 'undefined' && Array.isArray(window.__codemanCliCatalog) ? window.__codemanCliCatalog : [];
+  if (catalog.length === 0) return MOBILE_OVERVIEW_RUN_MODES;
+  return catalog
+    .filter((entry) => entry.enabled)
+    .map((entry) => ({
+      mode: entry.id,
+      label: entry.kind === SHELL_KIND ? 'Terminal / Shell' : entry.label,
+      // The registry `label`, not `shortBadge`: the Run button has always shown a word
+      // ("Claude", "Codex", "Shell"), and every stock label IS that word, so this stays
+      // identical to MOBILE_OVERVIEW_RUN_MODES above. `shortBadge` is the two-letter tab
+      // code ("CC", "CX"), which read as a regression on the button.
+      short: entry.label,
+    }));
+}
 
 /** Pill copy per state. Kept short: a phone row has ~90px for it. */
 const MOBILE_OVERVIEW_PILL_LABEL = {
@@ -136,6 +162,36 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * The exited-agent override for one row (Ark0N/Codeman#446), or null when
+   * the row shows its state as usual.
+   *
+   * The server publishes `session.paneExit` once the agent inside a local tmux
+   * pane has exited, while `status` stays `idle` or `busy` by design. So a row
+   * classified as idle or working may really be a pane with nothing running
+   * in it. This overrides what the row SHOWS, never its `state`: `state` still
+   * picks the section and the sort, the way `_sidebarRichRow()` (app.js) does
+   * for the detailed sidebar and rail. A pending alert still wins, because a
+   * human being blocked outranks the agent having exited.
+   *
+   * Shared by the phone overview, the desktop home rail and the rich tab rows,
+   * so the three cannot disagree about which sessions have exited.
+   *
+   * Guarded like every other cross-file call: `paneExitLabel()` lives in
+   * app.js, and a stale cached app.js must degrade to no override, not throw.
+   *
+   * @returns {{since: {key: string, at: number}|null}|null}
+   */
+  _mobileOverviewExit(state, session) {
+    if (state !== 'idle' && state !== 'working') return null;
+    if (typeof paneExitLabel !== 'function' || !paneExitLabel(session.paneExit)) return null;
+    // `at` is when this server first saw the pane dead, which is what "exited
+    // 2m" should measure. A row without it shows no duration at all rather
+    // than a working or idle stamp that no longer describes the pane.
+    const at = Number(session.paneExit.at) || 0;
+    return { since: at ? { key: 'exited', at } : null };
+  },
+
+  /**
    * Longest-prefix match of a workingDir against the case list, so a session
    * started in a subdirectory still belongs to its case. Mirrors the matching in
    * `_resolveCaseLabel()` (terminal-ui.js) but returns the case itself.
@@ -176,6 +232,7 @@ Object.assign(CodemanApp.prototype, {
     const rows = sessions.map((session) => {
       const matched = this._mobileOverviewCaseFor(session.workingDir, cases);
       const state = this._mobileOverviewState(session, pendingHooks.get && pendingHooks.get(session.id));
+      const exit = this._mobileOverviewExit(state, session);
       const orderIndex = order.indexOf(session.id);
       return {
         id: session.id,
@@ -184,7 +241,14 @@ Object.assign(CodemanApp.prototype, {
         caseName: matched ? matched.name : '',
         dir: this._shortenHomePath ? this._shortenHomePath(session.workingDir) : session.workingDir || '',
         state,
-        pill: MOBILE_OVERVIEW_PILL_LABEL[state] || state,
+        // What the row's dot, accent and pill show. It differs from `state` only
+        // for an exited agent, whose state still decides the section and sort.
+        display: exit ? 'exited' : state,
+        pill: exit ? 'exited' : MOBILE_OVERVIEW_PILL_LABEL[state] || state,
+        // What the pane's own footer says is still running in the background ("1 monitor",
+        // "2 shells"), straight off the session payload. A row that has one is quiet
+        // because the agent is waiting for that, not because it is waiting for you.
+        watching: typeof session.watching === 'string' ? session.watching : '',
         // Epoch ms, straight off the session payload; formatting happens at
         // render time so the clock can redo it without a re-render.
         createdAt: Number(session.createdAt) || 0,
@@ -192,7 +256,7 @@ Object.assign(CodemanApp.prototype, {
         // pair resolved for DISPLAY, and the two must not drift apart.
         lastActivityAt: Number(session.lastActivityAt) || 0,
         lastSubmitAt: Number(session.lastSubmitAt) || 0,
-        since: this._mobileOverviewSince(state, session),
+        since: exit ? exit.since : this._mobileOverviewSince(state, session),
         orderIndex: orderIndex === -1 ? Number.MAX_SAFE_INTEGER : orderIndex,
       };
     });
@@ -515,7 +579,7 @@ Object.assign(CodemanApp.prototype, {
     const runMode = document.createElement('span');
     runMode.className = 'mobile-overview-run-mode';
     runMode.setAttribute('data-i18n-skip', '');
-    runMode.textContent = MOBILE_OVERVIEW_RUN_MODES.find((m) => m.mode === mode)?.short || mode;
+    runMode.textContent = mobileOverviewRunModes().find((m) => m.mode === mode)?.short || mode;
     run.appendChild(runMode);
     group.appendChild(run);
 
@@ -570,7 +634,7 @@ Object.assign(CodemanApp.prototype, {
     menu.className = 'mobile-overview-run-menu';
     const current = this.runMode || 'claude';
 
-    for (const entry of MOBILE_OVERVIEW_RUN_MODES) {
+    for (const entry of mobileOverviewRunModes()) {
       if (entry.mode !== 'shell' && !this.isCliAvailable(entry.mode)) continue;
       const option = document.createElement('button');
       option.type = 'button';
@@ -668,12 +732,13 @@ Object.assign(CodemanApp.prototype, {
   _buildMobileOverviewRow(row) {
     const item = document.createElement('button');
     item.type = 'button';
-    item.className = 'mobile-overview-row mobile-overview-row--' + row.state;
+    const display = row.display || row.state;
+    item.className = 'mobile-overview-row mobile-overview-row--' + display;
     item.dataset.moAction = 'session';
     item.dataset.moSession = row.id;
 
     const dot = document.createElement('span');
-    dot.className = 'mobile-overview-dot mobile-overview-dot--' + row.state;
+    dot.className = 'mobile-overview-dot mobile-overview-dot--' + display;
     dot.setAttribute('aria-hidden', 'true');
     item.appendChild(dot);
 
@@ -706,12 +771,14 @@ Object.assign(CodemanApp.prototype, {
     item.appendChild(body);
 
     const pill = document.createElement('span');
-    pill.className = 'mobile-overview-pill mobile-overview-pill--' + row.state;
+    pill.className = 'mobile-overview-pill mobile-overview-pill--' + display;
     // Skipped by i18n on purpose: the labels are generic single words ("idle",
     // "done", "error") that collide with state strings on other surfaces.
     pill.setAttribute('data-i18n-skip', '');
     pill.textContent = row.pill;
     item.appendChild(pill);
+
+    if (row.watching) item.appendChild(this._buildWatchingBadge(row.watching, 'mobile-overview-pill'));
 
     const chevron = document.createElement('span');
     chevron.className = 'mobile-overview-chevron';
@@ -732,6 +799,40 @@ Object.assign(CodemanApp.prototype, {
     }
 
     return item;
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Watching badge
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * The badge a session wears while work it started in the background is still
+   * running: a monitor, a backgrounded shell, a cloud session.
+   *
+   * It says one word, and the label the pane itself printed ("1 monitor") rides in
+   * the tooltip, because the badge shares a row with the state pill on the narrowest
+   * screen this app renders on. It does NOT replace that pill: an agent can arm a
+   * monitor and ask the user a question in the same breath, so the row still says
+   * "needs you" and this says what else is going on.
+   *
+   * Shared with the desktop home rail (home-sessions.js), for the same reason
+   * `_mobileOverviewState` is: one badge, one wording, one place to change it. The
+   * caller names its own pill class, because each surface styles its pills itself and
+   * the phone's live inside a media query the desktop never enters.
+   */
+  _buildWatchingBadge(label, baseClass) {
+    const badge = document.createElement('span');
+    const base = baseClass || 'mobile-overview-pill';
+    badge.className = base + ' ' + base + '--watching';
+    badge.setAttribute('data-i18n-skip', '');
+    badge.textContent = WATCHING_BADGE_TEXT;
+    // The label rides in BOTH, because a tooltip is desktop-only: a phone has no hover
+    // target, and a screen reader gets the one word either way. This is the surface the
+    // badge was built for first, so "watching" with no way to learn what would be the
+    // wrong place to save a line.
+    badge.title = watchingBadgeTitle(label);
+    badge.setAttribute('aria-label', watchingBadgeTitle(label));
+    return badge;
   },
 
   // ═══════════════════════════════════════════════════════════════

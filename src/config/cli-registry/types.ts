@@ -344,7 +344,48 @@ export interface CliCapabilities {
     promptGlyph: string;
     /** Source of a regex matching the status line this CLI draws while a turn runs. */
     workingLine: string;
+    /**
+     * Source of a regex matching the row this CLI draws while work it started in the
+     * background is still running, e.g. Claude's `· 1 monitor ·` footer chip or Codex's
+     * `1 background terminal running · /ps to view`. Capture group 1 is the label Codeman
+     * shows, and the whole match stands in when the pattern declares no group. A CLI that
+     * omits this reports no background work, which is what every CLI did before the field
+     * existed.
+     */
+    watchingLine?: string;
+    /**
+     * How many rows at the FOOT of the screen that row can appear in, counting non-blank
+     * rows only. Claude writes its chip on the last row and keeps the default; Codex pins
+     * its own above the composer, which puts it third from the bottom, so it declares
+     * more. Keep each number as small as that CLI's layout allows: every extra row is
+     * another row an agent might be able to write, and the label is what silences an
+     * alert. See `watchingLabel()` in `session-activity.ts`.
+     */
+    watchingLines?: number;
   };
+  /**
+   * How many columns this CLI indents its transcript body by, so a copy taken from its
+   * pane can drop that much and paste flush. Claude Code indents two and puts its own
+   * markers in those columns.
+   *
+   * ⚠ DECLARED rather than measured off the pane, and two measured attempts are why.
+   * Asking whether the pane painted real spaces across the unused part of each row
+   * separates a TUI from a shell perfectly where it fires and never over-stripped; it
+   * is also a function of pane WIDTH, because that padding exists only while a
+   * rendered line stops short of the CLI's own layout width and Claude Code's prose
+   * wraps to fill it. On one live transcript the share of padded rows ran 44%, 6%, 6%,
+   * 7% and 87% at 123, 160, 198, 235 and 298 columns, so at any ordinary window size
+   * the strip silently did nothing. Taking the narrowest indent on the surrounding
+   * rows instead fires at every width and over-strips on roughly 1% of selections,
+   * because a file listing inside the transcript can be the narrowest thing on screen.
+   *
+   * A declared width can do neither. The strip is the lesser of this and what every
+   * selected line shares, so a block can only ever shift as a unit, and it can never
+   * shift further than the CLI itself says its gutter is.
+   *
+   * Absent means no strip at all, the same fail-safe direction `workDetect` takes.
+   */
+  transcriptGutter?: number;
   /** No direct-PTY fallback: the CLI must run inside tmux (secrets ride tmux setenv). */
   requiresMux: boolean;
   /**
@@ -457,6 +498,122 @@ export interface CliCapabilities {
   gates: Record<string, { minVersion: string; failClosed: boolean }>;
   /** Cap on a single terminal frame, when this CLI needs a tighter one than the default. */
   maxFrameBytes?: number;
+  /**
+   * How this CLI is pointed at a user-supplied custom OpenAI-compatible
+   * endpoint (local, e.g. llama.cpp, or cloud, e.g. Azure AI Foundry) — the
+   * Custom Model Endpoint Profiles feature (`docs/custom-model-endpoints-plan.md`). Declared
+   * per entry, never branched on id, same as every other capability here.
+   *
+   * `env`: plain env vars (claude's `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/
+   * `ANTHROPIC_DEFAULT_*_MODEL`). `configContentEnv`: a full config blob
+   * carried in one env var (opencode's `OPENCODE_CONFIG_CONTENT`).
+   * `configDir`: a generated config file under an isolated, dir-redirect-env-
+   * pointed directory so the user's real CLI config is never touched
+   * (codex's `CODEX_HOME`/`config.toml`, pi/omp's `PI_CONFIG_DIR`, grok's
+   * `GROK_HOME`/`config.toml`). `unsupported`: no known mechanism
+   * (antigravity) — the toolbar entry stays disabled for this CLI.
+   *
+   * ⚠️ grok was ORIGINALLY declared as `env` kind (`GROK_BASE_URL`/
+   * `GROK_MODEL`/`XAI_API_KEY`) — that recipe was WRONG, not just unverified:
+   * live-tested against a real grok binary, it produced "Not signed in",
+   * because those env vars are not grok's real custom-endpoint mechanism at
+   * all. The real one is a `[model.<name>]` block in a `config.toml` under
+   * `GROK_HOME` (verified against xAI's own docs), same shape as codex/pi/
+   * omp — this is why the confidence table in docs/custom-model-endpoints-plan.md exists:
+   * "researched" web docs can still be plausible-sounding and wrong.
+   *
+   * Every env var name this introduces that can redirect a session's
+   * traffic MUST also appear in `privilegedEnvKeys` above, exactly like
+   * `DEEPSEEK_BASE_URL` — a non-granted multi-user owner redirecting a
+   * session to their own endpoint is a credential-exfiltration path, not
+   * just a mischief redirect.
+   *
+   * `launchModel` is the value the entry's own `model` launch param must carry
+   * for the CLI to SELECT the injected provider, as a template where
+   * `{modelId}` is the chosen model id. Writing the config file is not enough
+   * for pi and omp (`--model custom/<id>`, or the CLI stays on its own default
+   * provider and reports "No API key found for the selected model") or for
+   * grok (`--model codeman-custom`, the `[model.<name>]` block the config
+   * declares). Absent = the config alone selects the model (claude's env vars,
+   * opencode's blob, codex's top-level `model` key). Applied by the session's
+   * respawn options through the entry's `legacyConfigField`, never by id.
+   *
+   * `contextLengthVar` (env kind only): the env var a discovered per-model context-window
+   * size is written to when known (claude's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`) — without it,
+   * a CLI that assumes a large default window for an unrecognized model name keeps sending
+   * full-size prompts against a much smaller local server and eventually overflows its real
+   * context (verified: a 33.7K-token system prompt against a 16384-token llama-swap model).
+   * Absent when the CLI has no such override, or the value is unknown for this model.
+   *
+   * `configDirVar` (env kind only): the env var that redirects this session's config/
+   * credential directory to an isolated, per-session one (claude's `CLAUDE_CONFIG_DIR`), so
+   * an injected API key never coexists with a stored claude.ai OAuth session in the same
+   * directory — the CLI still warns "both claude.ai and ANTHROPIC_API_KEY set" when they
+   * share a directory even though the API key wins for actual requests. Isolating it trades
+   * that cosmetic warning for a documented side effect: a relocated config directory writes
+   * transcripts outside `~/.claude/projects`, blinding the response viewer, subagent
+   * windows, and Read My Mind for that session (see docs/wiki/Agent-CLIs.md).
+   *
+   * `apiKeyTrustFile` (env kind only, alongside configDirVar): an isolated config directory
+   * has none of a real profile's prior "detected a custom API key, use it?" approvals, so
+   * without this the CLI stops and asks interactively on every single launch — with no one
+   * at a TTY to answer, that's a hang, not a warning (confirmed live: claude's own default
+   * answer, "No", would silently refuse to use the very key this feature just injected).
+   * `relPath`/`shape` name the file (claude's `.claude.json`) and its
+   * `customApiKeyResponses.approved` field this pre-seeds — the exact field a real answered
+   * prompt itself writes to, so this isn't bypassing the check, just answering it the same
+   * way a one-off prior approval on a shared profile already would.
+   *
+   * `skipFirstRunPrompts` (env kind only, alongside apiKeyTrustFile): an isolated config
+   * directory is not just missing API-key approvals — it is a brand-new profile as far as
+   * the CLI is concerned, so it also replays its ENTIRE first-run sequence on every launch:
+   * the theme picker, the security-notes screen, the per-project "trust this folder?"
+   * dialog, and (running with a bypass-permissions flag) a one-time warning about it —
+   * confirmed live, none of which a real, long-used profile ever shows again. `true`
+   * pre-seeds the same state a real profile accumulates from having answered all of that
+   * once: `hasCompletedOnboarding` and the launching session's own project entry in the
+   * `apiKeyTrustFile` (claude's `.claude.json`), plus `skipDangerousModePermissionPrompt`
+   * in claude's `settings.json` — see `seedFirstRunState`/`seedSkipBypassPermissionsPrompt`
+   * in custom-model-injection-apply.ts. Requires `apiKeyTrustFile` to be set too, since it
+   * reuses that file.
+   *
+   * `appendV1Suffix` (env kind only): the raw `endpoint.baseUrl` gets `withV1Suffix()`
+   * applied before being written to `baseUrlVar`, instead of being used verbatim.
+   * DeepSeek needs this and claude/gemini must NOT get it — a per-CLI asymmetry confirmed
+   * by reading each SDK's own request-building source, not assumed: DeepSeek Harness's
+   * bundled `@deepseek-ai/dsh-llm-deepseek` concatenates `${connection.baseURL}/chat/
+   * completions` with no `/v1` insertion of its own (its real public API base,
+   * `https://api.deepseek.com`, expects the caller's base URL to already carry any
+   * needed prefix), while llama-swap/llama.cpp only ever serves the OpenAI-conventional
+   * `/v1/chat/completions` — confirmed live: a bare `POST <baseUrl>/chat/completions`
+   * 404s, `POST <baseUrl>/v1/chat/completions` succeeds, and the harness's own error
+   * message template (`DeepSeek API error (HTTP ${status})`) reproduces the exact
+   * `HTTP_404` this feature originally shipped with unexplained. Claude Code's own SDK,
+   * by contrast, was already confirmed working end-to-end against the RAW `baseUrl` with
+   * no suffix — appending one there would be wrong, not just redundant.
+   */
+  customModelInjection:
+    | {
+        kind: 'env';
+        baseUrlVar: string;
+        apiKeyVar: string;
+        modelVars: string[];
+        launchModel?: string;
+        contextLengthVar?: string;
+        apiKeyTrustFile?: { relPath: string; shape: 'claude-api-key-responses' };
+        configDirVar?: string;
+        skipFirstRunPrompts?: boolean;
+        appendV1Suffix?: boolean;
+      }
+    | { kind: 'configContentEnv'; envVar: string; template: 'opencode-json'; launchModel?: string }
+    | {
+        kind: 'configDir';
+        dirEnvVar: string;
+        fileName: string;
+        template: 'codex-toml' | 'pi-models-json' | 'omp-models-yml' | 'grok-toml';
+        launchModel?: string;
+      }
+    | { kind: 'unsupported' };
 }
 
 // ---------------------------------------------------------------------------
@@ -513,12 +670,14 @@ export interface CliOverlays {
 /**
  * ⚠️ DECLARED-FOR-LATER: fields no code reads yet.
  *
- * `shortBadge`, `accent`, `overlays.credStore`, `capabilities.echo`, `capabilities.wheelForward`,
+ * `accent`, `overlays.credStore`, `capabilities.echo`, `capabilities.wheelForward`,
  * `capabilities.keyboardAccessory` and `capabilities.maxFrameBytes` all describe FRONTEND
- * behaviour, and the frontend is deliberately untouched by the change that introduced this
- * registry — `app.js`, `terminal-ui.js`, `styles.css` and friends keep their own
+ * behaviour, and most of the frontend is deliberately untouched by the change that introduced
+ * this registry — `app.js`, `terminal-ui.js`, `styles.css` and friends keep their own
  * hand-authored per-CLI rules, and moving them is its own piece of work with its own way of
- * being verified (a mobile/browser suite the CI gate cannot see).
+ * being verified (a mobile/browser suite the CI gate cannot see). `shortBadge` graduated out of
+ * this list (docs/cli-enable-disable-plan.md, Phase 2): `GET /api/clis` reads it for the
+ * CLI-management Settings list.
  *
  * They are declared now because each entry should describe its CLI completely, and because
  * transcribing them while the hand-written source is still on screen is when the values are
@@ -535,7 +694,13 @@ export interface CliEntry {
   label: string;
   /** Two-ish character tab badge, e.g. 'OC'. */
   shortBadge: string;
-  /** Single hex colour. CSS derives every per-CLI gradient from it via --cli-accent. */
+  /**
+   * Single hex colour, measured from the CLI's actual `.btn-toolbar.btn-run.mode-<id>`
+   * gradient in styles.css (see stock.ts's comment above `CLAUDE` for the exact
+   * methodology). DECLARED-FOR-LATER (above) — no code reads this yet; styles.css's
+   * gradients are still hand-authored per id, not derived from this field via any
+   * CSS custom property. There is no `--cli-accent` variable in the codebase.
+   */
   accent: string;
   enabled: boolean;
   /** Set by the loader from the shipped catalog; a user entry can never claim it. */

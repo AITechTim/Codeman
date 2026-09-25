@@ -20,11 +20,18 @@ Three ways to get one, all under **+** next to the case picker:
 | How               | Result                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------ |
 | **Create New**    | A fresh `~/codeman-cases/<name>` with a scaffolded `CLAUDE.md`.                                          |
-| **Clone Repo**    | A public repo cloned into `~/codeman-cases/<name>` and registered as a case.                            |
+| **Clone Repo**    | A repo cloned into `~/codeman-cases/<name>` and registered as a case. Private repos need this machine's own git credentials (see below). |
 | **Link Existing** | An existing folder anywhere on disk, registered in place. Nothing is copied or moved.                    |
 
 Linked cases keep living where they are. Deleting a case in Codeman removes the
 registration, and for a linked case that is all it removes.
+
+**Clone Repo never asks for credentials.** It uses whatever the server's own git already has:
+an ssh key, or a credential helper such as `gh auth setup-git`. The Docker image can include
+helpers for GitHub (`gh`) and Azure DevOps (`az`), turned on in `docker-compose.override.yml`;
+then signing those CLIs in once from a shell session is enough. See the private repositories
+section of `docker/README.md`. Without credentials a private repo fails straight away with an
+authentication error.
 
 **Cases created from scratch are the only copy of that code.** Uninstalling Codeman does not
 delete `~/codeman-cases/`, but treat that directory as real work, not scratch space.
@@ -50,10 +57,10 @@ A session carries state the case does not:
 ## Run mode
 
 The **run mode** is which CLI the session runs: `claude`, `opencode`, `codex`, `gemini`,
-`antigravity`, `pi`, or `shell`. It is chosen at start and does not change afterwards; to
+`antigravity`, `pi`, `grok`, `deepseek`, `omp`, or `shell`. It is chosen at start and does not change afterwards; to
 switch, start another session.
 
-Claude is the reference mode. Six of the seven are not Claude, and a number of Codeman
+Claude is the reference mode. Nine of the ten are not Claude, and a number of Codeman
 features are Claude-only for structural reasons rather than missing effort: they depend on
 Claude Code's hook system or on parsing its terminal output. Every such feature is labelled
 Claude-only where it appears, and [Agent CLIs](Agent-CLIs) lists them in one place.
@@ -68,8 +75,8 @@ Where a case runs is **separate from** which CLI it runs. There are three locati
 | **Docker**     | One long-lived container per case; sessions `docker exec` into it. See [Docker Cases](Docker-Cases).           |
 | **Remote SSH** | A durable tmux server on the remote host, fronted by a local pane running `ssh`. See [Remote SSH Sessions](Remote-SSH-Sessions). |
 
-This matters because it is a common source of confusion: Docker is **not** an eighth run
-mode. All seven run modes work in all three locations. A case is docker-backed or
+This matters because it is a common source of confusion: Docker is **not** an eleventh run
+mode. All ten run modes work in all three locations. A case is docker-backed or
 ssh-backed; a session is claude or codex or shell.
 
 **Web tabs** are the other thing that is not a session. A saved dashboard URL renders as a
@@ -155,9 +162,11 @@ report events back: a permission prompt appeared, the turn finished, the agent w
 task completed. Those events drive tab alerts, the Approvals Inbox, notifications, and the
 wait primitives.
 
-This is why some features are Claude-only. The other CLIs have no equivalent hook system,
-so for them Codeman falls back to watching terminal output, which is coarser: it can see
-that something happened, not what it was.
+This is why some features are Claude-only. The one partial exception is DeepSeek Harness,
+whose terminal front door reports idle, working and blocked to Codeman over the harness's
+own supervisor contract, so it gets the hook-driven signals without a hook file. The other
+CLIs have no equivalent, so for them Codeman falls back to watching terminal output, which
+is coarser: it can see that something happened, not what it was.
 
 See [Hooks And Integrations](Hooks-And-Integrations).
 
@@ -167,7 +176,7 @@ See [Hooks And Integrations](Hooks-And-Integrations).
 | --------------- | ---------------------------------------------------------------------------- |
 | **Case**        | Named working directory.                                                      |
 | **Session**     | One CLI in one tmux session.                                                  |
-| **Run mode**    | Which CLI: claude, opencode, codex, gemini, antigravity, pi, shell.           |
+| **Run mode**    | Which CLI: claude, opencode, codex, gemini, antigravity, pi, grok, deepseek, omp, shell. |
 | **Respawn**     | Restarting the CLI on idle to keep an unattended run going.                   |
 | **Ralph loop**  | An autonomous single-session task loop.                                       |
 | **Orchestrator**| A phased plan driven across multiple agents.                                  |
@@ -178,6 +187,6 @@ See [Hooks And Integrations](Hooks-And-Integrations).
 ## Read next
 
 - [The Dashboard](The-Dashboard) - what the UI is showing you.
-- [Agent CLIs](Agent-CLIs) - the seven run modes in detail.
+- [Agent CLIs](Agent-CLIs) - the ten run modes in detail.
 - [Keeping Agents Running](Keeping-Agents-Running) - respawn, idle detection, usage limits.
 - [`docs/architecture-invariants.md`](https://github.com/Ark0N/Codeman/blob/master/docs/architecture-invariants.md) - the mechanisms behind all of this, for contributors.

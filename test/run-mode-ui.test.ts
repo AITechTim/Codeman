@@ -166,8 +166,18 @@ describe('Run launch synchronization', () => {
 
     // Methods live in one Object.assign(prototype, {...}) block at a fixed
     // 2-space indent, so `\n  },` reliably closes the one we are inside.
+    //
+    // `(\w*)` in the param list, not `()`, and the leading `_?`: PR B2
+    // consolidated the eight run<Mode>() bodies into one shared
+    // `_runCliMode(mode)`, and the ORIGINAL `\(\)`-only pattern matched every
+    // one-line wrapper (`async runOpenCode() { return this._runCliMode(...) }`)
+    // but not `_runCliMode` itself, where the real terminal-ownership logic
+    // now lives — so this guard could see 8 clean one-liners and stay green
+    // while the actual bug shipped unseen for all eight external CLIs at
+    // once. Confirmed live: adding `this.terminal.clear()` to `_runCliMode`
+    // left this test 32/32 green under the old pattern.
     const bodies = new Map<string, string>();
-    const header = /^ {2}async (run[A-Za-z]*)\(\) \{$/gm;
+    const header = /^ {2}async (_?run[A-Za-z]*)\(\w*\) \{$/gm;
     for (let m = header.exec(src); m; m = header.exec(src)) {
       const start = m.index + m[0].length;
       const end = src.indexOf('\n  },', start);
@@ -181,6 +191,7 @@ describe('Run launch synchronization', () => {
       expect.arrayContaining([
         'runClaude',
         'runShell',
+        '_runCliMode',
         'runOpenCode',
         'runCodex',
         'runGemini',
@@ -365,47 +376,84 @@ describe('Codex quick start settings', () => {
   });
 
   describe('CLI availability gating (#200/#201)', () => {
-    // Drives the REAL settings-ui.js + session-ui.js against stub elements, so an
-    // added run mode that nobody wires up here is what these are meant to catch.
-    function loadUi(flags: Record<string, boolean> | undefined) {
+    const CATALOG = [
+      { id: 'claude', label: 'Claude Code', shortBadge: 'CC', kind: 'agent', enabled: true },
+      { id: 'opencode', label: 'OpenCode', shortBadge: 'OC', kind: 'agent', enabled: true },
+      { id: 'codex', label: 'Codex', shortBadge: 'CX', kind: 'agent', enabled: true },
+      { id: 'gemini', label: 'Gemini', shortBadge: 'GM', kind: 'agent', enabled: true },
+      { id: 'antigravity', label: 'Antigravity', shortBadge: 'AG', kind: 'agent', enabled: true },
+      { id: 'pi', label: 'Pi', shortBadge: 'PI', kind: 'agent', enabled: true },
+      { id: 'grok', label: 'Grok', shortBadge: 'GK', kind: 'agent', enabled: true },
+      { id: 'deepseek', label: 'DeepSeek', shortBadge: 'DS', kind: 'agent', enabled: true },
+      { id: 'omp', label: 'OMP', shortBadge: 'OM', kind: 'agent', enabled: true },
+      { id: 'custom-agent', label: 'Custom Agent', shortBadge: 'CA', kind: 'agent', enabled: true },
+      { id: 'shell', label: 'Shell', shortBadge: 'SH', kind: 'shell', enabled: true },
+    ];
+
+    function element() {
+      const el: any = {
+        style: { display: 'PRISTINE' },
+        dataset: {},
+        children: [] as any[],
+        setAttribute: () => {},
+        appendChild(child: any) {
+          this.children.push(child);
+          return child;
+        },
+        append(child: any) {
+          this.children.push(child);
+        },
+        replaceChildren(...children: any[]) {
+          this.children = children;
+        },
+      };
+      return el;
+    }
+
+    // Drives the REAL settings-ui.js + session-ui.js against stub elements, including
+    // a custom registry entry so a static stock-only list cannot pass this test.
+    function loadUi(flags: Record<string, boolean> | undefined, catalog = CATALOG) {
       const CodemanApp = function CodemanApp(this: any) {};
-      const welcomeBtns: Record<string, { style: { display: string } }> = {};
-      for (const id of [
-        'welcomeClaudeBtn',
-        'welcomeOpencodeBtn',
-        'welcomeAntigravityBtn',
-        'welcomeGeminiBtn',
-        'welcomePiBtn',
-        'welcomeGrokBtn',
-        'welcomeOmpBtn',
-        'welcomeTunnelBtn',
-      ]) {
-        welcomeBtns[id] = { style: { display: 'PRISTINE' } };
-      }
-      const modeBtns: Record<string, { style: { display: string } }> = {};
-      for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'omp', 'shell']) {
-        modeBtns[mode] = { style: { display: 'PRISTINE' } };
+      const welcomeCliActions = element();
+      const tunnelBtn = element();
+      const runModeCliOptions = element();
+      const modeBtns: Record<string, any> = {};
+      for (const cli of catalog) {
+        modeBtns[cli.id] = element();
+        modeBtns[cli.id].dataset.mode = cli.id;
       }
       const menu = {
-        querySelector: (sel: string) => {
-          const m = sel.match(/data-mode="([^"]+)"/);
-          return m ? (modeBtns[m[1]] ?? null) : null;
-        },
+        querySelector: (sel: string) =>
+          sel === '#runModeDeepSeekInstall' || sel === '#runModeDeepSeekWeb' ? null : null,
+        querySelectorAll: () => Object.values(modeBtns),
       };
       const context: any = vm.createContext({
         CodemanApp,
         MobileDetection: { getDeviceType: () => 'desktop', isTouchDevice: () => false, isHandheldDevice: () => false },
         localStorage: { getItem: () => null, setItem: () => {} },
-        document: { getElementById: (id: string) => welcomeBtns[id] ?? null, querySelector: () => null },
+        document: {
+          getElementById: (id: string) =>
+            id === 'welcomeCliActions'
+              ? welcomeCliActions
+              : id === 'welcomeTunnelBtn'
+                ? tunnelBtn
+                : id === 'runModeCliOptions'
+                  ? runModeCliOptions
+                  : null,
+          createElement: element,
+          createElementNS: element,
+          querySelector: () => null,
+        },
         console,
       });
       context.window = context;
+      context.__codemanCliCatalog = catalog;
       if (flags !== undefined) context.__codemanCliAvailable = flags;
       for (const file of ['settings-ui.js', 'session-ui.js']) {
         const src = readFileSync(resolve(import.meta.dirname, `../src/web/public/${file}`), 'utf8');
         vm.runInContext(src, context, { filename: file });
       }
-      return { app: new (CodemanApp as any)(), welcomeBtns, modeBtns, menu };
+      return { app: new (CodemanApp as any)(), welcomeCliActions, tunnelBtn, runModeCliOptions, modeBtns, menu };
     }
 
     const ALL_OFF = {
@@ -416,50 +464,28 @@ describe('Codex quick start settings', () => {
       antigravity: false,
       pi: false,
       grok: false,
+      deepseek: false,
       omp: false,
+      'custom-agent': false,
       cloudflared: false,
     };
 
-    it('hides each welcome button whose tool is missing, including the tunnel', () => {
-      const { app, welcomeBtns } = loadUi({ ...ALL_OFF, claude: true });
+    it('renders only enabled and available registry entries on the welcome screen', () => {
+      const { app, welcomeCliActions, tunnelBtn } = loadUi({ ...ALL_OFF, claude: true, 'custom-agent': true });
       app.applyWelcomeCliVisibility();
-      expect(welcomeBtns.welcomeClaudeBtn.style.display).toBe('flex');
-      expect(welcomeBtns.welcomeOpencodeBtn.style.display).toBe('none');
-      expect(welcomeBtns.welcomeAntigravityBtn.style.display).toBe('none');
-      expect(welcomeBtns.welcomeGeminiBtn.style.display).toBe('none');
+      const offered = welcomeCliActions.children.map((btn: any) => btn.dataset.mode);
+      expect(offered).toEqual(['claude', 'custom-agent', 'shell']);
       // #200 originally DELETED the tunnel button and its QR outright; it is gated
       // on cloudflared instead, so a box that has cloudflared keeps the feature.
-      expect(welcomeBtns.welcomeTunnelBtn.style.display).toBe('none');
+      expect(tunnelBtn.style.display).toBe('none');
 
       const withTunnel = loadUi({ ...ALL_OFF, cloudflared: true });
       withTunnel.app.applyWelcomeCliVisibility();
-      expect(withTunnel.welcomeBtns.welcomeTunnelBtn.style.display).toBe('flex');
+      expect(withTunnel.tunnelBtn.style.display).toBe('flex');
 
-      // Pi is gated on `pi` like the rest; the resolver additionally version-probes
-      // the binary, so a stray `pi` on PATH reports unavailable rather than broken.
       const withPi = loadUi({ ...ALL_OFF, pi: true });
       withPi.app.applyWelcomeCliVisibility();
-      expect(withPi.welcomeBtns.welcomePiBtn.style.display).toBe('flex');
-
-      // Grok is gated on `grok` like the rest; the resolver additionally
-      // version-probes the binary, so a stray `grok` on PATH reports unavailable.
-      const withGrok = loadUi({ ...ALL_OFF, grok: true });
-      withGrok.app.applyWelcomeCliVisibility();
-      expect(withGrok.welcomeBtns.welcomeGrokBtn.style.display).toBe('flex');
-      expect(withGrok.welcomeBtns.welcomeClaudeBtn.style.display).toBe('none');
-      expect(withPi.welcomeBtns.welcomeClaudeBtn.style.display).toBe('none');
-
-      // Antigravity is a first-class welcome action, gated on `agy` like the rest.
-      const withAgy = loadUi({ ...ALL_OFF, antigravity: true });
-      withAgy.app.applyWelcomeCliVisibility();
-      expect(withAgy.welcomeBtns.welcomeAntigravityBtn.style.display).toBe('flex');
-      expect(withAgy.welcomeBtns.welcomeClaudeBtn.style.display).toBe('none');
-
-      // OMP is a first-class welcome action, gated on `omp` like the rest.
-      const withOmp = loadUi({ ...ALL_OFF, omp: true });
-      withOmp.app.applyWelcomeCliVisibility();
-      expect(withOmp.welcomeBtns.welcomeOmpBtn.style.display).toBe('flex');
-      expect(withOmp.welcomeBtns.welcomeClaudeBtn.style.display).toBe('none');
+      expect(withPi.welcomeCliActions.children.map((btn: any) => btn.dataset.mode)).toEqual(['pi', 'shell']);
     });
 
     it('gates every run mode in the dropdown, antigravity included, and never shell', () => {
@@ -476,34 +502,50 @@ describe('Codex quick start settings', () => {
       expect(modeBtns.shell.style.display).toBe('PRISTINE');
     });
 
-    it('gates every mode the run-mode menu actually offers', () => {
-      // Catches a sixth run mode being added to index.html without being gated,
-      // which is exactly how antigravity slipped past #201.
-      const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
-      const menuHtml = html.slice(html.indexOf('id="runModeMenu"'));
-      const offered = [...menuHtml.slice(0, menuHtml.indexOf('</div>')).matchAll(/data-mode="([^"]+)"/g)].map(
-        (m) => m[1]
+    it('renders each enabled agent registry entry in the Run menu, including custom entries', () => {
+      const { app, runModeCliOptions } = loadUi({ ...ALL_OFF, claude: true, 'custom-agent': true });
+      app.renderRegistryRunOptions();
+      expect(runModeCliOptions.children.map((btn: any) => btn.dataset.mode)).toContain('custom-agent');
+      expect(runModeCliOptions.children.map((btn: any) => btn.dataset.mode)).not.toContain('shell');
+    });
+
+    it('labels welcome buttons "Run <label>", the strings i18n.js translates ("Run Claude Code")', () => {
+      const { app, welcomeCliActions } = loadUi({ ...ALL_OFF, claude: true });
+      app.applyWelcomeCliVisibility();
+      const texts = welcomeCliActions.children.map((btn: any) =>
+        btn.children.filter((c: unknown) => typeof c === 'string').join('')
       );
-      expect(offered).toContain('antigravity');
-      expect(offered).toContain('pi');
-      expect(offered).toContain('grok');
-      expect(offered).toContain('omp');
+      expect(texts).toEqual(['Run Claude Code', 'Run Shell']);
+    });
+
+    it('falls back to the first ENABLED agent when the chosen run mode is disabled, never a hardcoded claude', () => {
+      const catalog = CATALOG.map((cli) =>
+        cli.id === 'claude' || cli.id === 'codex' ? { ...cli, enabled: false } : cli
+      );
+      const { app } = loadUi(undefined, catalog);
+      app.runMode = 'codex';
+      expect(app.runMode).toBe('opencode');
+      app.runMode = 'claude';
+      expect(app.runMode).toBe('opencode');
+      app.runMode = 'gemini';
+      expect(app.runMode).toBe('gemini');
+    });
+
+    it('builds the run-mode menu from the registry rather than static markup', () => {
+      const html = readFileSync(resolve(import.meta.dirname, '../src/web/public/index.html'), 'utf8');
+      expect(html).toContain('id="runModeCliOptions"');
       const src = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
-      // Anchor on the DEFINITION, not the earlier call site in toggleRunModeMenu.
-      const fn = src.slice(src.indexOf('_refreshRunModeAvailability(menu) {'));
-      const gated = fn.slice(0, fn.indexOf('\n  },'));
-      for (const mode of offered.filter((m) => m !== 'shell')) {
-        expect(gated).toContain(`'${mode}'`);
-      }
+      expect(src).toContain('renderRegistryRunOptions()');
+      expect(src).not.toContain('data-mode="codex"');
     });
 
     it('shows everything when the flags were never injected', () => {
       // A cached page from a build without the injection, or a solo popup. Hiding
       // every run button on a doubt would leave a working install nothing to click.
-      const { app, welcomeBtns, modeBtns, menu } = loadUi(undefined);
+      const { app, welcomeCliActions, modeBtns, menu } = loadUi(undefined);
       app.applyWelcomeCliVisibility();
       app._refreshRunModeAvailability(menu);
-      expect(welcomeBtns.welcomeClaudeBtn.style.display).toBe('flex');
+      expect(welcomeCliActions.children.map((btn: any) => btn.dataset.mode)).toContain('claude');
       expect(modeBtns.gemini.style.display).toBe('flex');
     });
   });
@@ -511,6 +553,7 @@ describe('Codex quick start settings', () => {
   it('passes global Codex settings into quick-start config for new sessions', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'codex-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -837,6 +880,7 @@ describe('Gemini quick start', () => {
   it('drives runGemini() through the {success,data} envelope and selects the new session', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'gemini-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -891,6 +935,7 @@ describe('Antigravity quick start', () => {
   it('drives runAntigravity() through the {success,data} envelope and selects the new session', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'ag-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -947,6 +992,7 @@ describe('Pi quick start', () => {
   it('drives runPi() through the {success,data} envelope and sends no piConfig', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'pi-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1035,6 +1081,7 @@ describe('Grok quick start', () => {
   it('drives runGrok() through the {success,data} envelope and sends alwaysApprove', async () => {
     const elements: Record<string, any> = {
       quickStartCase: { value: 'grok-case' },
+      tabCount: { value: '1' },
     };
     const requests: Array<{ url: string; body?: any }> = [];
     const CodemanApp = function CodemanApp(this: any) {};
@@ -1116,5 +1163,68 @@ describe('Grok quick start', () => {
 
     expect(requests).toEqual(['/api/grok/status']);
     expect(errors[0]).toContain('https://x.ai/cli/install.sh');
+  });
+
+  // The whole point of the shared _launchQuickStartInstances() helper. Before it,
+  // every non-Claude run*() hardcoded exactly one quick-start call, so the
+  // "Instance count" stepper next to the Run button silently did nothing on all
+  // eight of them: no error, no hint, just the wrong number of sessions. The five
+  // fixture edits that came with the change stub tabCount at '1', so they pass
+  // identically with and without it; this is the one that does not.
+  it('launches tabCount sessions with sequential w<n>-<case> names and selects the first', async () => {
+    const elements: Record<string, any> = {
+      quickStartCase: { value: 'grok-case' },
+      tabCount: { value: '3' },
+    };
+    const requests: Array<{ url: string; body?: any }> = [];
+    const CodemanApp = function CodemanApp(this: any) {};
+    let created = 0;
+
+    const context = vm.createContext({
+      CodemanApp,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      document: { getElementById: (id: string) => elements[id] ?? null },
+      fetch: async (url: string, init?: { body?: string }) => {
+        const body = init?.body ? JSON.parse(init.body) : undefined;
+        requests.push({ url, body });
+        if (url === '/api/grok/status')
+          return {
+            json: async () => ({
+              success: true,
+              data: { available: true, path: '/home/user/.grok/bin', version: '1.0.5' },
+            }),
+          };
+        if (url === '/api/quick-start') {
+          const id = `sess-gk-${created++}`;
+          return {
+            json: async () => ({ success: true, data: { sessionId: id, session: { id, name: body.sessionName } } }),
+          };
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      console,
+    });
+
+    const sessionUi = readFileSync(resolve(import.meta.dirname, '../src/web/public/session-ui.js'), 'utf8');
+    vm.runInContext(sessionUi, context, { filename: 'session-ui.js' });
+
+    const app = new (CodemanApp as any)();
+    app.terminal = { clear: () => {}, writeln: () => {}, focus: () => {} };
+    app.loadAppSettingsFromStorage = () => ({});
+    app.getCaseSettings = () => ({});
+    app.buildEnvOverrides = () => ({});
+    app.sessions = new Map();
+    app._onSessionCreated = (session: any) => app.sessions.set(session.id, session);
+    app._renderSessionTabsImmediate = () => {};
+    const selected: string[] = [];
+    app.selectSession = async (id: string) => {
+      selected.push(id);
+    };
+
+    await app.runGrok();
+
+    const names = requests.filter((r) => r.url === '/api/quick-start').map((r) => r.body.sessionName);
+    expect(names).toEqual(['w1-grok-case', 'w2-grok-case', 'w3-grok-case']);
+    expect(selected).toEqual(['sess-gk-0']);
   });
 });

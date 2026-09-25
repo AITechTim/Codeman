@@ -218,6 +218,52 @@ describe('orphaned terminal input recovery', () => {
     expect(reads).toEqual([]);
   });
 
+  it('delivers the last character BEFORE the Enter that submits it (defect 4)', () => {
+    // Android soft keyboards commit the last character and send the Enter key in
+    // ONE InputConnection transaction, so the `input` event and the Enter keydown
+    // are processed before any zero-delay timer runs. Two things then went wrong
+    // with a candidate that only resolved on its timer:
+    //
+    //   1. ORDER — xterm emits '\r' synchronously from the Enter keydown, and the
+    //      local-echo composer submits `pendingText` right there. The recovered
+    //      character arrived one macrotask too late to be part of the prompt.
+    //   2. LOSS — that '\r' bumps the canonical counter, so by the time the
+    //      candidate resolved, `canonicalCount > snapshot` read as "xterm spoke
+    //      for this keystroke" and stood the recovery down. The character was
+    //      dropped outright: every message sent from the phone lost its last
+    //      character.
+    //
+    // Resolving pending candidates synchronously at the NEXT keydown fixes both:
+    // the counter still holds the value it had when that candidate was created,
+    // and the byte reaches the composer ahead of the Enter.
+    const h = harness();
+    h.keydown();
+    h.input('o');
+    expect(h.emitted).toEqual([]);
+
+    h.keydown({ key: 'Enter' });
+    expect(h.emitted).toEqual(['o']);
+
+    // xterm now emits '\r' for the Enter. The already-resolved candidate must
+    // not fire a second time when its timer is flushed.
+    h.controller.notifyCanonicalData();
+    h.flushTimers();
+    expect(h.emitted).toEqual(['o']);
+    expect(h.pendingTimers()).toBe(0);
+  });
+
+  it('still stands down at the next keydown when xterm spoke for the candidate', () => {
+    // The synchronous resolve must not become a "forward everything" path: a
+    // keystroke xterm delivered itself is still a duplicate if recovered.
+    const h = harness();
+    h.keydown();
+    h.input('x');
+    h.controller.notifyCanonicalData();
+    h.keydown({ key: 'Enter' });
+    h.flushTimers();
+    expect(h.emitted).toEqual([]);
+  });
+
   it('ignores input events that are not committed text', () => {
     const h = harness();
     for (const inputType of ['insertCompositionText', 'deleteContentBackward', 'insertLineBreak', 'insertFromPaste']) {

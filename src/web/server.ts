@@ -33,16 +33,20 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyMultipart from '@fastify/multipart';
-import { startPasteImageGc } from './paste-image-gc.js';
+import { pasteImageDirInUseByOtherSession, startPasteImageGc } from './paste-image-gc.js';
+import { CLEAN_EXIT_CLOSE_REASON, shouldCloseCleanlyExitedSession } from '../pane-exit-sweep.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, chmodSync, rmSync, statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { execSync } from 'node:child_process';
-import { hostname as getHostname } from 'node:os';
+import { hostname as getHostname, uptime as osUptime } from 'node:os';
+import { looksLikeHostReboot, newestPersistedActivity, planRebootRestore } from '../reboot-restore.js';
+import { rebootRestoreRegistry } from './reboot-restore-registry.js';
 import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
+import { readRemoteHosts, rehydrateRemoteHostFields } from '../remote-hosts.js';
+import type { RemoteWakeRegistry } from '../remote-wake.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
-import { getCli } from '../config/cli-registry/index.js';
 import { GLYPH, palette } from '../cli-style.js';
 import { getHookSecret } from '../config/hook-secret.js';
 import { EventEmitter } from 'node:events';
@@ -68,6 +72,11 @@ import {
 import { imageWatcher } from '../image-watcher.js';
 import { workflowRunWatcher, summarizeRun } from '../workflow-run-watcher.js';
 import { attachmentRegistry, buildFileThumbnailRoute, registerExternalAttachment } from '../attachment-registry.js';
+import { getCli, enabledClis, listClis } from '../config/cli-registry/registry.js';
+import { isCliEntryInstalled, probeStockCliAvailability } from '../utils/cli-installed-probes.js';
+import { readCustomModelHosts } from '../custom-model-hosts.js';
+import { applyCustomModelInjection, customModelConfigDir, removeConfigDir } from '../custom-model-injection-apply.js';
+import type { CustomModelBookkeeping } from '../types/session.js';
 import { registerGeneratedArtifactAttachment } from '../generated-artifact-attachments.js';
 import {
   buildDetectedAttachmentHistoryItem,
@@ -149,7 +158,13 @@ import { getLatestPlanUsage, setLatestCodexPlanUsage } from './plan-usage-latest
 import { telemetrySignature } from '../usage-telemetry.js';
 import { readCodexPlanUsage, resolveCodexBinaryPath } from '../utils/codex-cli-resolver.js';
 import type { ScheduledRun } from './ports/index.js';
-import { registerAuthMiddleware, registerSecurityHeaders, registerHostGuard } from './middleware/auth.js';
+import {
+  registerAuthMiddleware,
+  registerSecurityHeaders,
+  registerHostGuard,
+  isLostWebviewRootFrame,
+  sendLostWebviewFramePage,
+} from './middleware/auth.js';
 import { isMultiUserMode } from '../config/multiuser.js';
 import { bootstrapInitialAdmin, hasUsers, resolveClaudeModeForUsername } from '../user-store.js';
 import { installRouteErrorHandler } from './route-error-handler.js';
@@ -162,6 +177,7 @@ import {
   registerScheduledRoutes,
   registerHookEventRoutes,
   registerApprovalRoutes,
+  registerRebootRestoreRoutes,
   registerReadMyMindRoutes,
   registerStatusTelemetryRoutes,
   registerSystemRoutes,
@@ -180,8 +196,16 @@ import {
   registerVoiceRoutes,
   registerWebviewRoutes,
   registerTabLayoutRoutes,
+  registerCustomModelRoutes,
+  refreshAllCustomModelHosts,
+  readCustomModelEndpointsEnabled,
+  closeAllLlamaSwapLogTails,
+  detectCustomModelSwapDisplacements,
+  pruneIdleLlamaSwapLogTails,
   tryWebviewRefererFallback,
+  registerCliRegistryRoutes,
 } from './routes/index.js';
+import { isLostWebviewFrameNavigation } from './webview-proxy.js';
 import { CronService } from '../cron/cron-service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -191,9 +215,30 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // while capping growth of `sseClientsById` and blocking pathological inputs.
 const SSE_CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const CODEX_USAGE_POLL_INTERVAL_MS = 5 * 60_000;
+const CUSTOM_MODEL_REDISCOVER_INTERVAL_MS = 5 * 60_000;
+// Much shorter than the model-LIST refresh above on purpose: this catches an actual
+// eviction (a session's model no longer loaded, silently swapped out by another
+// session's use), which the user wants to know about promptly, not once every 5
+// minutes. Cheap either way — one /running GET per distinct endpoint with at least
+// one live custom-model session, not per session.
+const CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS = 20_000;
 
 function escapeHtmlText(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/**
+ * Escapes a JSON string for safe embedding as the body of an inline `<script>`
+ * tag: `<` becomes the six-character sequence `<`, which both a JSON
+ * parser and a plain JS string literal decode back to `<` (both treat
+ * `\uXXXX` identically), but which can never itself form the two literal
+ * characters `<` `/` a browser's HTML tokenizer looks for to end the tag. A
+ * value containing a literal `</script>` would otherwise close the tag early
+ * and turn the rest of the document into inert script-body text. Exported so
+ * it unit-tests without constructing a WebServer (which needs a real tmux).
+ */
+export function escapeScriptJson(json: string): string {
+  return json.replace(/</g, '\\u003c');
 }
 
 import {
@@ -254,8 +299,18 @@ export class WebServer extends EventEmitter {
   // Store session listener references for explicit cleanup (prevents memory leaks)
   private sessionListenerRefs: Map<string, SessionListenerRefs> = new Map();
   private scheduledRuns: Map<string, ScheduledRun> = new Map();
+  /** De-dupe state for the swap-displacement sweep — see detectCustomModelSwapDisplacements. */
+  private _customModelDisplacedNotified: Set<string> = new Set();
   /** Cron service (assigned in setupRoutes). */
   private cronService!: CronService;
+  /**
+   * Wake-on-LAN registry, returned by `registerSessionRoutes`. Held for its LIFETIME
+   * only — `drop()` on session cleanup, `stop()` on shutdown. Waking from here would
+   * re-wake a host on every timer tick (the invariant `remote-wake.ts` documents), so
+   * the wiring guard in `test/remote-wake.test.ts` pins that this file calls nothing
+   * but `drop`/`stop` on it.
+   */
+  private remoteWake: RemoteWakeRegistry | null = null;
   private sse: SseStreamManager;
   private store = getStore();
   private tabLayouts!: TabLayoutService;
@@ -445,6 +500,11 @@ export class WebServer extends EventEmitter {
     });
     this.mux.on('statsUpdated', (sessions) => {
       this.broadcast(SseEvent.MuxStatsUpdated, sessions);
+    });
+    // Ark0N/Codeman#446 — a pane read finished. Internal only: the field reaches
+    // the browser on `session:updated`, and no SSE event was added for it.
+    this.mux.on('paneExitsUpdated', () => {
+      this.applyPaneExits();
     });
 
     // COD-108 — remote-session auto-reconnect. The TmuxManager watcher detects a
@@ -692,6 +752,8 @@ export class WebServer extends EventEmitter {
       setupSessionListeners: this.setupSessionListeners.bind(this),
       persistSessionState: this.persistSessionState.bind(this),
       persistSessionStateNow: this._persistSessionStateNow.bind(this),
+      reapplyPersistedSessionState: this.reapplyPersistedSessionState.bind(this),
+      discardPartiallyBuiltSession: this.discardPartiallyBuiltSession.bind(this),
       getSessionStateWithRespawn: this.getSessionStateWithRespawn.bind(this),
       // EventPort
       broadcast: this.broadcast.bind(this),
@@ -840,7 +902,14 @@ export class WebServer extends EventEmitter {
 
     // Security headers + CORS
     registerSecurityHeaders(this.app, this.https, this.basePath);
-    this.app.get('/', async (_req, reply) => {
+    this.app.get('/', async (req, reply) => {
+      // A web-tab frame that reloaded on its dashboard's landing page. The proxy's
+      // runtime shim maps `/webview/<cap>/` to exactly `/`, so that reload asks for
+      // Codeman's own root as an iframe navigation, and it used to get the app
+      // shell rendered inside the web tab. Only the credential-free form is taken
+      // (nothing in Codeman frames its root; the sandboxed frame has no cookie and
+      // no Authorization); under a password the auth hook has answered it already.
+      if (isLostWebviewRootFrame(req)) return sendLostWebviewFramePage(reply);
       return reply
         .header('Cache-Control', 'no-cache')
         .type('text/html; charset=utf-8')
@@ -1012,6 +1081,11 @@ export class WebServer extends EventEmitter {
       // and the relay declines unless the Referer carries a live capability, so
       // genuinely unknown `/api` paths still get the envelope below.
       if (await tryWebviewRefererFallback(req, reply, this.basePath)) return reply;
+      // An authenticated web-tab frame (Basic auth, or trusted mode with a cookie)
+      // that navigated itself off its proxy prefix: the runtime shim masks the
+      // prefix so the page's router sees its own path, and a reload of that page
+      // lands here. The unauthenticated form is answered in the auth middleware.
+      if (!req.url.startsWith('/api') && isLostWebviewFrameNavigation(req)) return sendLostWebviewFramePage(reply);
       if (req.url.startsWith('/api')) {
         return reply.code(404).send(createErrorResponse(ApiErrorCode.NOT_FOUND, notFound));
       }
@@ -1072,11 +1146,14 @@ export class WebServer extends EventEmitter {
     registerScheduledRoutes(this.app, ctx);
     registerHookEventRoutes(this.app, ctx);
     registerApprovalRoutes(this.app, ctx);
+    registerRebootRestoreRoutes(this.app, ctx);
     registerReadMyMindRoutes(this.app, ctx);
     registerStatusTelemetryRoutes(this.app, ctx);
     registerSystemRoutes(this.app, ctx);
     registerCaseRoutes(this.app, ctx);
-    registerSessionRoutes(this.app, ctx);
+    // The registry's lifetime is the server's: it drops per-session wake state on every
+    // cleanup path and resolves in-flight wakes on shutdown.
+    this.remoteWake = registerSessionRoutes(this.app, ctx);
     registerRespawnRoutes(this.app, ctx);
     registerRalphRoutes(this.app, ctx);
     registerPlanRoutes(this.app, ctx);
@@ -1087,6 +1164,8 @@ export class WebServer extends EventEmitter {
     registerOrchestratorRoutes(this.app, ctx);
     registerWebviewRoutes(this.app, ctx, this.basePath);
     registerTabLayoutRoutes(this.app, ctx);
+    registerCustomModelRoutes(this.app);
+    registerCliRegistryRoutes(this.app);
 
     // Cron: build the service from the same context, recompute
     // due times for any persisted jobs, then expose it to its routes.
@@ -1196,6 +1275,40 @@ export class WebServer extends EventEmitter {
     });
   }
 
+  /**
+   * Recovery half of Custom Model Endpoint Profiles: the env values a selection injects
+   * are never persisted (they carry the API key), so they are computed again from the
+   * endpoint store, through the SAME apply path the route uses. Undefined when the
+   * endpoint is gone or the CLI is unregistered: the bookkeeping is still restored so
+   * the selection can be cleared, and the pane keeps running on tmux's retained env.
+   */
+  private async _rebuildCustomModelEnv(
+    session: Session,
+    saved: CustomModelBookkeeping
+  ): Promise<Record<string, string> | undefined> {
+    const entry = getCli(session.mode);
+    if (!entry) return undefined;
+    const endpoint = (await readCustomModelHosts(getDataDir())).find((h) => h.id === saved.endpointId);
+    if (!endpoint) {
+      console.warn(
+        `[WebServer] custom-model endpoint ${saved.endpointId} no longer exists; selection kept for clearing`
+      );
+      return undefined;
+    }
+    try {
+      return applyCustomModelInjection(
+        entry,
+        endpoint,
+        saved.modelId,
+        session.id,
+        endpoint.modelContextLengths?.[saved.modelId]
+      )?.envOverrides;
+    } catch (err) {
+      console.warn('[WebServer] Failed to rebuild custom-model env on recovery:', err);
+      return undefined;
+    }
+  }
+
   /** Persists full session state including respawn config to state.json */
   private _persistSessionStateNow(session: Session): void {
     // See session-manager.updateSessionState: __envOverrides is an internal disk-only
@@ -1205,10 +1318,14 @@ export class WebServer extends EventEmitter {
     // __attachmentHistory keeps the private (externalPath-bearing) history on disk,
     // separate from the sanitized public attachmentHistory in toState().
     const attachmentHistory = session.getAttachmentHistoryForPersist();
+    // __customModel keeps the selection's bookkeeping (injected env KEYS, config dir,
+    // launch model; never the values) so recovery can restore and later clear it.
+    const customModel = session.getCustomModelForPersist();
     const state = {
       ...base,
       ...(envOverrides ? { __envOverrides: envOverrides } : {}),
       ...(attachmentHistory ? { __attachmentHistory: attachmentHistory } : {}),
+      ...(customModel ? { __customModel: customModel } : {}),
     } as SessionState;
     const controller = this.respawnControllers.get(session.id);
     if (controller) {
@@ -1240,16 +1357,32 @@ export class WebServer extends EventEmitter {
   // Clean up all resources associated with a session
   // Track sessions currently being cleaned up to prevent concurrent cleanup races
   private cleaningUp: Set<string> = new Set();
+  /**
+   * The subset of {@link cleaningUp} whose tmux session is being KILLED rather
+   * than detached. The paste-image guard needs the difference: a detaching
+   * session keeps running in tmux and still uses its working directory.
+   */
+  private killingSessions: Set<string> = new Set();
 
   private async cleanupSession(sessionId: string, killMux: boolean = true, reason?: string): Promise<void> {
     // Guard against concurrent cleanup of the same session
     if (this.cleaningUp.has(sessionId)) return;
     this.cleaningUp.add(sessionId);
+    if (killMux) this.killingSessions.add(sessionId);
+    // Refuse a start or attach from here on (Ark0N/Codeman#446): a start that
+    // raced this cleanup would launch a CLI in a tmux session whose record is
+    // about to be deleted, leaving an orphan the next boot rediscovers.
+    const session = this.sessions.get(sessionId);
+    session?.markClosing(true);
 
     try {
       await this._doCleanupSession(sessionId, killMux, reason);
     } finally {
       this.cleaningUp.delete(sessionId);
+      this.killingSessions.delete(sessionId);
+      // A cleanup that failed leaves the session on the board, so it must be
+      // startable again.
+      if (this.sessions.get(sessionId) === session) session?.markClosing(false);
     }
   }
 
@@ -1279,6 +1412,10 @@ export class WebServer extends EventEmitter {
     if (session) {
       session.ralphTracker.stopWatchingFixPlan();
     }
+
+    // Custom Model Endpoint Profiles: drop this session's swap-displacement notify flag
+    // (see _checkCustomModelSwapDisplacements below) so it can't linger in that Set forever.
+    this._customModelDisplacedNotified.delete(sessionId);
 
     // Kill all subagents spawned by this session (scoped to sessionId to avoid cross-session kills)
     if (session && killMux) {
@@ -1397,8 +1534,24 @@ export class WebServer extends EventEmitter {
       attachmentRegistry.clearSession(sessionId);
       // Stop watching for images in this session's directory
       imageWatcher.unwatchSession(sessionId);
-      // Clean up pasted images directory for this session
-      if (killMux && session.workingDir) {
+      // Clean up pasted images directory for this session. The dir belongs to the
+      // working directory rather than the session, so it stays while another live
+      // session in the same case still uses it (Ark0N/Codeman#446).
+      if (
+        killMux &&
+        session.workingDir &&
+        !pasteImageDirInUseByOtherSession({
+          live: this.sessions.values(),
+          persisted: Object.entries(this.store.getSessions()).map(([id, record]) => ({
+            id,
+            workingDir: record.workingDir,
+            status: record.status,
+          })),
+          closingId: sessionId,
+          workingDir: session.workingDir,
+          killing: this.killingSessions,
+        })
+      ) {
         const pasteImageDir = join(session.workingDir, '.claude-images');
         try {
           rmSync(pasteImageDir, { recursive: true, force: true });
@@ -1411,6 +1564,9 @@ export class WebServer extends EventEmitter {
       // come back to a loader whose file we deleted.
       if (killMux) {
         void removeAgentSessionPreamble(sessionId);
+        // The per-session custom-model config dir carries the endpoint's API key (pi and
+        // omp embed it literally); it must not outlive the session it was written for.
+        removeConfigDir(customModelConfigDir(sessionId));
       }
       await session.stop(killMux);
       this.sessions.delete(sessionId);
@@ -1431,6 +1587,11 @@ export class WebServer extends EventEmitter {
     sessionWaits.notifySignal(sessionId, 'exit');
     sessionWaits.cancelAll(sessionId);
     approvalInbox.resolveForSession(sessionId, 'session_ended');
+    // Wake state goes with the session on EVERY cleanup path (delete routes, the cron
+    // and admin paths, scheduled-run teardown, error paths) — that is why it lives here
+    // rather than in the two delete routes, where it left an entry behind, including up
+    // to 4 KB of the user's buffered keystrokes.
+    this.remoteWake?.drop(sessionId);
 
     this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
   }
@@ -1496,9 +1657,17 @@ export class WebServer extends EventEmitter {
     // the /session/:id URL path; this global is a belt-and-suspenders fallback.
     // The id is gated to JSON + <-escaped so it can't break out of the inline
     // <script> (ids are UUIDs in practice, but defense-in-depth is cheap).
+    //
+    // Every `</head>` injection below passes a replacer FUNCTION, never a
+    // replacement STRING: `String.replace` interprets `$&`, `$'`, `` $` `` and
+    // `$<n>` inside a string replacement, so a payload carrying `$'` would splice
+    // the rest of the document (the whole <body>) into the inline script, past
+    // any escaping applied to the payload itself. The custom-model list below
+    // carries a user-settable `label` (clis.json), which is the site that made
+    // this real; the others follow the same rule so the class of bug stays out.
     if (soloSessionId) {
       const safeId = JSON.stringify(soloSessionId).replace(/</g, '\\u003c');
-      html = html.replace('</head>', `<script>window.__CODEMAN_SOLO__=${safeId};</script>\n</head>`);
+      html = html.replace('</head>', () => `<script>window.__CODEMAN_SOLO__=${safeId};</script>\n</head>`);
     }
     // Gesture-control overlay (Phase 5): dashboard only (not solo popups, which
     // have no tab strip). `CODEMAN_GESTURE=1` makes the feature *available* on
@@ -1522,64 +1691,108 @@ export class WebServer extends EventEmitter {
     //
     // Solo popups skip it: no settings modal, no welcome screen, no run menu.
     if (!soloSessionId) {
-      const [
-        { isClaudeAvailable },
-        { isOpenCodeAvailable },
-        { isCodexAvailable },
-        { isGeminiAvailable },
-        { isAntigravityAvailable },
-        { isPiAvailable },
-        { isGrokAvailable },
-        { isDeepSeekRunnable, isDeepSeekAvailable },
-        { isOmpAvailable },
-        { isCloudflaredAvailable },
-        { isGitAvailable },
-      ] = await Promise.all([
-        import('../utils/claude-cli-resolver.js'),
-        import('../utils/opencode-cli-resolver.js'),
-        import('../utils/codex-cli-resolver.js'),
-        import('../utils/gemini-cli-resolver.js'),
-        import('../utils/antigravity-cli-resolver.js'),
-        import('../utils/pi-cli-resolver.js'),
-        import('../utils/grok-cli-resolver.js'),
-        import('../utils/deepseek-cli-resolver.js'),
-        import('../utils/omp-cli-resolver.js'),
-        import('../utils/cloudflared-resolver.js'),
-        import('../git-clone.js'),
-      ]);
-      const available = {
-        claude: isClaudeAvailable(),
-        opencode: isOpenCodeAvailable(),
-        codex: isCodexAvailable(),
-        gemini: isGeminiAvailable(),
-        antigravity: isAntigravityAvailable(),
-        pi: isPiAvailable(),
-        grok: isGrokAvailable(),
-        // RUNNABLE, not merely installed: `dsh` is a profile launcher, and a dsh
-        // with no pane-capable profile would offer a Run button that spawns a
-        // pane which dies on arrival. The Add-Profile affordance in the run menu
-        // keys off `deepseekBinary` instead, so a user who has the binary but no
-        // profile is offered the fix rather than a greyed-out entry.
-        deepseek: isDeepSeekRunnable(),
+      const [{ isDeepSeekAvailable }, { isCloudflaredAvailable }, { isGitAvailable }, stockAvailability] =
+        await Promise.all([
+          import('../utils/deepseek-cli-resolver.js'),
+          import('../utils/cloudflared-resolver.js'),
+          import('../git-clone.js'),
+          // Shared with GET /api/clis so the Settings badge and the Run menu cannot disagree.
+          probeStockCliAvailability(),
+        ]);
+      const available: Record<string, boolean> = {
+        ...stockAvailability,
+        // `deepseek` above is RUNNABLE (binary + a pane-capable profile). The Add-Profile
+        // affordance in the run menu keys off `deepseekBinary` instead, so a user who has
+        // the binary but no profile is offered the fix rather than a greyed-out entry.
         deepseekBinary: isDeepSeekAvailable(),
-        omp: isOmpAvailable(),
         cloudflared: isCloudflaredAvailable(),
         // Not a run mode: the Add Case → Clone tab is an offer this box cannot
         // keep without git (issue #236), same reasoning as cloudflared above.
         git: isGitAvailable(),
       };
+      // A CLI disabled via the registry (docs/cli-enable-disable-plan.md's Settings UI,
+      // or a hand-edited clis.json) must read as unavailable here too — `isCliAvailable()`
+      // on the frontend is what the welcome screen, the Run-menu dropdown and the mobile
+      // overview all gate on, and none of them otherwise know the registry's `enabled`
+      // flag exists; without this, disabling a CLI in Settings toggled the row there but
+      // left every launch surface still offering it. `git`/`cloudflared` are utility
+      // binaries, not CLI registry entries, and `deepseekBinary` is a secondary
+      // installed-only flag for the "add a profile" affordance — none of the three are
+      // registry ids, so only the nine real SessionMode entries are gated.
+      const cliCatalog = listClis().map((entry) => {
+        const id = entry.id as string;
+        const installed = isCliEntryInstalled(entry, stockAvailability);
+        const enabled = entry.enabled;
+        available[id] = enabled && installed;
+        return {
+          id,
+          label: entry.label,
+          shortBadge: entry.shortBadge,
+          order: entry.order,
+          kind: entry.kind,
+          enabled,
+          available: enabled && installed,
+        };
+      });
       html = html.replace(
         '</head>',
-        `<script>window.__codemanCliAvailable=${JSON.stringify(available)};</script>\n</head>`
+        () => `<script>window.__codemanCliAvailable=${JSON.stringify(available)};</script>\n</head>`
+      );
+      // The launch surfaces consume this deliberately small projection rather than
+      // carrying a second hand-maintained list of CLI ids. It includes disabled
+      // entries so Settings can redraw immediately after a toggle, while each
+      // renderer filters on `enabled`/`available` before offering a launch action.
+      const cliCatalogJson = escapeScriptJson(JSON.stringify(cliCatalog));
+      html = html.replace('</head>', () => `<script>window.__codemanCliCatalog=${cliCatalogJson};</script>\n</head>`);
+      // Which run modes the Run-menu picker (docs/custom-model-endpoints-plan.md) may
+      // generate an entry for: read generically off the registry's `capabilities`
+      // (never an id list here) so a CLI whose customModelInjection lands later shows
+      // up in the picker with no frontend change, and one that ships `unsupported`
+      // (antigravity, and `shell`'s `kind !== 'agent'`) never does.
+      const customModelClis = enabledClis()
+        .filter((entry) => entry.kind === 'agent' && entry.capabilities.customModelInjection.kind !== 'unsupported')
+        .map((entry) => ({ id: entry.id, label: entry.label }));
+      // Unlike the boolean-only __codemanCliAvailable above, this payload carries
+      // `label`, a string a user's own clis.json can set (CliEntry.label, up to 60
+      // chars) — see escapeScriptJson's own doc comment for why that needs escaping
+      // and __codemanCliAvailable's booleans never did.
+      const customModelClisJson = escapeScriptJson(JSON.stringify(customModelClis));
+      html = html.replace(
+        '</head>',
+        () => `<script>window.__codemanCustomModelClis=${customModelClisJson};</script>\n</head>`
       );
     }
+    // How many columns each run mode indents its transcript by, so a copy can drop
+    // that much. Read off `capabilities` like the payload above and never as an id
+    // list here, so a CLI that declares a gutter later needs no frontend change.
+    // Ids and small integers only, no user-settable strings, so JSON.stringify
+    // alone is enough (same reasoning as __codemanCliAvailable's booleans).
+    //
+    // ⚠️ Outside the `if (!soloSessionId)` block above, unlike every other payload
+    // here: a detached session window (`/session/:id`) runs a terminal, so Ctrl+C
+    // copies there, and an absent map reads as "no session gets a strip". The
+    // toggle used to work in the main window and do nothing in the popup on the
+    // same device. This needs no availability probe, so it costs a solo window
+    // nothing that the run menu's own payloads would have cost it.
+    const gutterClis: Record<string, number> = {};
+    for (const entry of enabledClis()) {
+      const columns = entry.capabilities.transcriptGutter;
+      if (typeof columns === 'number') gutterClis[entry.id] = columns;
+    }
+    html = html.replace(
+      '</head>',
+      () => `<script>window.__codemanTranscriptGutter=${JSON.stringify(gutterClis)};</script>\n</head>`
+    );
     if (!soloSessionId && process.env.CODEMAN_GESTURE === '1') {
-      html = html.replace('</head>', `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
+      html = html.replace('</head>', () => `<script>window.__codemanGestureAvailable=true;</script>\n</head>`);
       if (settings.gestureControlEnabled === true) {
         const v = this.gestureBundleVersion();
         // Relative src so the injected `<base href>` resolves it under the mount
         // prefix (a root-absolute `/gesture/...` would escape a sub-path mount).
-        html = html.replace('</head>', `<script type="module" src="gesture/gesture-codeman.js${v}"></script>\n</head>`);
+        html = html.replace(
+          '</head>',
+          () => `<script type="module" src="gesture/gesture-codeman.js${v}"></script>\n</head>`
+        );
       }
     }
     return html;
@@ -1704,6 +1917,10 @@ export class WebServer extends EventEmitter {
       getStore: () => this.store,
       registerAttachment: (id: string, filePath: string, source: 'external' | 'codex-generated') =>
         this.registerAttachment(id, filePath, source),
+      updateSessionName: (id: string, name: string) => this.mux.updateSessionName(id, name),
+      // Opt-in: the first prompt lands in the tab name, mux-sessions.json, every
+      // session:updated broadcast and /api/search, so it is a choice, not a default.
+      isAutoNameEnabled: async () => (await this.readSettings()).autoNameSessions === true,
     };
   }
 
@@ -1736,10 +1953,12 @@ export class WebServer extends EventEmitter {
             sessionId,
             filePath,
             sessionWorkingDir: session.workingDir,
+            remote: session.remote,
           })
         : await registerExternalAttachment(sessionId, filePath, {
             sessionWorkingDir: session.workingDir,
             forceWorkspaceConfinement: true,
+            remote: session.remote,
           });
     const record = attachmentRegistry.get(sessionId, event.attachmentId);
     if (record) {
@@ -2297,11 +2516,20 @@ export class WebServer extends EventEmitter {
       'scheduled:',
       'team:',
       'case:',
+      'remote:',
+      'custom-model:',
     ];
     if (SESSION_PREFIXES.some((p) => event.startsWith(p))) {
-      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string } };
+      const d = (data ?? {}) as { sessionId?: string; id?: string; session?: { id?: string }; username?: string };
       const sessionId = d.sessionId ?? d.id ?? d.session?.id;
       const owner = sessionId ? this.sessions.get(sessionId)?.owner : undefined;
+      // `remote:hostWaking` / `remote:hostWakeFailed` for a create/attach wake have no
+      // session yet (nothing exists until the host is up), so the registry names the
+      // requesting user instead; the payload carries `hostId`/`label`, which non-admins
+      // are not shown elsewhere. No session and no requester: admins only (fail closed).
+      if (!sessionId && event.startsWith('remote:') && d.username) {
+        return { username: d.username, sessionScoped: true };
+      }
       return { owner, sessionScoped: true };
     }
     // #20/#38: clipboard:write writes into the receiver's OS clipboard — route it to
@@ -2326,6 +2554,96 @@ export class WebServer extends EventEmitter {
 
   private broadcastSessionStateDebounced(sessionId: string): void {
     this.sse.broadcastSessionStateDebounced(sessionId);
+  }
+
+  /**
+   * Fold the latest pane readings into the sessions they belong to
+   * (Ark0N/Codeman#446). A reading that changes a session's answer persists the
+   * record and pushes a `session:updated`, which is how the tab learns; a read
+   * that repeats what the last one said costs nothing.
+   *
+   * The answer is pulled per session from the mux rather than taken off a
+   * broadcast payload. The mux reports the RAW pane reading, which for a remote
+   * or docker session is the death of an ssh client or a `docker exec` rather
+   * than of the agent, so it must not travel to a browser at all;
+   * `Session.setPaneExit()` is where that scoping is applied.
+   *
+   * Nothing here touches `status` or `pid`. `status: 'error'` belongs to the
+   * PTY-exit breaker and makes the browser offer a restart, and a null `pid` is
+   * what makes the browser re-attach and launch a fresh CLI.
+   *
+   * Once the records are current, {@link closeCleanlyExitedSessions} closes the
+   * sessions whose agent the user ended.
+   */
+  private applyPaneExits(): void {
+    const getPaneExit = this.mux.getPaneExit?.bind(this.mux);
+    if (!getPaneExit) return;
+    for (const session of this.sessions.values()) {
+      const muxName = session.muxName;
+      // No pane, so nothing to report — and `setPaneExit()` would force UNKNOWN
+      // for such a session anyway.
+      if (!muxName) continue;
+      if (!session.setPaneExit(getPaneExit(muxName))) continue;
+      this.persistSessionState(session);
+      this.broadcastSessionStateDebounced(session.id);
+    }
+    this.closeCleanlyExitedSessions();
+  }
+
+  /**
+   * Close every session whose agent exited cleanly, through the same
+   * `cleanupSession()` the X button uses (Ark0N/Codeman#446). A pinned session
+   * is demoted to `status: 'stopped'` there rather than removed, and either way
+   * the reboot restore stops offering it back. The conversation stays
+   * resumable, since the Resume list reads the lifecycle log and the transcript
+   * files, and the pane owns neither.
+   *
+   * `shouldCloseCleanlyExitedSession()` (`pane-exit-sweep.ts`) holds the rule:
+   * an explicit status of 0, confirmed by more than one pane read, with no
+   * start or attach in flight and not within seconds of one (a startup error). A crashed agent keeps its row with the exit
+   * code on it. `session.paneExit` is already scoped to local mux-backed
+   * sessions by `setPaneExit()`, so a remote, docker or direct-PTY session is
+   * never closed here.
+   *
+   * The close runs in the background. `cleanupSession()` ignores a second call
+   * for a session it is already closing, and the `closing` check below keeps
+   * the next tick from queueing one.
+   *
+   * Each exit is attempted ONCE, keyed by session id and the exit's `at`
+   * stamp. A close that fails leaves the session on the board with its exit
+   * badge, which is where a crashed agent's row would be too, rather than
+   * retrying and logging every two seconds. A new exit in the same pane has a
+   * new `at` and gets its own attempt.
+   */
+  /** Exits the clean-exit sweep has already tried to close, as `<sessionId>:<exit.at>`. */
+  private cleanExitCloseAttempts: Set<string> = new Set();
+
+  private closeCleanlyExitedSessions(): void {
+    const readCount = this.mux.getPaneExitReadCount?.bind(this.mux);
+    if (!readCount) return;
+    // Forget attempts for sessions that are gone, so the set stays bounded.
+    for (const key of this.cleanExitCloseAttempts) {
+      if (!this.sessions.has(key.slice(0, key.lastIndexOf(':')))) this.cleanExitCloseAttempts.delete(key);
+    }
+    for (const session of [...this.sessions.values()]) {
+      const muxName = session.muxName;
+      if (!muxName) continue;
+      const close = shouldCloseCleanlyExitedSession({
+        paneExit: session.paneExit,
+        confirmingReads: readCount(muxName),
+        paneLifecycleInFlight: session.paneLifecycleInFlight,
+        closing: this.cleaningUp.has(session.id),
+        paneStartedAt: session.paneStartedAt,
+      });
+      if (!close) continue;
+      const attempt = `${session.id}:${session.paneExit?.at ?? 0}`;
+      if (this.cleanExitCloseAttempts.has(attempt)) continue;
+      this.cleanExitCloseAttempts.add(attempt);
+      console.log(`[Server] Closing session ${session.id} (${session.name}): ${CLEAN_EXIT_CLOSE_REASON}`);
+      void this.cleanupSession(session.id, true, CLEAN_EXIT_CLOSE_REASON).catch((err) => {
+        console.error(`[Server] Failed to close cleanly exited session ${session.id}:`, err);
+      });
+    }
   }
 
   // ========== Web Push ==========
@@ -2674,6 +2992,64 @@ export class WebServer extends EventEmitter {
       });
     }
 
+    // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): keeps
+    // each saved endpoint's discovered model list current with no manual
+    // "Discover" click, so a model added on the server side (or one that drops
+    // off) shows up in the Run-menu picker within one cycle. Best-effort per
+    // endpoint (refreshAllCustomModelHosts skips one that's unreachable rather
+    // than failing the sweep) and off in tests for the same reason the Codex
+    // poll above is — no real network to hit, no server instance to keep alive.
+    if (!this.testMode) {
+      this.cleanup.setInterval(
+        () => {
+          // Reads the setting fresh on every tick, same reasoning as
+          // readPlanUsageTelemetryEnabled() beside it: a live toggle takes effect
+          // on the very next cycle, not just at server boot, and turning the
+          // feature off actually stops the polling instead of only hiding the UI.
+          void readCustomModelEndpointsEnabled()
+            .then((enabled) => {
+              if (!enabled) return;
+              return refreshAllCustomModelHosts();
+            })
+            .catch((err) => {
+              console.error('[custom-model] periodic re-discovery failed:', getErrorMessage(err));
+            });
+        },
+        CUSTOM_MODEL_REDISCOVER_INTERVAL_MS,
+        { description: 'custom model endpoint re-discovery' }
+      );
+    }
+
+    // Custom Model Endpoint Profiles: the swap-conflict check on the apply/create routes
+    // only ever runs at THAT session's own launch/apply moment — it cannot catch a LATER
+    // eviction triggered by a different session's normal use, since llama-swap has no push
+    // notification of its own and only swaps in response to a real inference request
+    // (confirmed live: a session created while nothing else conflicted at that instant can
+    // still get silently displaced afterward). This periodic sweep is what catches that
+    // case after the fact and tells the displaced session's user, rather than leaving them
+    // to discover it only when their next prompt behaves unexpectedly.
+    if (!this.testMode) {
+      this.cleanup.setInterval(
+        () => {
+          detectCustomModelSwapDisplacements(this.sessions.values(), this._customModelDisplacedNotified)
+            .then((displacements) => {
+              for (const displacement of displacements) {
+                this.broadcast(SseEvent.CustomModelSwappedOut, displacement);
+              }
+            })
+            .catch((err) => {
+              console.error('[custom-model] swap-displacement check failed:', getErrorMessage(err));
+            });
+          // Same cadence, unrelated concern: close any /api/events tail (see
+          // getLatestLlamaSwapLogLine) nothing has polled in a while, so a loading banner
+          // that finished (or was abandoned) doesn't leave a connection open forever.
+          pruneIdleLlamaSwapLogTails();
+        },
+        CUSTOM_MODEL_SWAP_CHECK_INTERVAL_MS,
+        { description: 'custom model swap-displacement check' }
+      );
+    }
+
     // Start scheduled runs cleanup timer
     this.cleanup.setInterval(
       () => {
@@ -2828,6 +3204,229 @@ export class WebServer extends EventEmitter {
     return false;
   }
 
+  /**
+   * Work out what a host reboot destroyed, and leave it on offer for the board.
+   *
+   * Runs inside `restoreMuxSessions()`, in the window after `reconcileSessions()`
+   * has reported the dead sessions and before `finalizeRestoredState()` prunes
+   * their records, so `state.json` is still the full picture here. That window is
+   * the only place the plan can be built, which is why the boot pass builds it
+   * even though nothing is rebuilt until a user clicks.
+   *
+   * Nothing is created here. The plan goes to `rebootRestoreRegistry`, the board
+   * offers it as a banner, and `web/routes/reboot-restore-routes` rebuilds what
+   * the user asks for. A wrong reboot guess therefore costs a line of text the
+   * user dismisses, not N CLI processes nobody asked for.
+   *
+   * @returns how many sessions are on offer.
+   */
+  private planRebootRestoreOffer(dead: string[], livePaneCount: number): number {
+    if (dead.length === 0) return 0;
+
+    const persisted = this.store.getSessions();
+    if (
+      !looksLikeHostReboot({
+        livePaneCount,
+        deadSessionCount: dead.length,
+        uptimeSeconds: osUptime(),
+        newestPersistedActivityAt: newestPersistedActivity(persisted),
+        now: Date.now(),
+      })
+    ) {
+      return 0;
+    }
+
+    const { restore, skipped } = planRebootRestore(dead, persisted, (workingDir) => existsSync(workingDir));
+    if (skipped.length > 0) {
+      console.log(`[Server] Reboot restore is passing over ${skipped.length} dead session(s):`);
+      for (const rejection of skipped) {
+        console.log(`[Server]   ${rejection.sessionId}: ${rejection.reason}`);
+      }
+    }
+    rebootRestoreRegistry.set(restore);
+    if (restore.length > 0) {
+      console.log(`[Server] Host reboot detected; offering ${restore.length} session(s) for restore`);
+    }
+    return restore.length;
+  }
+
+  /**
+   * Re-apply the persisted state that a `Session` constructor does not take.
+   *
+   * The reboot-restore route builds a session from a record rather than
+   * attaching to a surviving pane, so everything the constructor has no
+   * parameter for starts at its default. Persisting such a session writes
+   * `toState()` wholesale, which would REPLACE the record with the reduced
+   * version — and for a pinned session that is worse than losing a setting,
+   * because `cleanupSessionsByIds()` keeps a record only while it is pinned, so
+   * dropping the pin hands the record to the next stale sweep.
+   *
+   * Split in two phases because the two halves have opposite timing needs:
+   *
+   * - `before-spawn` shapes the pane itself, so it has to land before the CLI
+   *   process starts, and before `setupSessionListeners()`, which reads the
+   *   image-watcher flag. The custom-model selection is an environment injection
+   *   and the nice priority is applied to the spawn.
+   * - `after-spawn` is the session's own accumulated history. It must NOT land
+   *   on a session whose pane failed to start: the totals would then belong to a
+   *   session that never ran, and any later cleanup would add them to the
+   *   lifetime figures a second time.
+   *
+   * Respawn and Ralph are deliberately NOT re-armed: a machine that just came up
+   * is the worst moment to turn an autonomous run loose, and the user re-arms
+   * what they want. Ralph's loop CONFIGURATION does not survive either, because
+   * `toState()` reads `ralphEnabled` and the completion phrase off a live
+   * tracker, and there is no way to hold them without arming the loop.
+   */
+  async reapplyPersistedSessionState(
+    session: Session,
+    saved: SessionState,
+    phase: 'before-spawn' | 'after-spawn',
+    options?: { rearmAutoResumeSchedule?: boolean }
+  ): Promise<void> {
+    if (phase === 'before-spawn') {
+      // The custom-model env has to be rebuilt from the endpoint store: the persist
+      // deliberately keeps the injected VALUES out of state.json, so only the
+      // bookkeeping survives a restart and the values are re-derived here.
+      const savedCustomModel = (saved as { __customModel?: CustomModelBookkeeping }).__customModel;
+      if (savedCustomModel) {
+        session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+      }
+      if (saved.niceEnabled !== undefined || saved.niceValue !== undefined) {
+        session.setNice({ enabled: saved.niceEnabled, niceValue: saved.niceValue });
+      }
+      // `setupSessionListeners()` READS this flag to decide whether to start the
+      // watcher, so setting it later would leave the session reporting the feature
+      // as on with nothing watching.
+      if (saved.imageWatcherEnabled !== undefined) session.imageWatcherEnabled = saved.imageWatcherEnabled;
+      return;
+    }
+
+    if (saved.pinned) session.restorePin(true, saved.pinnedAt);
+    if (saved.autoCompactEnabled !== undefined || saved.autoCompactThreshold !== undefined) {
+      session.setAutoCompact(saved.autoCompactEnabled ?? false, saved.autoCompactThreshold, saved.autoCompactPrompt);
+    }
+    if (saved.autoClearEnabled !== undefined || saved.autoClearThreshold !== undefined) {
+      session.setAutoClear(saved.autoClearEnabled ?? false, saved.autoClearThreshold);
+    }
+    if (saved.autoResumeEnabled) {
+      // The stamp is re-armed by default, because a Codeman restart leaves the
+      // limit footer un-reprinted and dropping it there would strand the pause.
+      // A reboot restore opts out: that stamp predates the reboot, the pane is
+      // new, and honouring it means every session the user restored types
+      // `continue` into itself about a minute later, unattended. The setting
+      // itself stays on either way, so it re-arms on the next limit message.
+      const rearm = options?.rearmAutoResumeSchedule !== false;
+      session.restoreAutoResume(true, rearm ? saved.autoResumeAt : undefined);
+    }
+    if (saved.inputTokens !== undefined || saved.outputTokens !== undefined || saved.totalCost !== undefined) {
+      session.restoreTokens(saved.inputTokens ?? 0, saved.outputTokens ?? 0, saved.totalCost ?? 0);
+      // Seed the daily-usage baseline, or the restored totals are counted again as new usage.
+      this.lastRecordedTokens.set(session.id, {
+        input: saved.inputTokens ?? 0,
+        output: saved.outputTokens ?? 0,
+      });
+    }
+    if (saved.color) session.setColor(saved.color);
+    if (saved.flickerFilterEnabled !== undefined) session.flickerFilterEnabled = saved.flickerFilterEnabled;
+  }
+
+  /**
+   * Undo a session that was registered but never got a working pane.
+   *
+   * Deliberately NOT `cleanupSession()`, which is the user-initiated delete: that
+   * path adds the session's token totals to the lifetime figures, demotes a
+   * pinned record to `stopped` (the durable marker of an intentional kill, which
+   * would make the session permanently ineligible for a reboot restore), drops
+   * the persisted Ralph state, and recursively removes `.claude-images` from the
+   * WORKING DIRECTORY, which belongs to the workspace rather than to this session
+   * and may hold another live session's pasted images.
+   *
+   * Everything else `_doCleanupSession()` does, this has to do as well. It is the
+   * inverse of `registerSessionWithLayout()` plus `setupSessionListeners()`, and
+   * every registration those two make has to come back out — above all
+   * `sessionListenerRefs`, whose presence makes `setupSessionListeners()` return
+   * early. Leaving that entry behind is worse than the leak this function exists
+   * to prevent: the retry reuses the same session id, wires no listeners at all,
+   * and the user gets a tab that never shows output.
+   *
+   * The persisted record, the lifetime totals, the stored Ralph state and the
+   * workspace's own files are left exactly as they were, so the session stays
+   * restorable on the next attempt.
+   */
+  async discardPartiallyBuiltSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+
+    // --- the inverse of setupSessionListeners(), in reverse order ---
+    // Listeners first: while they are attached, one of them can still reach a
+    // tracker this is about to stop.
+    const listeners = this.sessionListenerRefs.get(sessionId);
+    if (listeners) {
+      detachSessionListeners(session, listeners);
+      this.sessionListenerRefs.delete(sessionId);
+    }
+    // An FSWatcher on the workspace that nothing else closes.
+    imageWatcher.unwatchSession(sessionId);
+    // An fs.watch on the workspace (or on @fix_plan.md), likewise.
+    session.ralphTracker.stopWatchingFixPlan();
+    const summaryTracker = this.runSummaryTrackers.get(sessionId);
+    if (summaryTracker) {
+      // Closes the run's own record before the tracker goes, the way
+      // `_doCleanupSession()` does. Cosmetic rather than load-bearing, but a
+      // run left open reads as still going in the away digest.
+      summaryTracker.recordSessionStopped();
+      summaryTracker.stop();
+      this.runSummaryTrackers.delete(sessionId);
+    }
+    // Also mirrors `_doCleanupSession()`. The PERSISTED Ralph state is left
+    // alone on purpose (that is one of the things separating this from
+    // cleanupSession); this only clears the in-memory tracker the failed
+    // construction built, which the retry reuses the id of.
+    session.ralphTracker.fullReset();
+
+    // --- what anything else may have attached to this id in the meantime ---
+    // A rebuild can fail AFTER startInteractive() resolved, and a restored
+    // workspace still carries Codeman's hooks, so the CLI can post a hook event
+    // within milliseconds. Each of these outlives the listeners and would
+    // otherwise meet the retry, which reuses the same session id by design.
+    this.stopTranscriptWatcher(sessionId);
+    attachmentRegistry.clearSession(sessionId);
+    sessionWaits.notifySignal(sessionId, 'exit');
+    sessionWaits.cancelAll(sessionId);
+    approvalInbox.resolveForSession(sessionId, 'session_ended');
+
+    // --- the inverse of the construction itself ---
+    this.sse.cleanupSessionBatches(sessionId);
+    this.persistDeb.cancelKey(sessionId);
+    fileStreamManager.closeSessionStreams(sessionId);
+    // `lastRecordedTokens` is deliberately NOT deleted: the `after-spawn` phase
+    // seeds it as the daily-usage baseline for these restored totals, and the
+    // retry reuses the id, so dropping it would count them as new usage.
+    // The per-session custom-model config dir carries the endpoint's API key, and
+    // `before-spawn` may already have written it. Nothing else would ever remove
+    // it: the stale sweep only touches state.json. A retry rewrites it.
+    removeConfigDir(customModelConfigDir(sessionId));
+    try {
+      session.removeAllListeners();
+      await session.stop(true);
+    } catch (err) {
+      console.warn(`[Server] stopping a partially built session failed: ${getErrorMessage(err)}`);
+      // `stop()` kills the mux session in its last block, after destroying its
+      // trackers, so a throw on the way there leaves the pane running.
+      await this.mux.killSession(sessionId).catch(() => {});
+    }
+    try {
+      await this.tabLayouts.sessionsRemoved([{ id: sessionId, owner: session.owner }]);
+    } catch (err) {
+      console.warn(`[Server] releasing the tab layout slot failed: ${getErrorMessage(err)}`);
+    }
+    // Any `session:updated` the half-built session emitted before it failed left a
+    // tab on every other open board, and the client's handler is an upsert.
+    this.broadcast(SseEvent.SessionDeleted, { id: sessionId });
+  }
+
   private async restoreMuxSessions(): Promise<boolean> {
     try {
       // Reconcile mux sessions to find which ones are still alive (also discovers unknown ones)
@@ -2837,11 +3436,30 @@ export class WebServer extends EventEmitter {
         console.log(`[Server] Discovered ${discovered.length} unknown mux session(s)`);
       }
 
+      // Build the reboot-restore offer HERE: `dead` is only known after
+      // reconciliation, and the records it reads are pruned by
+      // `cleanupStaleSessions()` as soon as `finalizeRestoredState()` runs.
+      //
+      // Guarded on its own, because this runs inside the try that decides whether
+      // RECOVERY succeeded. A throw here would otherwise be caught below, report
+      // restoration as failed, and block the stale cleanup and layout
+      // reconciliation that follow — turning an optional convenience into a
+      // failure of the thing it is supposed to help. An offer nobody gets is the
+      // correct way for this to fail.
+      try {
+        this.planRebootRestoreOffer(dead, alive.length);
+      } catch (err) {
+        console.error('[Server] Building the reboot-restore offer failed; continuing recovery:', err);
+      }
+
       if (alive.length > 0 || discovered.length > 0) {
         console.log(`[Server] Found ${alive.length + discovered.length} alive mux session(s) from previous run`);
 
         // For each alive mux session, create a Session object if it doesn't exist
         const muxSessions = this.mux.getSessions();
+        // Host-level config lives in remote-hosts.json, not in the persisted session
+        // snapshot, so refresh the fields that only exist there (see the helper).
+        const remoteHostsById = new Map((await readRemoteHosts(getDataDir())).map((host) => [host.id, host]));
         for (const muxSession of muxSessions) {
           if (!this.sessions.has(muxSession.sessionId)) {
             // Restore session settings from state.json (single source of truth)
@@ -2867,6 +3485,7 @@ export class WebServer extends EventEmitter {
             // Note: a legacy CLAUDE_CODE_EFFORT_LEVEL entry is auto-migrated to `effort`
             // by the Session constructor (env var would hard-lock /effort switching).
             const savedEnvOverrides = (savedState as { __envOverrides?: Record<string, string> })?.__envOverrides;
+            const savedCustomModel = (savedState as { __customModel?: CustomModelBookkeeping })?.__customModel;
             // Prefer the private (externalPath-bearing) history; fall back to the
             // sanitized public copy for sessions persisted before that split.
             const savedAttachmentHistory =
@@ -2877,6 +3496,7 @@ export class WebServer extends EventEmitter {
               workingDir: muxSession.workingDir,
               mode: muxSession.mode,
               name: sessionName,
+              nameSource: savedState?.nameSource,
               // When the session FIRST started, not when this server booted.
               // Without it every recovered session was restamped `Date.now()` on
               // each restart, so a week-old pane read as "created 2m ago" on the
@@ -2907,6 +3527,15 @@ export class WebServer extends EventEmitter {
               // the conversation the CLI was on when the server stopped, which is
               // what a re-attach must point the viewer at instead of the launch id.
               claudeSessionChain: savedState?.claudeSessionChain,
+              // What the previous run last observed of this pane's agent. Carried
+              // over so the first persist after boot does not blank a record that
+              // says the agent exited; the attach below drops it, and the
+              // pane-exit watcher's own tick replaces it with a first-hand
+              // reading (not the stats collector — see `startPaneExitWatcher`).
+              paneExit: savedState?.paneExit,
+              // A record rebuilt from the socket has no provenance, so its
+              // apparent locality is a guess (see `MuxSession.discovered`).
+              discoveredMuxSession: muxSession.discovered,
               // The pane's last output, previous run's value. Without it every
               // restart restamped all sessions "now" (constructor + the attach
               // repaint within the same second), flattening the home screens'
@@ -2917,7 +3546,9 @@ export class WebServer extends EventEmitter {
               // respawn rebuilds a LOCAL command, breaking the pane and silently
               // erasing `remote` from state.json on the next persist. mux-sessions.json
               // round-trips MuxSession.remote; state.json carries SessionState.remote.
-              remote: muxSession.remote ?? savedState?.remote,
+              // Host-level fields are refreshed from remote-hosts.json on top, or a
+              // field added to the host config after launch would never arrive.
+              remote: rehydrateRemoteHostFields(muxSession.remote ?? savedState?.remote, remoteHostsById),
               // Docker metadata round-trips the same way (mux-sessions.json carries
               // MuxSession.docker; state.json carries SessionState.docker), so recovery
               // rebuilds the `docker exec` launch instead of a broken local command.
@@ -2929,6 +3560,16 @@ export class WebServer extends EventEmitter {
               parentSessionId: savedState?.parentSessionId,
             });
             session.syncMuxRuntime(muxSession);
+
+            // Custom-model selection survives the restart. The tmux session still carries
+            // the injected `setenv`s (that is what kept the pane on the endpoint across the
+            // restart), but `_envOverrides` is rebuilt from a persist that deliberately
+            // excludes them, so re-derive the values from the endpoint store and re-write
+            // the isolated config dir; an endpoint that has since been deleted still gets
+            // the bookkeeping restored, which is what a later clear needs to unset.
+            if (savedCustomModel) {
+              session.setCustomModel(savedCustomModel, await this._rebuildCustomModelEnv(session, savedCustomModel));
+            }
 
             // Update session name if it was a "Restored:" placeholder or doesn't match saved name
             if (savedState?.name && muxSession.name !== savedState.name) {
@@ -3095,6 +3736,15 @@ export class WebServer extends EventEmitter {
       // Always start, even with no sessions — new sessions may be created later.
       if ('startMouseModeSync' in this.mux) {
         (this.mux as { startMouseModeSync: (ms?: number) => void }).startMouseModeSync();
+      }
+
+      // Ark0N/Codeman#446 — poll every pane for an exited agent. Always start,
+      // even with no sessions, for the same reason as the two watchers around
+      // it: sessions arrive later. Deliberately NOT folded into the stats
+      // collector above, which the browser arms and disarms with the Monitor
+      // panel and which boot skips entirely when nothing was recovered.
+      if ('startPaneExitWatcher' in this.mux) {
+        (this.mux as { startPaneExitWatcher: (ms?: number) => void }).startPaneExitWatcher();
       }
 
       // COD-108 — start the remote-session auto-reconnect watcher (tmux only).
@@ -3327,6 +3977,10 @@ export class WebServer extends EventEmitter {
     // got wrong once.
     void stopDeepSeekWeb();
 
+    // Same teardown rule: the per-endpoint llama-swap log tails are otherwise closed
+    // only by the periodic idle sweep, whose interval is disposed just below.
+    closeAllLlamaSwapLogTails();
+
     // Dispose all managed timers (intervals + resettable timeouts)
     this.cleanup.dispose();
 
@@ -3338,6 +3992,10 @@ export class WebServer extends EventEmitter {
     // response), so without this a 10-minute wait holds shutdown open.
     sessionWaits.cancelEverything();
     approvalInbox.stop();
+    // Same reason as `cancelEverything` above: an in-flight wake is awaited by a request,
+    // and `app.close()` (the last line of this method) does not abort in-flight requests —
+    // so without this a restart during a wake waits out the readiness poll.
+    this.remoteWake?.stop();
 
     this.lastRecordedTokens.clear();
 
@@ -3471,6 +4129,7 @@ export class WebServer extends EventEmitter {
     }
     this.activePlanOrchestrators.clear();
     this.cleaningUp.clear();
+    this.killingSessions.clear();
 
     // Dispose push store (flush pending saves)
     this.pushStore.dispose();

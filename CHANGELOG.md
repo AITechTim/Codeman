@@ -1,5 +1,321 @@
 # aicodeman
 
+## 1.33.1
+
+### Patch Changes
+
+- **Finished sessions close themselves (#486).** A session whose agent you ended with `/exit` is now closed the same way the X button closes it, so finished sessions stop piling up on the board; the conversation stays resumable from the Resume list and the lifecycle log records "agent exited cleanly (status 0)". Only an explicit exit status 0 with no signal, confirmed by two pane reads, qualifies: a crashed or OOM-killed agent keeps its row with the exit code on the tab. The phone overview and desktop home rail now say `exited` instead of `idle`, reboot restore no longer offers to rebuild a session whose agent had exited, and closing one session no longer deletes the `.claude-images` directory that a sibling session in the same case still uses. Thanks @irisitymichaelgrundberg.
+
+  **Search in the phone Select Case sheet (#488).** The bottom sheet gains a "Search cases" field that filters by name (every word must match, any order, ignoring case), Enter picks the case when exactly one row is left, and Escape clears then closes. Also fixes a dead band under Create New Case and a list shorter than the sheet could show.
+
+  **An oversized paste no longer jams a session's input (#484).** A single input over the 64 KiB frame limit used to be refused by both transports, retried every 2 s forever, block every later input for that session and come back from localStorage on each reload. Pastes over the limit are now split into in-limit frames delivered in order (up to 1 MiB; larger ones are refused with a toast and never queued), a refused frame is dropped instead of retried, frames persisted by an older build are pruned on load, and the WebSocket answers an oversized frame with an explicit `too_large` error instead of silence.
+
+- 8841bcc: Add a search box to the Manage tab of the Add Case dialog. It filters the case list by name or path, and the reorder arrows are disabled while a filter is active so a swap cannot involve a hidden case.
+- 8841bcc: The case picker now refreshes its list from `/api/cases` when it opens and every 5 seconds while it stays open, so folders deleted or created on disk appear without a page reload. If the selected case has been removed, the picker falls back to another case without saving it as the last-used one.
+
+  Thanks @opticon454.
+
+- 77ba41f: Install `uv` and `uvx` in the Compose server image and the agent image, so MCP servers launched with `uvx` (such as the Nginx Proxy Manager MCP) can be enabled by Codex instead of failing with `uvx` not found. Both images also install `libsecret-1-0`, the native library the `keytar` dependency of the Azure DevOps MCP (`@azure-devops/mcp`) needs; without it the server crashes before answering the MCP initialize handshake.
+
+  The Compose server image now also carries `pnpm`: `dsh plugin` spawns a literal `pnpm` with no npm fallback, so the Run menu's "DeepSeek - add a terminal profile" button failed with `dsh: pnpm not found on PATH` there. Because this release changes `server.Dockerfile`, the in-app updater asks Compose deployments to rebuild the image (`Update-Codeman.sh`) rather than applying it in place.
+
+  Thanks @opticon454 (#487, #485).
+
+## 1.33.0
+
+### Minor Changes
+
+- CLI management from Settings (#476, finishing the CLI registry work from #343). `~/.codeman/clis.json` used to be hand-edit only; with the new opt-in `cliManagementEnabled` switch (synced, default OFF) App Settings → Agents & CLIs can enable or disable any CLI, install a missing stock CLI with its vetted install command, and add, edit or remove custom CLIs. Six new endpoints back it (`GET`/`POST /api/clis`, `PUT /api/clis/:id`, `POST /api/clis/:id/install`, `PUT /api/clis/custom/:id`, `DELETE /api/clis/:id`), documented in `docs/api-reference.md`. Every write is refused while the switch is off, is admin-only in multi-user mode, is serialized on one queue, and refuses to overwrite a `clis.json` that does not parse or has group/world permission bits. A custom entry is re-validated through the same schema as the stock ones and its install text is never executed. `shell` cannot be disabled. The Run menu and the welcome screen are now built from the enabled catalogue, so the welcome screen also offers Codex, Shell and any custom CLI, and the stock Claude entry is labelled "Claude Code".
+
+  Models: Opus 5.5 (`claude-opus-5-5`, 1M context capable) is offered in App Settings → Models and in task routing (#480).
+
+  Self-update: on a macOS `launchd-daemon` install, a Homebrew node upgrade could leave `update-status.json` stuck at `queued`, which made every later update fail with "An update is already in progress." The updater now falls back to `node` on PATH when the server's own node binary is gone, and an in-flight status that has not been written for 15 minutes is failed on the next read. A graceful shutdown that hangs is now force-exited after 10 s (and the launchd updater SIGKILLs a server that has not exited after 30 s), so launchd can start the new build instead of leaving the service down (#478). Both fixes protect updates that start FROM this release.
+
+  Session Manager (Cmd+K): rows keep their `mode`, `claudeSessionId` and `resumeId`, so the ⋯ menu's Resume session relaunches a Codex row as Codex on its own conversation, and the mode badge shows as it does on the home list (#477).
+
+  Maintainer fixes applied while landing #457: renaming a tab to the name it already has (the Session Options field saves on blur) is now a no-op, so it no longer pins the placeholder as the `/resume` title again; Docker sessions skip the transcript title sync, since their transcript lives in the container; and the agent skill's messaging examples no longer use a `w<N>-` name as the peer name.
+
+  Tests: the suite strips every inherited `CODEMAN_*` variable, so running it inside a Docker Compose deployment no longer writes into the deployment's real case root (#479).
+
+  ### Thanks
+  - @opticon454 for CLI management (#476), the last piece of the CLI registry, with every review item answered in one round, and for splitting the test isolation fix out into #479.
+  - @shenlvkang-collab for the `/resume` title fix (#457) and the careful diagnosis behind it.
+  - @julian3xl for the Session Manager row fix (#477), their first contribution.
+
+### Patch Changes
+
+- 69a7128: fix(sessions): stop pinning the `w1-myapp` placeholder as Claude's session title. Local Claude spawns passed the tab name as `--name`, which is also the `/resume` picker entry and the terminal title, and a pinned title stops Claude generating its own, so every conversation of a case showed up in `/resume` as the same `w1-myapp` and none got a generated title. Only a name the user chose is pinned now; placeholder and auto-named tabs let Claude title the conversation again. Renaming a Claude tab also reaches `/resume`: the new name is appended to the conversation's transcript as the `custom-title` row `/rename` writes (a tab that was spawned with `--name` keeps re-appending its own title until its next respawn, so the rename wins from then on). Orchestrators that rely on a fixed peer name should give workers a descriptive `sessionName` rather than a `w<N>-` one.
+
+## 1.32.1
+
+### Patch Changes
+
+- 13e652e: Terminal copy: copying text out of a Claude Code or Codex pane no longer puts the pane's two-column transcript gutter on the clipboard, so pasted lines arrive flush instead of indented (#469). The width comes from the CLI registry (`capabilities.transcriptGutter`, 2 for claude and codex, measured on live panes) and is only a ceiling: a selection only ever shifts as a block, so its own indentation survives. Other CLIs and shells are untouched. It works in split panes and detached session windows too, and can be turned off per device in App Settings under Selection & clipboard.
+- 13e652e: Sessions: recovering a Claude session whose tmux pane had died relaunched `claude --session-id <id>`, which Claude refuses once that id has a transcript, so the pane died again straight away and the conversation was stranded. The relaunch now resumes the conversation (`--resume <id> || --session-id <id>`), including when tmux lost the whole session (#467).
+- 00f022c: Terminal: when a burst of output overflows the render queue and a frame has to be dropped, the repaint that repairs it is now retried until it actually happens, instead of being scheduled once and silently skipped when another load was in flight (#470).
+- 13e652e: Mobile: a long press on blank terminal space on Android Chrome no longer opens the keyboard and blanks the terminal (#471, fixes #360). The long-press guards are now armed before the press is checked for selectable text, so a press on empty space is swallowed the same way a press on a word already was.
+- 13e652e: Sessions: a tab whose agent has exited (the CLI quit, but tmux kept the pane) now says so with a muted dot and an `exited (137)` badge, instead of looking like an idle session (#466, part 1 of #446). The state is published as `paneExit` on the session and survives a restart. Nothing closes such sessions yet; that is part 2.
+- 13e652e: Docker: optional GitHub CLI and Azure CLI for private repositories (#472). Both are off by default. With `CODEMAN_INSTALL_GH=1` / `CODEMAN_INSTALL_AZ=1` as build args in `docker-compose.override.yml`, the server image gets `gh` and/or `az` (with the `azure-devops` extension) wired in as git credential helpers, so after one `gh auth login` or `az login` from a shell session, Add Case → Clone Repo can clone private GitHub and Azure DevOps repositories. `CODEMAN_AGENT_IMAGE_INSTALL_GH` / `_AZ` do the same for the Docker-case agent image, and only then are the sign-ins copied into new case containers. In multi-user mode a non-admin's clone runs with the credential helpers cleared. This changes `server.Dockerfile`, so Compose deployments need a `Start-Codeman.sh` rebuild rather than an in-app update.
+- 13e652e: Run menu: the Gemini, Antigravity and OMP run buttons now show their own colours on every skin; they rendered in Claude blue on all skins except OG (#463). The CLI registry's `accent` values were also corrected to the colours the UI really paints, and a test now guards the stylesheet trap that caused it.
+- 13e652e: Terminal: five ways the browser terminal could silently stop being correct are fixed (#431, #464). The browser terminal and the PTY can no longer disagree about their width, which is what produced doubled lines and half-overwritten text ("text gets muffled sometimes"): there is now one function that sizes the terminal, and every resize is answered with the geometry the PTY really holds. A replay clear goes through the terminal's own queue, so bytes written just before it no longer fuse into the next snapshot. A renderer that stops painting after an iOS PWA is backgrounded heals itself instead of needing a reload. Every terminal capture has a deadline that also covers the response body, and a capture that runs out of time during a tab switch falls back to the bounded tail instead of leaving a blank pane. Output lost to a half-open WebSocket is repainted on the next successful open. The service worker's precache list is now generated by the build and its cache is rotated per build, so old releases' assets no longer pile up.
+- 13e652e: Docker: new `docker/Update-Codeman.sh` for the major-update path the docs used to describe by hand (#465). It rebuilds the image with `--no-cache` before taking the stack down, clears the build-artefact volumes, refuses to run when another checkout's Compose project already owns the same name, and then hands over to `Start-Codeman.sh`.
+- 13e652e: Approvals: a session that is idle only because it is waiting on its own background work (Claude Code's `1 monitor` footer chip, or a Codex background terminal) no longer raises the yellow NEEDS YOU alert or a push (#473, fixes #468). Its idle item is opened already acknowledged, and the tab, the home screens and the rail show a small `watching` badge next to the state instead. The item still exists in the Approvals Inbox, and the TUI's pending count now leaves acknowledged items out.
+- b404dac: Maintainer fixes applied while landing this batch:
+  - Terminal (#431): while another device holds the pane's width, a resize retry no longer re-fits xterm to the container and re-wraps the whole buffer every 30 s, and no longer clears scrollback for a redraw that never comes. The PTY's spawn geometry is now recorded at attach, so `ptyGeometry` never reports a size the PTY never held.
+  - Terminal (#470): the `TERMINAL DROP` crash-trail line is logged once per recovery window instead of once per dropped frame (which wiped the rest of the trail within a second), and a refresh that died at its fetch deadline is no longer retried.
+  - Sessions (#467): the resume pin also covers the branch where tmux lost the whole session, the conversation id Codeman reports follows what the relaunch actually resumed, and the test setup strips `CLAUDE_CONFIG_DIR` so the suite stays green for anyone running a separate Claude config dir.
+  - Sessions (#466): detailed sidebar and rail rows show an `exited` pill instead of `idle`, the exit is announced to screen readers, and the user manual's tab-appearance table lists the new state.
+  - Approvals (#473): a failed pane capture clears the `watching` badge rather than keeping a stale one (a failure now falls toward an alert, not toward silence), and the header bell's count leaves acknowledged items out, matching the TUI.
+  - Run menu (#463): the Gemini and Antigravity run buttons no longer render two-tone on phones, Gemini's registry accent matches its tab badge, and a test now guards the stylesheet trap for every run mode.
+  - Docker (#465): `Update-Codeman.sh` removes exactly the two build-artefact volumes it names instead of every named volume in the project, reports a failing `docker compose` instead of exiting silently, and its docs and comments were corrected. (#472): the multi-user notes say that a non-admin's seeded Docker case also receives the gh/az sign-in when those switches are on.
+
+  ### Thanks
+  - @irisitymichaelgrundberg for four PRs in this release: the `watching` badge that stops background work from raising false alerts (#473, from their own report #468), the exited-agent badge (#466) and the dead-pane resume fix (#467), both from their report #446, and the transcript-gutter strip for copied text (#469), a follow-up to their #451.
+  - @rounakdatta for the terminal resilience work (#431) and the dropped-frame recovery (#470), both from their report #464, and for answering four rounds of review in full.
+  - @opticon454 for private-repository support in the Docker images (#472), the `Update-Codeman.sh` script (#465) and the run-button colour fix (#463).
+  - @DodgyBadger for the Android long-press fix (#471), from their own report #360.
+
+## 1.32.0
+
+### Minor Changes
+
+- d47f93a: feat(custom-model): the model picker puts the ready model first
+
+  When a custom endpoint has more than one model, the Run menu's picker now promotes one row to the top instead of showing raw discovery order: the model llama-swap reports loaded and ready right now (tagged "Currently loaded", the one a launch attaches to with zero wait), else the model you last launched on that harness and endpoint (tagged "Last used", remembered per device). The endpoint's default keeps its own pill, nothing is ever auto-chosen, and a plain OpenAI-compatible server or an endpoint that does not answer within a second simply keeps the old order. The probe is bounded on the client too, so a GPU box that is off no longer holds the picker closed for five seconds.
+
+- d47f93a: feat(split-pane): view two live sessions side by side
+
+  A new Split button in the header (opt-in in App Settings, off by default, desktop only at 1180px and wider) opens a picker and shows a second live session beside the active one: its own terminal, its own WebSocket, and a divider you can drag. When either session ends the view collapses back to one pane, with Pane B promoted to the primary when it is Pane A that ended. Nothing is persisted on purpose in this first cut, so a page reload always returns to a single pane. Pane B is deliberately plainer than the primary pane (no local-echo overlay, CJK input, touch handling or keyboard accessory bar); the design and the v2 boundaries are in discussion #452.
+
+- 72d437a: Installer v2. `curl -fsSL https://getcodeman.com/install | bash` now looks at the machine first, asks at most three questions up front (how the dashboard is reached, optionally what to call the machine on your tailnet, whether to run Codeman as a background service), does the install unattended behind progress spinners with the output in `~/.codeman/install.log`, and ends on the URL with a QR code to scan. One consent covers every missing package and sudo asks for your password once. Flags pipe through `bash -s --` (`--tailscale | --lan | --local`, `--name <n> | --no-rename`, `--service | --run | --no-start`, `--yes`, `--password`, `--port`), `install.sh status` prints the URL and the QR code again, and the cloudflared question moved out of the main flow into `install.sh cloudflared`. On the Tailscale route, a `:443` that already belongs to another app gets Codeman under `https://<node>/codeman` (or on a second port) instead of a dead end, the node can be renamed opt-in (`--name`, `install.sh name`, undone by uninstall), and the HTTPS-certificates toggle is polled with the admin page opened for you. Also fixed on the way: the installer's own `npm install` no longer lets the postinstall start a stray server on port 3000 (the service crash-looped on EADDRINUSE while the done screen said "running"), the LAN address comes from the default route rather than the first interface, a hand-written LaunchDaemon on a headless Mac is left alone, a flag re-run keeps an existing dashboard password, and the done screen's start command carries the sub-path and port it was installed with.
+- d47f93a: feat(mobile): a Compose key for writing prompts on a phone
+
+  The agent keyboard bars on phones replace their Paste key with Compose: a real multiline editor with autocorrect and spellcheck, per-session drafts kept in memory only, image attach that never writes into the terminal early, and a Send that delivers the text as one paste followed by Enter, so a long prompt no longer has to be typed blind into the terminal composer. Anything you had already typed into the terminal is picked up into the editor. Shell sessions keep the direct Paste key. This is the manual first slice from #359; the auto-open setting and terminal tap routing are a separate follow-up.
+
+### Patch Changes
+
+- d47f93a: refactor(run-menu): one table-driven launcher for every external CLI
+
+  The eight near-identical per-CLI launch functions in the Run menu collapsed into one launcher driven by a table that a CI test keeps in step with the CLI registry, and a second no-id-branching guard now covers the frontend the way the backend guard covers the server. No behaviour change: the refactor was verified byte-identical across 288 launch permutations against the previous code.
+
+- e899af4: Maintainer fixes applied while landing the above. The model picker's promoted row keeps its Default pill (the promotion tag and the default marker are two pills now, and they render as pills in the picker rather than as plain text). The phone composer keeps its bottom gutter on folding devices (the generic fold rule used to erase it), a whitespace-only draft is no longer sent, and its dialog is translated on a zh-CN UI. A split that collapses mid-drag no longer leaves the page stuck in resize-cursor mode, Pane B refuses a session that has no live process, and a burst of refresh frames replays once instead of twice. The `</head>` script injections on the page render use replacer functions, so a CLI label containing `$'` can no longer splice the document into the inline script, and the frontend no-id-branching guard now catches comparisons on any variable name.
+- 6ef71ec: ### Thanks
+  - @timkjr for split-pane sessions (#453): five review rounds turned around in two days, and the pointer-capture edge case measured in a real browser rather than reasoned about.
+  - @DodgyBadger for the mobile prompt composer (#444), a first contribution that took the scope back down to one slice when asked, and that verified the delivery path against a live tmux pane and a live Claude Code composer instead of trusting the diff.
+  - @opticon454 for putting the ready model first in the picker (#459) and for collapsing the eight Run-menu launch functions into one (#458), proven byte-identical across 288 launch permutations instead of argued.
+
+## 1.31.0
+
+### Minor Changes
+
+- 035bfbc: feat(remote): wake a sleeping remote host from Codeman
+
+  A remote SSH case pointing at a machine that suspends used to fail the same way every
+  time: the session was there, the host was not, and typing into it went nowhere. A host
+  can now carry a wake target, either a MAC address for Wake-on-LAN (Codeman builds the
+  magic packet itself, so nothing reaches a shell) or a wake command of your own, and
+  Codeman uses it when you ask for the host: when you type into a sleeping session, when
+  you press the wake button on the banner, or when you start or attach a session on that
+  host. Input you type while it wakes is buffered and flushed once it is back, up to 4 KB,
+  and a chunk over that is refused outright rather than delivered as a fragment.
+
+  Waking only ever happens because you asked. No watcher, dropped-session handler or
+  boot-recovery path can reach it, since a machine woken by a reconnect watcher would come
+  back seconds after every suspend.
+
+- fbee1b2: feat(custom-model): pick a custom endpoint straight from the Run menu
+
+  #393 landed the backend for custom model endpoints and left it reachable only over the
+  HTTP API. This is the rest of it. Turn on Custom model endpoints in App Settings, save
+  an endpoint, and the Run dropdown grows a Custom Endpoints section built live off the
+  CLI registry, one entry per harness that can actually redirect plus each endpoint you
+  saved. Pick one and it launches that harness pointed at your server, asking which model
+  first when the endpoint has more than one. Endpoints re-discover themselves every five
+  minutes, and one unreachable endpoint never blocks the others. App Settings gains full
+  add, edit and delete for endpoints.
+
+  Seven of the harnesses (opencode, Codex, Gemini, Pi, Grok, DeepSeek and OMP) now launch
+  directly onto the endpoint with no restart at all, where before you watched a native
+  boot followed immediately by a second one. Claude still launches and then restarts in
+  place, which its own resume makes far less jarring.
+
+  Most of this release's work went into things that only show up against a real server,
+  and each was found that way rather than in tests: a freshly launched CLI reporting
+  itself busy for its own startup and getting refused; Claude Code assuming a large
+  context window for a model it does not recognise and silently overflowing a small one;
+  a model whose real context is below what Claude Code's own system prompt costs, which
+  no setting can fix and which now warns before launching into a certain failure; and the
+  big one, llama.cpp running exactly one model at a time, so applying a selection can
+  unload the model another session is using. That last case now asks first, tells you
+  which session it affects, and keeps a "loading model" notice on screen for the whole
+  swap window, so a prompt sent mid-swap reads as loading rather than as an answer from
+  whatever was loaded a moment ago. A background sweep also catches the reverse: your
+  session's model being evicted later by somebody else's ordinary use.
+
+  Two things worth knowing if you drive this over the HTTP API or run multi-user. The two
+  questions an apply can ask (the model's context window is too small, and loading it will
+  unload the model another session is using) are now answered by separate
+  `confirmedContext` and `confirmedSwap` fields rather than one `confirmed`. They shared a
+  flag until now, and since the context check runs first, confirming that one silently
+  agreed to evict another session's model as well. The old `confirmed` still means both.
+  And `CLAUDE_CONFIG_DIR` is now admin-only in multi-user mode: it joined claude's
+  privileged env keys, so a non-granted owner can no longer set it through `envOverrides`,
+  and an already-persisted one is dropped on reboot-restore, which returns that session to
+  the default Claude account rather than the per-client one it was pointed at. Single-user
+  installs are unaffected.
+
+  Remote SSH and Docker sessions are refused for now, since their restart reattaches a
+  durable tmux rather than relaunching the agent.
+
+### Patch Changes
+
+- c9515b1: fix(terminal): keep the output a pane capture could not contain. Opening a session, a backpressure refresh, a clear-terminal reload and a full-history re-pull all load the screen from a tmux pane capture, and anything the CLI printed between that capture and the end of the load used to be dropped, so its next partial redraw landed on a frame the terminal had never seen: missing or garbled output right after a tab switch or a refresh, plainest in a shell session. Each load now replays exactly the output that arrived after the capture, through one shared rule for all four paths, and a refresh that restores your scroll position no longer snaps back to the bottom afterwards.
+- 3edf9aa: fix(terminal): replay a pane capture at the geometry it was taken at
+
+  Opening a session could draw a frame built for a pane bigger than your terminal. A
+  taller pane wrote its overflow rows onto the last line and lost the rows underneath
+  (against a 50-row pane, a 30-row terminal rendered 28 of a 45-line command and drew
+  the survivors twice), and a wider one wrapped every row and scrolled the whole frame
+  up by one. The terminal response now reports the geometry the capture was really
+  taken at, so the browser can see the mismatch and replay once at the size that stuck.
+  A pane that cannot be sized to fit is diagnosed once per session instead of on every
+  tab switch.
+
+- 035bfbc: ### Thanks
+  - @irisitymichaelgrundberg for three terminal fixes in one release: keeping the output a pane capture could not contain (#436), replaying a capture at the geometry it was taken at (#435, five rounds and a Playwright suite that fails against the merge base), and trimming the padding out of a copied selection (#451), where the scan-instead-of-regex call avoided a 2.9s freeze nobody would have traced back to a copy.
+  - @timkjr for a first contribution that found a real silent failure: the Instance count stepper next to the Run button had only ever applied to Claude, so on the other eight run modes it launched one session and said nothing (#454).
+  - @Randalix for Wake-on-LAN on remote hosts (#439), built and live-tested against a real sleeping machine, and for reading the whole diff again between rounds rather than only the parts that were asked about.
+  - @opticon454 for turning #393's backend-only custom model endpoints into the whole feature (#430), and for validating it against a real llama-swap box rather than against the tests: the `/props` versus `/running` context discrepancy and the DeepSeek `/v1` root cause were both tracked down to the SDK source instead of guessed at.
+
+- c376534: fix(run): make the Instance count stepper work for every non-Claude mode
+
+  The Instance count stepper next to the Run button only ever applied to Claude.
+  Setting it to 3 and launching OpenCode, Codex, Gemini, Antigravity, Pi, OMP, Grok or
+  DeepSeek started exactly one session, with no error and no hint that the control had
+  done nothing. All eight now launch the count you asked for, and the opening banner
+  says how many are starting. The one exception is a launch started from the Custom
+  Endpoints section of the Run menu, which always starts a single session.
+
+- 19ffe9b: fix(input): make sure a prompt sent through the API actually leaves the composer. Claude Code 2.1.277 started ignoring Enter for the first 30 to 50 seconds after the composer paints while still accepting the typed text, so a prompt sent right after a session came up sat unsent in the pane and every waiter (send-and-wait, the agent skill, cron, the maintainer bot) burned its whole timeout on a turn that never started. The server now reads the pane after every programmatic write that carried Enter and presses Enter again, on a 2 to 60 second schedule, only while the composer verifiably still holds the text it sent; an empty composer, other text, or a pane with no composer at all ends it. The agent skill's `sendwait` gets the same loop for servers that predate this, and its preamble version moves to 1.30.1 so an already-seeded agent picks up the fresh copy.
+- f9edb33: fix(terminal): trim the padding out of a copied selection
+
+  Copying out of a pane put a wall of spaces on the clipboard. xterm hands back
+  whole screen rows and trims only the cells that were never written to, so the
+  real spaces a full-screen program paints across the unused part of a row count
+  as content: measured against Claude Code in a 282-column pane, single lines
+  arrived carrying 138 trailing spaces. Pasting that into a chat client or an
+  editor meant deleting the whitespace by hand, while Windows Terminal, iTerm2 and
+  GNOME Terminal all trim it for you. A copy now drops the trailing run from every
+  line, on all four paths (the Ctrl+C chord, right-click, the phone selection
+  button and Auto Copy), while leading indentation is left exactly as it is. An
+  Alt+drag rectangular selection is copied verbatim, because its columns lining up
+  is the point of that gesture. A selection holding nothing but padding is refused
+  rather than copied as bare line breaks.
+
+## 1.30.0
+
+### Minor Changes
+
+- da933d7: Offer to rebuild the sessions a host reboot destroyed. A reboot takes the tmux server down with it, so every pane dies and the board comes up empty. Codeman now works out what was running, and the board offers to restore it behind a click. The conversations come back; the terminal scrollback does not, and the banner says so.
+
+### Patch Changes
+
+- a1c35da: Stop a phone keyboard losing the last character of every message it sends. Android soft keyboards commit the last typed character and send the Enter key in one InputConnection transaction, so the `input` event and the Enter keydown are both processed before any zero-delay timer runs. The orphaned-input recovery from #388 only resolved its candidate on such a timer, and lost it both ways: xterm emits `\r` synchronously from the Enter keydown, so the local-echo composer submitted the prompt before the recovered character existed, and that `\r` bumped the "did xterm speak for this keystroke" counter, so the candidate then stood itself down and dropped the character outright. Pending candidates are now drained synchronously at the next keydown, from xterm's custom key handler, which runs before xterm processes that key, so the counter still holds the value it had while the candidate's own keystroke was current, and the recovered byte reaches the composer ahead of the Enter. Typing on a physical keyboard is unaffected: there, the timer has already resolved the candidate before the next key arrives.
+- 3f2928a: The installer's hint for a launcher-only CLI (DeepSeek today) now says why it is a docs link rather than a command you can run, and points at the thing that resolves it: the package installs a launcher that still needs a terminal profile, and Codeman's Run menu can add one in a click. Driven by a generated `CLI_LAUNCHER_ONLY` flag rather than an id check, so it covers any future entry of that shape. Also removes three dead lookup helpers and two never-read generated arrays from `install.sh`, skips a disabled entry's probe instead of filtering it afterwards, and corrects a comment that claimed the non-interactive default is always Claude Code (on a wget-only host its curl one-liner is filtered out first).
+- 0e1191b: Maintainer fixes applied while landing the above. A session restored after a reboot keeps the name you gave it (the rebuild dropped the field that records who named a session, so a hand-renamed session came back looking auto-named and the next prompt overwrote it), and no longer types `continue` into itself on its own: a pending auto-resume stamp from before the reboot is dropped rather than re-armed, since the pane is new and one click could otherwise arm several unattended prompts at once. Auto-resume itself stays on and re-arms on the next real usage-limit message. The restore offer is also hidden in a detached single-session window, which has no tab strip to put restored sessions in, and a conversation that goes live while an earlier session in the same batch is starting is no longer restored a second time.
+- 0e1191b: ### Thanks
+  - @irisitymichaelgrundberg for the reboot-restore banner (#442), and for the three real reboots behind it rather than a mocked one.
+  - @shenlvkang-collab for tracking down why Android keyboards lost the last character of every message (#441), including the half where the character was not late but gone.
+  - @opticon454 for going back and closing out the loose ends left as "worth knowing rather than fixing" after #380 (#429).
+
+- de864e7: Keep the terminal anchored where you are reading while an agent streams (#358). Scrolling up during a Codex response could still be dragged back to the live bottom by the next redraw: the flush captured the viewport before writing and restored it immediately after, but xterm parses asynchronously, so at that moment the buffer had not moved yet, the restore compared the anchor against itself and did nothing, and the redraw landed a tick later with nothing left to pull the view back. The restore now runs inside xterm's own write callback, which is the first point at which the redraw's effect exists, and it holds across consecutive and chunked redraws. It is dropped if you switch sessions or a history replay starts before the write parses, since the anchor indexes the buffer it was captured from.
+
+## 1.29.1
+
+### Patch Changes
+
+- 5b920cb: Auto-name sessions from the first prompt (#376, opt-in). With the new synced **Auto-name Sessions** setting on (App Settings → Appearance → Tabs, default off), a tab that still carries its generated name takes a title from the first real prompt you submit, keeping the case prefix: `w3-myapp` becomes `w3-myapp: fix the login redirect`. The strip shows the title with the prefix in the tooltip, and the next session in that case still counts up. It happens once per session, only for prompts you type or send through the input API (never a Ralph, respawn, cron or approval answer), never for shells, and a name you set yourself is never touched. Slash commands such as `/clear` do not become titles. The title is derived locally from the prompt's first sentence; no text leaves the machine. `nameSource` (`placeholder` / `auto` / `manual`) is a new additive field on session state.
+
+  Landed with the fixes the review of #376 asked for: first prompt only (not every prompt), a user-input gate so Ralph, respawn, cron and approval writes cannot name a tab, the prefix form so the case identity and `w<n>` counter survive, and a keystroke tracker that handles a bare Esc, bracketed pastes, wheel reports, Tab and history recall instead of mis-titling the tab.
+
+  ### Thanks
+  - @shenlvkang-collab for #376, the auto-naming idea and the ownership plumbing (`nameSource`, the listener wiring, the restore path) it shipped with.
+
+## 1.29.0
+
+### Minor Changes
+
+- **Custom model endpoints, HTTP API first** (#393). Any run mode that has a mechanism for it can be pointed at a custom OpenAI-compatible endpoint (a local llama.cpp, llama-swap, Ollama or vLLM, or a cloud gateway) instead of its native backend, per session. Endpoints are stored in `~/.codeman/custom-model-hosts.json` (`GET/POST/PUT/DELETE /api/model-endpoints`, admin-only in multi-user mode), their model lists are discovered from the endpoint's own `/v1/models`, and `POST /api/sessions/:id/custom-model` applies one to a session by restarting its CLI in place. The mechanism is per-CLI registry data (`capabilities.customModelInjection`): env vars for Claude, Gemini, Grok and DeepSeek, `OPENCODE_CONFIG_CONTENT` for opencode, an isolated config dir for Codex, Pi and OMP, unsupported for Antigravity. Verified live against a llama-swap server for claude, opencode, pi, grok and omp; gemini and deepseek reach the server and fail for reasons not yet understood, and codex only speaks the Responses API, so a plain chat-completions server cannot serve it. Those three are documented as gaps rather than shipped as working. The toolbar picker is a follow-up; until it lands the feature is HTTP-API only (`docs/custom-model-endpoints.md`), and the `customModelEndpointsEnabled` setting is declared but read by nothing yet. Merged with maintainer follow-ups: clearing a selection now actually clears it (the injected vars are delivered by `tmux setenv`, which `respawn-pane` inherits, so the relaunched CLI came back still pointed at the endpoint; retired keys are now `setenv -u`'d before the respawn), applying a model to a local claude session no longer kills the pane (the relaunch pins `--resume <id>` with the `--session-id` fallback, since Claude Code refuses a session id that already has a transcript), pi, omp and grok now select the generated model through a registry-declared `launchModel` (`custom/<id>`, `-m codeman-custom`) instead of writing a config the CLI then ignored, remote and Docker sessions are refused with a clear 400 until those paths are plumbed, the selection survives a Codeman restart, discovery goes through the egress-guarded `webviewFetch()`, key-bearing files are written 0600 and the per-session config dir is removed with the session, and the design plan moved from the repo root to `docs/custom-model-endpoints-plan.md`. Along the way the multi-user clamp learned about `GOOGLE_GEMINI_BASE_URL`, `GROK_BASE_URL`, `CODEX_HOME`, `PI_CONFIG_DIR` and `OPENCODE_CONFIG_CONTENT`, which were already reachable through `envOverrides` and now count as privileged keys.
+
+  **Single-page apps work as web tabs, and a frame that reloads comes back** (#402). A history-routed dashboard (React Router, Vue Router, a Vite dev server) read `/webview/<cap>/` as its `location.pathname` and rendered its own "page not found" the moment its script ran. The proxy's runtime shim now masks the prefix off the document URL before any page script runs, while every URL the page emits still goes through the rewrite layers (now including `Worker`, `SharedWorker`, `sendBeacon` and `window.open`). A navigation the page starts itself afterwards (a dev server's full reload, a root-absolute `location.href`) used to land on Codeman's root with no capability; it is now recognised by shape, answered with a static recovery page that posts the lost path to the owning tab, and the frame is remounted inside the prefix at that path, bounded to five recoveries a minute per frame. Merged with maintainer follow-ups: the recovery path is sanitised properly (a leading backslash, or a tab/newline the URL parser deletes before parsing, resolved `/\evil.com` to a foreign origin in a direct-mode tab); a reload on the dashboard's landing page is recovered too, on password-protected and passwordless installs alike (it used to render Codeman's own shell inside the web tab); and the recovery page is written down as the third unauthenticated 200 in the security table and `docs/security-architecture.md`, with the route-enumeration property it implies stated rather than left to be discovered.
+
+  **Shift arrows for Codex on the phone keyboard bar** (#408). Two keys, `⇧←` and `⇧→`, send the Shift-modified arrows Codex binds to editing the last queued message and walking the prompt stack (verified against Codex 0.154.0's `/keymap`). Merged with a maintainer follow-up: the keys are shown only on Codex sessions (a `codex-enabled` class on the bar, the same shape as the Read My Mind key), because tapping one in any other session did nothing except hand that session to plain PTY echo for the rest of the prompt.
+
+  **Remote (SSH) cases can finally show you their files** (#421, fixes #415). File previews, downloads, text reads and the out-of-workspace attachment path resolved every path against the Codeman host's own filesystem, so in a remote case every click ended in "File not found" while the file plainly existed on the other machine. A single new ssh read layer (`src/remote-files.ts`, built on the same `buildSshConnectionArgs()` the launch uses) probes realpath and stat for the file and the workspace root in one round trip, then streams the body with `cat` (or a `tail`/`head` slice for a `Range`), so the 200/206/416 contract holds and nothing is buffered on the server. Symlinks are resolved on the host that can resolve them, containment is checked against the resolved remote root, the size cap applies to the remote size before a byte is requested, an unreachable host is a 502 rather than a 404, and there is deliberately no local fallback: a same-named file on the Codeman host is never served under a remote name. Writes, Office previews and generated thumbnails answer 400 for a remote case instead of a misleading 404. Merged with maintainer follow-ups: the `readlink -f` fallback resolved only the directory chain, so on a host without it a symlink's final component was returned unresolved and `ws/notes.txt -> ~/.ssh/id_rsa` passed containment while `cat` served the key; it now follows the last component with plain `readlink` for a bounded number of hops and fails closed (404) on a loop or the cap; `PUT /api/sessions/:id/file-content` answers 400 for a remote case as the PR already claimed (it still validated against the local filesystem, so a same-named local directory took the write); ssh children are bounded by a small semaphore (`CODEMAN_MAX_REMOTE_FILE_SSH`, default 4) covering the attachment-history fan-out, which now probes the whole history in one batched call, and the fire-and-forget magic-link registrations an injected agent could use to fork hundreds of `ssh` processes; probe records are NUL-delimited and index-keyed so a newline in a filename cannot shift one path's result onto the next; and a 502 body never carries the ssh command line.
+
+  **Docker Compose: bind-mount ownership, override files, a `codeman` runtime account, and no more stale volumes** (#377). A missing bind source (first run, cleared appdata, restored backup) is created root-owned by the daemon, and the unprivileged server crash-looped on `EACCES` when Compose was run directly; the image now starts through an entrypoint that corrects a root-owned bind mount and drops to `PUID:PGID` with `setpriv`, and the compose file adds back only the capabilities that needs. `Start-Codeman.sh` honours `docker-compose.override.yml` (naming a Compose file with `-f` silently disables Compose's own discovery of it), pre-creates the cases directory like it already did for appdata, and detects when the checkout's HEAD or lockfile moved under the `codeman-node-modules`/`codeman-dist` volumes and refreshes them, which used to leave a `docker compose build` serving stale compiled routes. The default runtime account is named `codeman` (it was `opencode`), the four global agent CLIs live in their own `/opt/codeman-cli` prefix so the runtime account can update them in place without owning `/usr/local/bin`, and `CODEMAN_ALLOWED_HOSTS` is documented and forwarded. Merged with maintainer follow-ups: `cap_add` gains `KILL` (with `init: true` tini runs as root while the server runs as `PUID`, and without CAP_KILL its SIGTERM forward failed and the server was SIGKILLed on every `compose down`/`restart`); the CLI prefix is appended to `PATH` rather than prepended and the root entrypoint pins its own `PATH`, since a `PUID`-writable directory ahead of `/usr/bin` let the runtime account plant a `setpriv` that ran as root on the next start; the entrypoint decides with a real writability probe as the runtime identity instead of an owner comparison, so ACLs, group-writable trees and NFS/CIFS mounts work and only a genuinely unwritable directory is refused, by name; the cases directory is created with the runtime owner after `PUID`/`PGID` are known; the build-source marker is written only when a refresh actually happened, an empty Compose project name falls back to `down --volumes`, the build runs before the `down` so the stack is offline only for the recreate, `docker-compose.override.*` stays out of the image, and `test/docker-entrypoint.test.ts` pins `cap_add` against what the entrypoint needs. ⚠️ Compose users: run `Start-Codeman.sh` once for this release rather than a plain `docker compose up`, so the rebuilt image, the refreshed volumes and the new entrypoint arrive together.
+
+  **Selected text is visible again on the light skins** (#423, part of #360). Every skin palette named its selection layer `selection`, the key xterm renamed to `selectionBackground` in v5, so all seven skins had been painting xterm's default white at 30% instead of the colour next to it in the palette. Dark skins hid it; on the four light skins a selection was white on near-white. The key is renamed and `test/skin-themes.test.ts` pins it. CI additionally exercises `install.sh`'s dsh identity probe with `timeout` missing under bash 3.2 (#422), the guard #382's fix shipped without.
+
+  **Eight fixes salvaged from #375** (dignfei; landed with the author's commits preserved, the rest of that PR is covered below). Shift+drag starts a text selection in a pane whose mouse reports go to the CLI, and right-click copies the selection. Ctrl- and Alt-modified navigation keys typed through the CJK composer reach the CLI as the modified sequences instead of plain arrows. A browser whose reliable-input sequence counter fell behind the server's watermark (a restored tab, a cleared localStorage) now recovers: the duplicate ACK carries `dup: true` plus the watermark, the client lifts its counter and re-sends, so a session that had silently stopped accepting typed prompts accepts them again. An SSE reconnect that lands on the session you are already looking at keeps its terminal buffer and resyncs instead of resetting the whole terminal. The hidden offline overlay and the file-preview overlay only apply `backdrop-filter` while shown, which removes a stale compositing layer that swallowed clicks. One adopted Docker container can back several cases at different in-container directories, and the adopt panel gains a "copy an existing case" picker. Of the PR's 27 commits, 14 had already shipped through #357, the selection theme key rename shipped as #423, and foreign tmux adoption plus SSH password auth stay with the author.
+
+  ### Thanks
+  - **@opticon454** for custom model endpoints (#393), including the part nobody enjoys: working out each CLI's real endpoint mechanism against real binaries and writing down which ones do not work yet instead of claiming they do; and for the Docker Compose deployment fixes (#377), rebased and reworked through three review rounds.
+  - **@shenlvkang-collab** for making single-page apps route inside web tabs and recovering a frame that reloads (#402), the best-engineered PR of this batch, and for the Codex Shift arrows on the phone keyboard bar (#408), verified against Codex's own keymap.
+  - **@dignfei** for the eight fixes salvaged from #375 (terminal selection and copy, CJK navigation keys, input recovery, SSE reconnect, overlay compositing, multi-case adopted containers), landed under their own name.
+  - **@Randalix** for reporting #415 and then fixing it themselves with the whole missing ssh read side for remote cases (#421), with a real-shell test for the probe script and a full route suite.
+
+### Patch Changes
+
+- 349a89e: fix(webview): let a proxied single-page app route on its own path, and recover a frame that reloads
+
+  A dashboard served through a web tab saw `/webview/<cap>/` as its `location.pathname`, and
+  no app has a route for that: a React Router, Vue Router or Vite dev-server page painted its
+  HTML and CSS and then replaced them with its own "page not found" the moment its script ran.
+  The proxy's runtime shim now rewrites the history entry to the path the page would see on its
+  own origin before any page script runs, while every URL the page emits still goes through
+  the existing rewrite layers (plus `Worker`, `sendBeacon` and `window.open`, which the masked
+  Referer can no longer rescue). A navigation the page starts itself afterwards — a dev
+  server's full-reload HMR, a root-absolute `location.href` — lands on Codeman's root with no
+  capability; it is recognised by shape (an iframe navigation asking for HTML for a path Codeman
+  does not serve), answered with a static page that tells the owning tab which path was lost,
+  and the tab remounts the frame inside the prefix at that path. That answer is served before
+  the credential checks, so it never counts as a failed login.
+
+- 013a5d9: File previews, downloads and text reads now work in a **remote (SSH) case**.
+
+  A remote case's working directory is an absolute path on the _remote_ host, but the
+  file routes resolved it with local `fs` — so a clicked path (or the File Viewer) always
+  failed as "File not found" even though the file existed and the session was clearly
+  working in that directory. `GET /api/sessions/:id/file-raw`, `file-content`,
+  `file-preview` and `file-thumbnail` now resolve and read through the same
+  `buildSshConnectionArgs()` connection the launch uses (`src/remote-files.ts`, one
+  `realpath`+`stat` probe per request returning both the file and the workspace root).
+
+  Clicked paths that point OUTSIDE the case directory (a remote `/tmp` scratchpad capture,
+  a screenshot elsewhere in the remote home) go through the attachment routes, which had
+  the same local-`fs` assumption: registration, the by-id `raw` stream, the metadata poll
+  and the attachment history list now resolve over ssh as well, so the click-path works
+  whether the file sits inside or outside the case. Which host a record is read from
+  follows the SESSION, never the path string — the same absolute path means a different
+  file on each host, and a remote session never falls back to a local file.
+
+  The guards are unchanged in strength: the workspace boundary is still enforced (now
+  resolved on the host that can actually resolve it), the sensitive-path blocklist and
+  the size cap (`CODEMAN_MAX_DOWNLOAD_BYTES`) still apply before any bytes are read, and
+  `Range` requests keep working, so remote `<video>`/`<audio>` seeking behaves like a
+  local file. An unreachable host is reported as `502` with the remote reason instead of
+  a misleading 404. Nothing is ever copied to the Codeman host.
+
+  Still not available for remote cases, and now said explicitly instead of 404-ing:
+  editing a file (`edit=1` / `PUT` answer 400, the viewer hides its Edit affordance),
+  office-document previews and generated thumbnails (both need the bytes on the server's
+  disk), the file tree / path picker, and `tail-file`. Docker cases are unaffected (their
+  workspace is bind-mounted at the same absolute path).
+
+- b357fe8: Add Shift+Left and Shift+Right buttons to the default and extended mobile agent keyboard bars, shown only on Codex sessions, enabling Codex queued-message editing and prompt-stack navigation. Flush locally buffered drafts before navigation and keep terminal focus after taps.
+- 9acc5aa: Fix an invisible terminal text selection on the light skins (#360). Every xterm palette declared its selection colour under the key `selection`, which xterm.js renamed to `selectionBackground` in v5. An `ITheme` is a plain object, so the unknown key was dropped without an error and every skin fell back to xterm's own default of `rgba(255,255,255,0.3)`: unnoticeable on the dark skins, which wanted roughly that anyway, and effectively invisible on Paper Gray, Solarized Light, Catppuccin Latte and Rosé Pine Dawn, where white at 30% over a near-white background moves a channel by about 3/255. Selecting text on those skins now highlights it, with desktop drag-select and the mobile long-press both fixed by the same rename.
+
 ## 1.28.2
 
 ### Patch Changes

@@ -55,12 +55,22 @@ vi.mock('../../src/remote-hosts.js', async (orig) => {
 });
 
 import { registerSessionRoutes } from '../../src/web/routes/session-routes.js';
+import { RemoteWakeRegistry, REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS } from '../../src/remote-wake.js';
 import { resolveTerminalHistoryConfig } from '../../src/config/terminal-history.js';
 
 interface LocalHarness {
   app: FastifyInstance;
   ctx: MockRouteContext;
 }
+
+// Wake-on-LAN seam: the production registry opens a real TCP connection to the host
+// and can run a real wake command, so every route registered here gets a fake one
+// (the same seam `test/routes/session-remote-wake.test.ts` uses). Default: the host
+// answers, so nothing ever wakes.
+const wakeProbe = vi.fn(async () => true);
+const wakeCommandRun = vi.fn(async () => true);
+const wakeWaitUntilReady = vi.fn(async () => true);
+let wakeRegistry: RemoteWakeRegistry;
 
 /**
  * Build a Fastify instance that mirrors production's uniform-envelope behavior
@@ -146,7 +156,17 @@ describe('session-routes', () => {
   });
 
   beforeEach(async () => {
-    harness = await createEnvelopeHarness(registerSessionRoutes);
+    wakeProbe.mockReset().mockResolvedValue(true);
+    wakeCommandRun.mockReset().mockResolvedValue(true);
+    wakeWaitUntilReady.mockReset().mockResolvedValue(true);
+    wakeRegistry = new RemoteWakeRegistry({
+      probe: wakeProbe,
+      wake: wakeCommandRun,
+      waitUntilReady: wakeWaitUntilReady,
+      delay: async () => {},
+      log: () => {},
+    });
+    harness = await createEnvelopeHarness((app, ctx) => registerSessionRoutes(app, ctx, { remoteWake: wakeRegistry }));
     // Reset remote store so tests start with empty hosts/cases and a passing tmux probe
     remoteStore.hosts = [];
     remoteStore.cases = [];
@@ -832,7 +852,85 @@ describe('session-routes', () => {
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
       // No ?full=1 → visible-frame capture (no fullHistory opts).
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
+    });
+
+    // ── The geometry a capture was taken at ──
+    //
+    // A visible-frame capture repaints each row at an absolute position
+    // (`\x1b[<row>;1H`). A terminal with fewer rows than the pane clamps every
+    // address past its own height onto its last line, so the overflow rows
+    // overwrite each other and the rows they land on are lost. The client can
+    // only notice that if the response says what height the frame was built
+    // for, which is what captureRows/captureCols carry.
+
+    it('reports the geometry the capture was really taken at', async () => {
+      harness.ctx._session.terminalBuffer = '';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedGeometry?: { cols: number; rows: number } }) => {
+          // Stand in for TmuxManager, which fills this from the pane itself.
+          if (opts) opts.capturedGeometry = { cols: 100, rows: 50 };
+          return 'visible frame';
+        }
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('mux-visible');
+      expect(body.data.captureCols).toBe(100);
+      expect(body.data.captureRows).toBe(50);
+    });
+
+    it('omits the geometry when the capture reports none', async () => {
+      // The cursor query can fail, and a byte-history response never captures
+      // at all. Neither frame was positioned, so neither can be damaged by a
+      // terminal of the wrong size. Naming the session's own PTY size here
+      // would describe a geometry no frame was built for, and the client would
+      // read it as a mismatch worth replaying for.
+      harness.ctx._session.terminalBuffer = 'byte history only';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(() => null);
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('history');
+      expect(body.data.captureCols).toBeUndefined();
+      expect(body.data.captureRows).toBeUndefined();
+    });
+
+    it('omits the geometry when the capture reported a size but returned nothing', async () => {
+      // A capture can report geometry and still hand back no frame. The
+      // full-history path writes `capturedGeometry` from the cursor query, then
+      // returns '' for a pane holding nothing visible, which drops the source
+      // to `history` with the geometry already recorded. Reporting it there
+      // would name a size for a body that is the byte stream.
+      harness.ctx._session.terminalBuffer = 'byte history only';
+      (harness.ctx.mux as { captureActivePaneBuffer?: unknown }).captureActivePaneBuffer = vi.fn(
+        (_name: string, opts?: { capturedGeometry?: { cols: number; rows: number } }) => {
+          if (opts) opts.capturedGeometry = { cols: 100, rows: 50 };
+          return '';
+        }
+      );
+
+      const res = await harness.app.inject({
+        method: 'GET',
+        url: `/api/sessions/${harness.ctx._sessionId}/terminal?full=1`,
+      });
+
+      const body = JSON.parse(res.body);
+      expect(body.data.source).toBe('history');
+      expect(body.data.captureCols).toBeUndefined();
+      expect(body.data.captureRows).toBeUndefined();
     });
 
     // ── COD-47: full tmux scrollback replay on full page reload ──
@@ -1042,7 +1140,10 @@ describe('session-routes', () => {
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       // Tail/tab-switch must NOT request fullHistory (undefined opts).
-      expect(captureSpy).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(captureSpy).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
       expect(body.data.terminalBuffer).toContain('visible frame only');
       expect(body.data.terminalBuffer).not.toContain('FULL_HISTORY_SHOULD_NOT_APPEAR');
       expect(body.data.source).toBe('mux-visible');
@@ -1102,7 +1203,10 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('preserves one-time OAuth authorization URLs in Codex TUI replay history', async () => {
@@ -1176,7 +1280,10 @@ describe('session-routes', () => {
       expect(body.data.terminalBuffer.indexOf('hello world')).toBeLessThan(
         body.data.terminalBuffer.indexOf('visible tmux pane only')
       );
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('uses live mux pane capture only when the accumulated buffer is empty', async () => {
@@ -1195,7 +1302,10 @@ describe('session-routes', () => {
       const body = JSON.parse(res.body);
       expect(body.data.terminalBuffer).toContain('visible restored tmux pane');
       expect(body.data.terminalBuffer).toContain('› current prompt');
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('returns error for unknown session', async () => {
@@ -1223,7 +1333,10 @@ describe('session-routes', () => {
       expect(buf).toContain('\x1b[H\x1b[2J');
       expect(buf).toContain('LIVE-PANE-FRAME');
       expect(buf.indexOf('history-bytes')).toBeLessThan(buf.indexOf('LIVE-PANE-FRAME'));
-      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(harness.ctx._session.muxName, undefined);
+      expect(harness.ctx.mux.captureActivePaneBuffer).toHaveBeenCalledWith(
+        harness.ctx._session.muxName,
+        expect.not.objectContaining({ fullHistory: true })
+      );
     });
 
     it('falls back to the byte history when no live pane buffer is available', async () => {
@@ -1315,6 +1428,19 @@ describe('session-routes', () => {
       expect(body.success).toBe(false);
     });
 
+    // Ark0N/Codeman#446: starting a command in the pane retracts `paneExit`, and
+    // the pane-exit watcher cannot write that retraction for us — its next tick
+    // finds the field already cleared, reports no change and persists nothing.
+    // Broadcasting without persisting leaves state.json saying the agent exited.
+    it('persists the session, not just broadcasts it', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/interactive`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(harness.ctx._session);
+    });
+
     it('returns error if session is busy', async () => {
       harness.ctx._session.isBusy.mockReturnValue(true);
       const res = await harness.app.inject({
@@ -1389,6 +1515,16 @@ describe('session-routes', () => {
       expect(harness.ctx._session.startShell).toHaveBeenCalled();
       // COD-118: re-attach restores listener wiring detached by a prior PTY exit.
       expect(harness.ctx.setupSessionListeners).toHaveBeenCalledWith(harness.ctx._session);
+    });
+
+    // Same reason as /interactive above (Ark0N/Codeman#446).
+    it('persists the session, not just broadcasts it', async () => {
+      const res = await harness.app.inject({
+        method: 'POST',
+        url: `/api/sessions/${harness.ctx._sessionId}/shell`,
+      });
+      expect(res.statusCode).toBe(200);
+      expect(harness.ctx.persistSessionState).toHaveBeenCalledWith(harness.ctx._session);
     });
 
     it('returns error if session is busy', async () => {
@@ -1952,6 +2088,134 @@ describe('session-routes', () => {
 
       expect(res.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
       expect(JSON.parse(res.body)).toMatchObject({ success: false, errorCode: ApiErrorCode.OPERATION_FAILED });
+    });
+
+    describe('remote create/attach wakes a sleeping host (Wake-on-LAN)', () => {
+      const host = (extra: Record<string, unknown> = {}) => ({
+        id: 'hufflepuff',
+        label: 'Hufflepuff',
+        host: '192.168.50.137',
+        username: 'j',
+        wakeMac: '04:d9:f5:80:c6:58',
+        ...extra,
+      });
+      const remoteCase = { name: 'hufflepuff-work', type: 'remote', hostId: 'hufflepuff', remotePath: '/home/j/work' };
+      const quickStart = () =>
+        harness.app.inject({
+          method: 'POST',
+          url: '/api/quick-start',
+          payload: { caseName: 'hufflepuff-work', mode: 'shell' },
+        });
+
+      it('wakes the host before the tmux probe when the user runs a remote case', async () => {
+        const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
+        try {
+          remoteStore.hosts = [host()];
+          remoteStore.cases = [remoteCase];
+          wakeProbe.mockResolvedValue(false); // asleep
+
+          const res = await quickStart();
+
+          expect(res.statusCode).toBe(200);
+          expect(JSON.parse(res.body).success).toBe(true);
+          expect(wakeCommandRun).toHaveBeenCalledWith({ kind: 'mac', macs: [[4, 217, 245, 128, 198, 88]] });
+          // The request budget, not the 90 s session default: the reverse proxy would
+          // cut the request at 60 s while the session was still being built.
+          expect(wakeWaitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ hostId: 'hufflepuff' }), {
+            timeoutMs: REMOTE_WAKE_REQUEST_READY_TIMEOUT_MS,
+            // The shutdown signal rides along so `WebServer.stop()` can end the poll.
+            signal: expect.any(AbortSignal),
+          });
+        } finally {
+          startShell.mockRestore();
+        }
+      });
+
+      it('does not wake a host that answers, and never probes a host without a wake target', async () => {
+        const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
+        try {
+          remoteStore.hosts = [host()];
+          remoteStore.cases = [remoteCase];
+          // The fake probe answers `true` by default — a reachable host.
+          expect((await quickStart()).statusCode).toBe(200);
+          expect(wakeCommandRun).not.toHaveBeenCalled();
+
+          // No wake target at all: not even a probe, so hosts without WoL keep the
+          // exact behavior (and latency) they had before this feature.
+          wakeProbe.mockClear();
+          remoteStore.hosts = [host({ wakeMac: undefined })];
+          expect((await quickStart()).statusCode).toBe(200);
+          expect(wakeProbe).not.toHaveBeenCalled();
+          expect(wakeCommandRun).not.toHaveBeenCalled();
+        } finally {
+          startShell.mockRestore();
+        }
+      });
+
+      it('refuses the run when the host never comes back, and starts no session', async () => {
+        remoteStore.hosts = [host()];
+        remoteStore.cases = [remoteCase];
+        wakeProbe.mockResolvedValue(false);
+        wakeWaitUntilReady.mockResolvedValue(false);
+        const sessionsBefore = harness.ctx.sessions.size;
+
+        const res = await quickStart();
+
+        expect(res.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+        expect(JSON.parse(res.body).error).toMatch(/did not come back after a wake-on-LAN request/);
+        // No half-created session: the failure is the answer, not a dead tab.
+        expect(harness.ctx.sessions.size).toBe(sessionsBefore);
+      });
+
+      it('blames the sleeping host, not tmux, when the host has no wake target', async () => {
+        remoteStore.hosts = [host({ wakeMac: undefined })];
+        remoteStore.cases = [remoteCase];
+        remoteStore.tmuxCheck = {
+          ok: false,
+          error: 'remote host 192.168.50.137 needs tmux installed for durable remote sessions',
+        };
+        wakeProbe.mockResolvedValue(false);
+
+        const res = await quickStart();
+
+        expect(res.statusCode).toBe(httpStatusForErrorCode(ApiErrorCode.OPERATION_FAILED));
+        expect(JSON.parse(res.body).error).toMatch(/has no wake-on-LAN target/);
+      });
+
+      it('keeps the tmux error when the host is up but tmux is really missing', async () => {
+        remoteStore.hosts = [host()];
+        remoteStore.cases = [remoteCase];
+        remoteStore.tmuxCheck = {
+          ok: false,
+          error: 'remote host 192.168.50.137 needs tmux installed for durable remote sessions',
+        };
+        // Probe answers `true`: the ssh failure is genuinely about tmux.
+
+        const res = await quickStart();
+
+        expect(JSON.parse(res.body).error).toMatch(/needs tmux installed/);
+      });
+
+      it('wakes the host when attaching to a discovered remote session', async () => {
+        const startInteractive = vi.spyOn(Session.prototype, 'startInteractive').mockResolvedValue(undefined);
+        const startShell = vi.spyOn(Session.prototype, 'startShell').mockResolvedValue(undefined);
+        try {
+          remoteStore.hosts = [host()];
+          wakeProbe.mockResolvedValue(false);
+
+          const res = await harness.app.inject({
+            method: 'POST',
+            url: '/api/sessions',
+            payload: { attachRemoteSession: { hostId: 'hufflepuff', remoteSessionName: 'codeman-abc12345' } },
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(wakeCommandRun).toHaveBeenCalledTimes(1);
+        } finally {
+          startInteractive.mockRestore();
+          startShell.mockRestore();
+        }
+      });
     });
 
     it('does not run local codex availability check for a remote codex case', async () => {

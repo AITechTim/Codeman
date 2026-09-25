@@ -32,6 +32,10 @@ services:
       CODEMAN_DOCKER_HOST_HOME: ${CODEMAN_APPDATA_PATH}
       CODEMAN_DOCKER_DISABLE_SWAP_LIMIT: ${CODEMAN_DOCKER_DISABLE_SWAP_LIMIT}
       CODEMAN_CASES_PATH: ${CODEMAN_CASES_PATH}
+      # Extra Host-header allowlist entries for a reverse-proxied deployment
+      # (docker/README.md, "Reverse-proxy host allowlist"). Optional, so it
+      # defaults to empty rather than requiring a line in every .env.
+      CODEMAN_ALLOWED_HOSTS: ${CODEMAN_ALLOWED_HOSTS:-}
       CODEMAN_HOST: ${CODEMAN_HOST}
       CODEMAN_PASSWORD: ${CODEMAN_PASSWORD}
       CODEMAN_PORT: ${CODEMAN_PORT}
@@ -91,6 +95,23 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      # The entrypoint corrects bind-mount ownership as root before dropping to
+      # PUID:PGID. Everything not listed here remains dropped by cap_drop above.
+      # test/docker-entrypoint.test.ts pins this list against what the
+      # entrypoint and `init: true` actually need, so a capability cannot go
+      # missing silently again.
+      - CHOWN
+      - DAC_OVERRIDE
+      # `init: true` makes tini PID 1, and tini stays ROOT while the entrypoint
+      # drops the server to PUID. Signalling a process of a different uid needs
+      # CAP_KILL; without it tini's SIGTERM forward fails ("Unexpected error
+      # when forwarding signal: 'Operation not permitted'"), tini dies, and the
+      # PID namespace teardown SIGKILLs the server instead of letting
+      # `server.stop()` flush state on every `docker compose down`/`restart`.
+      - KILL
+      - SETGID
+      - SETUID
     healthcheck:
       test:
         - CMD-SHELL

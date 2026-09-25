@@ -19,9 +19,11 @@ terminal into something that can notify you.
 | `teammate_idle`        | An agent-team member goes idle.                  | Team surfaces.                                 |
 | `task_completed`       | A task finishes.                                 | Task tracking, run summary.                    |
 
-This is why several Codeman features are Claude-only. The other CLIs have no hook system, so
-for them Codeman watches terminal output, which reveals that something happened but not what
-it was.
+This is why several Codeman features are Claude-only. The one partial exception is DeepSeek
+Harness, whose terminal front door reports idle, working and blocked to Codeman over the
+harness's own supervisor contract, so it gets the hook-driven surfaces without any hook
+file. The other CLIs have no equivalent, so for them Codeman watches terminal output, which
+reveals that something happened but not what it was.
 
 ### How hooks get installed
 
@@ -67,7 +69,7 @@ sit beside the agents with no code at all. See [Web Tabs](Web-Tabs).
 ### 2. SSE events
 
 `GET /api/events` streams everything Codeman knows: session lifecycle, output, agent
-activity, approvals, cron runs. 155 named events, stable under semantic versioning.
+activity, approvals, cron runs. 158 named events, stable under semantic versioning.
 
 This is the seam for anything that reacts. A bot that pings your chat channel when an agent
 needs a human is a short script over this stream.

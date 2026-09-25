@@ -294,6 +294,64 @@ export function toSessionDocker(host: DockerHost, dockerCase: DockerCase): Sessi
 }
 
 /**
+ * Which existing case, if any, blocks adopting `container` at `containerWorkdir`.
+ *
+ * One container may back SEVERAL adopted cases, each pointing at a different
+ * directory inside it — that is the whole reason to adopt the same container
+ * twice, and it is safe because the in-container tmux session is named per
+ * SESSION (`dockerTmuxSessionName`, `codeman-dkr-<id8>`) and not per case, so a
+ * session teardown kills exactly one session and its siblings on the shared
+ * in-container tmux server are untouched. Nothing else reaches an adopted
+ * container's lifecycle either: stop/remove throw at the builder, recreate
+ * refuses `owned === false`, and the orphan reaper filters on the
+ * `codeman.managed=1` label that only Codeman-created containers carry.
+ *
+ * So the conflicts that remain are NOT about the tmux server:
+ *  - `owned-case`  the container backs a case Codeman CREATED, whose lifecycle
+ *                  it owns; a recreate or delete there would destroy the
+ *                  adopted case's container out from under it.
+ *  - `other-owner` already adopted by a different user. Adoption hands out a
+ *                  shell inside someone else's container, so it stays scoped.
+ *  - `duplicate`   same container AND same directory: the second case would
+ *                  behave identically to the first, so name the first instead
+ *                  of silently creating a twin. A DIFFERENT directory is the
+ *                  supported case and returns null.
+ */
+export type AdoptContainerConflict =
+  | { kind: 'owned-case'; caseName: string }
+  | { kind: 'other-owner'; caseName: string }
+  | { kind: 'duplicate'; caseName: string }
+  | null;
+
+export function classifyAdoptContainerConflict(params: {
+  container: string;
+  /** Directory inside the container this adoption targets (already defaulted). */
+  containerWorkdir: string;
+  existing: ReadonlyArray<
+    Pick<DockerCase, 'name' | 'container' | 'containerWorkdir' | 'hostWorkspacePath' | 'owned' | 'owner'>
+  >;
+  /** Owner visibility test (canAccessOwned bound to the caller). */
+  canAccess: (owner?: string) => boolean;
+}): AdoptContainerConflict {
+  const { container, containerWorkdir, existing, canAccess } = params;
+  const sharing = existing.filter((item) => (item.container ?? dockerContainerName(item.name)) === container);
+  if (sharing.length === 0) return null;
+
+  // `owned` is optional and an ABSENT flag means owned (legacy cases predate the
+  // field), so this must test `!== false` rather than truthiness.
+  const owned = sharing.find((item) => item.owned !== false);
+  if (owned) return { kind: 'owned-case', caseName: owned.name };
+
+  const foreign = sharing.find((item) => !canAccess(item.owner));
+  if (foreign) return { kind: 'other-owner', caseName: foreign.name };
+
+  const twin = sharing.find((item) => (item.containerWorkdir ?? item.hostWorkspacePath) === containerWorkdir);
+  if (twin) return { kind: 'duplicate', caseName: twin.name };
+
+  return null;
+}
+
+/**
  * An ADOPTED container is one the user built and runs themselves. Codeman may
  * only exec into it; it must never create, start, stop, restart or remove it.
  * Every lifecycle branch routes through this one predicate so a new call site
@@ -548,9 +606,36 @@ export function agentImageNpmPackages(): string[] {
   return packages;
 }
 
-/** The `--build-arg` pairs the agent image takes. */
-export function agentImageBuildArgPairs(): Array<[string, string]> {
-  return [['CLI_NPM_PACKAGES', agentImageNpmPackages().join(' ')]];
+/**
+ * Environment variable → agent.Dockerfile ARG for the optional git-host CLIs (gh, az).
+ * ⚠️ Mirrors `GIT_HOST_CLI_BUILD_ARGS` in `scripts/lib/cli-catalog.mjs`; the parity test pins them.
+ */
+export const GIT_HOST_CLI_BUILD_ARGS: ReadonlyArray<readonly [string, string]> = [
+  ['CODEMAN_AGENT_IMAGE_INSTALL_GH', 'CODEMAN_INSTALL_GH'],
+  ['CODEMAN_AGENT_IMAGE_INSTALL_AZ', 'CODEMAN_INSTALL_AZ'],
+];
+
+/**
+ * The `--build-arg` pairs for the optional git-host CLIs. PURE. An unset or empty variable
+ * contributes NOTHING, so the Dockerfile's own default (off) applies and the argv is the same
+ * as before these existed; anything other than 0/1 is refused rather than guessed at.
+ */
+export function gitHostCliBuildArgPairs(env: NodeJS.ProcessEnv): Array<[string, string]> {
+  const pairs: Array<[string, string]> = [];
+  for (const [envName, argName] of GIT_HOST_CLI_BUILD_ARGS) {
+    const value = env[envName];
+    if (value === undefined || value === '') continue;
+    if (value !== '0' && value !== '1') {
+      throw new Error(`${envName} must be 0 or 1, got ${JSON.stringify(value)}`);
+    }
+    pairs.push([argName, value]);
+  }
+  return pairs;
+}
+
+/** The `--build-arg` pairs the agent image takes. PURE given `env`. */
+export function agentImageBuildArgPairs(env: NodeJS.ProcessEnv = process.env): Array<[string, string]> {
+  return [['CLI_NPM_PACKAGES', agentImageNpmPackages().join(' ')], ...gitHostCliBuildArgPairs(env)];
 }
 
 // ========== Credential mount resolution (IO) ==========
@@ -727,6 +812,14 @@ interface CredStorePolicy {
   seedFiles?: string[];
   /** Seed the WHOLE dir (RO mount → cp -a) — for stores with no shared/host-read state. */
   seedWhole?: boolean;
+  /**
+   * Seed this store ONLY when this environment variable is exactly `1`, read when
+   * the container is created. For credentials that belong to an opt-in tool rather
+   * than to an agent CLI every case already trusts: they are not inert just because
+   * the image lacks the tool (a gh `hosts.yml` token or an Azure refresh token is
+   * usable by anything in the container, and the agent in it is prompt-injectable).
+   */
+  enabledByEnv?: string;
 }
 
 const CRED_STORES: CredStorePolicy[] = [
@@ -771,6 +864,31 @@ const CRED_STORES: CredStorePolicy[] = [
   },
   { rel: '.config/gcloud', seedWhole: true },
   { rel: '.config/opencode', seedWhole: true },
+  // GitHub CLI: `hosts.yml` holds the token wherever no system keyring exists (the
+  // Docker server image, a headless Linux host), `config.yml` the preferences. An
+  // agent image built with CODEMAN_INSTALL_GH=1 routes github.com git credentials
+  // through `gh`, so this seed is what lets an agent clone/push a private repo. A
+  // token that lives in a desktop keyring is not in `hosts.yml` and does not carry
+  // in; sign `gh` in inside the container. OPT-IN: seeded only when the same switch
+  // that builds gh into the agent image is on, never merely because the file exists.
+  { rel: '.config/gh', seedFiles: ['hosts.yml', 'config.yml'], enabledByEnv: 'CODEMAN_AGENT_IMAGE_INSTALL_GH' },
+  // Azure CLI: only the sign-in state. `~/.azure` also accumulates `logs/`,
+  // `commands/`, telemetry and (on a bare host) `cliextensions/`, none of which is
+  // needed to authenticate; the agent image carries its own extensions outside HOME.
+  // `msal_token_cache.json` is plaintext only on Linux (Windows/macOS encrypt it), so
+  // this carries a sign-in from the Docker server image or a Linux host.
+  // OPT-IN like gh: the MSAL cache holds refresh tokens for the whole Azure account.
+  {
+    rel: '.azure',
+    enabledByEnv: 'CODEMAN_AGENT_IMAGE_INSTALL_AZ',
+    seedFiles: [
+      'azureProfile.json',
+      'msal_token_cache.json',
+      'service_principal_entries.json',
+      'clouds.config',
+      'config',
+    ],
+  },
   // OMP keeps its config in `~/.omp/agent` (config.yml/mcp.json/models.yml/
   // settings.yml — small, no bigger than grok's config.toml/pager.toml), but
   // that dir ALSO holds agent.db/history.db/models.db (SQLite caches) and
@@ -795,10 +913,14 @@ const CRED_STORES: CredStorePolicy[] = [
  * session state back into the host). Every path is existsSync-gated (on most hosts
  * only a subset exists). Pure-ish IO (no writes; just existence checks + mount specs).
  */
-export function resolveDockerCredentialArtifacts(home: string = homedir()): DockerClaudeArtifacts {
+export function resolveDockerCredentialArtifacts(
+  home: string = homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): DockerClaudeArtifacts {
   const mounts: DockerMount[] = [];
   const seedCopies: DockerSeedCopy[] = [];
   for (const store of CRED_STORES) {
+    if (store.enabledByEnv && env[store.enabledByEnv] !== '1') continue;
     const hostBase = join(home, store.rel);
     if (!existsSync(hostBase)) continue;
     const containerBase = `${CONTAINER_HOME}/${store.rel}`;
@@ -1078,10 +1200,17 @@ function buildAgentImage(
       error: `docker/agent.Dockerfile not found in this install; clone the repo or build ${image} manually`,
     });
   }
+  let buildArgPairs: Array<[string, string]>;
+  try {
+    buildArgPairs = agentImageBuildArgPairs();
+  } catch (err) {
+    // A malformed CODEMAN_AGENT_IMAGE_INSTALL_* value: report it like any other build failure.
+    return Promise.resolve({ ok: false, built: false, alreadyPresent: false, error: String((err as Error).message) });
+  }
   const argv = dockerEngineArgv(docker);
   const args = [
     ...argv.slice(1),
-    ...agentImageBuildArgs(resolved.dockerfile, image, resolved.contextDir, opts.noCache, agentImageBuildArgPairs()),
+    ...agentImageBuildArgs(resolved.dockerfile, image, resolved.contextDir, opts.noCache, buildArgPairs),
   ];
   return new Promise<EnsureImageResult>((resolve) => {
     // async spawn (NEVER spawnSync) so a multi-minute build never wedges the event loop.

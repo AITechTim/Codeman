@@ -11,6 +11,135 @@
  * @loadorder 12 of 15 — loaded after panels-ui.js, before ralph-wizard.js
  */
 
+/**
+ * PR B2: the single source for every non-Claude, non-Shell run mode's launch
+ * shape, consumed by `_runCliMode()` below. Before this table existed, each of
+ * `runOpenCode`/`runCodex`/`runGemini`/`runAntigravity`/`runPi`/`runOmp`/
+ * `runGrok`/`runDeepSeek` was a ~45-line copy of the same probe/launch/select
+ * skeleton with only the CLI-specific pieces below actually differing — eight
+ * near-identical bodies guaranteed to drift, exactly what the CLI registry's
+ * own no-id-branching rule exists to prevent server-side.
+ *
+ * Deliberately a LOCAL table rather than a server-injected catalogue: several
+ * unit tests exercise these run*() methods inside a bare `vm.createContext()`
+ * sandbox with no `window` global at all (see test/run-mode-ui.test.ts) —
+ * referencing `window` there unguarded would throw, not degrade. `buildConfig`
+ * returns the CLI's top-level legacy config field for a LOCAL launch, or
+ * `null` for a CLI that sends none (pi: no bypass flag exists, so there is
+ * nothing to send — see runPi's own history below for why that must stay
+ * true).
+ */
+const RUN_MODE_LAUNCH = {
+  opencode: {
+    label: 'OpenCode',
+    installHint: 'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash',
+    supportsCustomModel: true,
+    buildConfig: () => ({ openCodeConfig: { autoAllowTools: true } }),
+  },
+  codex: {
+    label: 'Codex',
+    installHint: 'Codex CLI not found. Install with: npm install -g @openai/codex',
+    supportsCustomModel: true,
+    buildConfig: (globalSettings) => ({
+      codexConfig: {
+        dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
+        animations: globalSettings.codexAnimationsEnabled ?? false,
+        renderMode: 'hybrid',
+      },
+    }),
+  },
+  gemini: {
+    label: 'Gemini',
+    installHint: 'Gemini CLI not found. Install with: npm install -g @google/gemini-cli',
+    supportsCustomModel: true,
+    buildConfig: () => ({ geminiConfig: { approvalMode: 'yolo' } }),
+  },
+  antigravity: {
+    label: 'Antigravity',
+    installHint: 'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash',
+    // antigravity has no customModelInjection recipe (docs/custom-model-endpoints-plan.md
+    // calls it `unsupported`) — never fold a pending pick into its launch body.
+    supportsCustomModel: false,
+    buildConfig: () => ({ antigravityConfig: { dangerouslySkipPermissions: true } }),
+  },
+  pi: {
+    label: 'Pi',
+    installHint: 'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent',
+    supportsCustomModel: true,
+    // Deliberately NO piConfig: pi has no permission prompts, so there is no
+    // bypass to opt into, and project trust is pi's own `defaultProjectTrust`
+    // decision (an interactive prompt the user answers in the terminal).
+    // Sending `approveProjectTrust: true` here would silently opt every
+    // browser-launched pi session into executing repo-supplied TypeScript.
+    buildConfig: () => null,
+  },
+  omp: {
+    label: 'OMP',
+    installHint: 'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh',
+    supportsCustomModel: true,
+    buildConfig: () => null,
+  },
+  grok: {
+    label: 'Grok',
+    installHint: 'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash',
+    supportsCustomModel: true,
+    // Sends `grokConfig: { alwaysApprove: true }` the way antigravity sends
+    // `dangerouslySkipPermissions: true`: Codeman sessions exist for autonomous
+    // work, so the Run button opts into grok's bypassPermissions mode
+    // (`--always-approve`; config-level deny rules still apply on top). The
+    // multi-user clamp forces it back off for non-granted owners server-side.
+    buildConfig: () => ({ grokConfig: { alwaysApprove: true } }),
+  },
+  deepseek: {
+    label: 'DeepSeek',
+    installHint: 'DeepSeek Harness CLI (dsh) not found. Install with: npm install -g @deepseek-ai/dsh',
+    // The two-part availability check is deliberate. `dsh` being installed is
+    // not enough — DeepSeek ships no terminal front door, so a box can have a
+    // perfect binary and nothing a pane can run.
+    unrunnableHint:
+      'No interactive DeepSeek Harness profile is installed. DeepSeek ships only web and headless ' +
+      'profiles, so the terminal agent comes from a plugin. Install one from the Run menu, or run: ' +
+      'dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui',
+    supportsCustomModel: true,
+    // Sends `permissionMode: 'danger-full-access'` for the same reason every
+    // sibling Run button sends its bypass switch. The harness has no bypass
+    // FLAG, so this rides the `DSH_PERMISSION_MODE` export instead, and the
+    // multi-user clamp forces it back down to `workspace-write` server-side.
+    //
+    // `statusReporting` is deliberately LEFT UNSET, i.e. ON: it is what upgrades
+    // this mode from output-stabilization guessing to definitive idle/blocked
+    // hook events (the harness reports to Codeman as its supervisor, see
+    // deepseek-status-shim.ts). Never send `statusReporting: false` from here.
+    buildConfig: () => ({ deepSeekConfig: { permissionMode: 'danger-full-access' } }),
+  },
+};
+
+/**
+ * External (non-Claude, non-Shell) CLI run modes — the keys of RUN_MODE_LAUNCH
+ * above, kept as its own Set (`EXTERNAL_CLI_MODES.has(mode)`) rather than an
+ * array recomputed per call. Single source for what used to be two hand-copied
+ * 8-way `session.mode === '<id>' || ...` chains inside one function
+ * (`openSessionOptions`), guaranteed to drift from each other the moment a
+ * ninth CLI landed in one and not the other.
+ */
+/** How often the OPEN case picker re-reads /api/cases (it also refreshes once on open). */
+const CASE_PICKER_REFRESH_MS = 5000;
+
+const EXTERNAL_CLI_MODES = new Set(Object.keys(RUN_MODE_LAUNCH));
+const BUILT_IN_RUN_MODES = new Set(['claude', 'shell', ...Object.keys(RUN_MODE_LAUNCH)]);
+
+function registryCliCatalog() {
+  return typeof window !== 'undefined' && Array.isArray(window.__codemanCliCatalog) ? window.__codemanCliCatalog : [];
+}
+
+function registryCliById(id) {
+  return registryCliCatalog().find((entry) => entry.id === id);
+}
+
+function isExternalCliRunMode(mode) {
+  return EXTERNAL_CLI_MODES.has(mode) || registryCliById(mode)?.kind === 'agent';
+}
+
 Object.assign(CodemanApp.prototype, {
   /**
    * Build envOverrides payload from case + global settings.
@@ -120,16 +249,74 @@ Object.assign(CodemanApp.prototype, {
     const input = document.getElementById('quickStartCaseSearch');
     const list = document.getElementById('quickStartCaseList');
     if (!input || !list) return;
+    const wasOpen = this._casePickerOpen === true;
     this._casePickerOpen = true;
     this._casePickerFilter = filter;
     this._casePickerActiveIndex = 0;
     input.setAttribute('aria-expanded', 'true');
     this.renderCasePickerList();
+    // Every keystroke re-enters here, so only the closed -> open transition
+    // refreshes and arms the timer; typing must not fire a fetch per key.
+    if (!wasOpen) this._startCasePickerRefresh();
+  },
+
+  /** Re-read the case list while the picker is open, so folders deleted or created on disk show up without a page reload. */
+  _startCasePickerRefresh() {
+    void this.refreshCasePickerCases();
+    if (this._casePickerRefreshTimer) return;
+    this._casePickerRefreshTimer = setInterval(() => void this.refreshCasePickerCases(), CASE_PICKER_REFRESH_MS);
+  },
+
+  _stopCasePickerRefresh() {
+    if (this._casePickerRefreshTimer) clearInterval(this._casePickerRefreshTimer);
+    this._casePickerRefreshTimer = null;
+  },
+
+  /**
+   * Lighter than loadQuickStartCases(): that one closes the picker and re-picks a
+   * selection, which would yank the list away from someone mid-browse. This only
+   * swaps the data and repaints, and does nothing when the list is unchanged.
+   */
+  async refreshCasePickerCases() {
+    if (this._casePickerRefreshInFlight) return;
+    this._casePickerRefreshInFlight = true;
+    try {
+      const res = await fetch('/api/cases');
+      if (!res.ok) return;
+      const cases = (await res.json()).data;
+      if (!Array.isArray(cases) || !this._casePickerOpen) return;
+      const signature = list => JSON.stringify((list || []).map(c => [c.name, c.path, c.location]));
+      if (signature(cases) === signature(this.cases)) return;
+      this.cases = cases;
+
+      const select = document.getElementById('quickStartCase');
+      if (select) {
+        const previous = select.value;
+        this.renderQuickStartCaseSelectOptions(select, this.getCasePickerOptions());
+        if (cases.some(c => c.name === previous)) {
+          select.value = previous;
+        } else if (cases.length > 0) {
+          // The selected case was removed on disk: fall back the way the initial
+          // load does, without saving it as the user's last-used case.
+          const fallback = cases.find(c => c.name === 'testcase') || cases[0];
+          select.value = fallback.name;
+          this.updateDirDisplayForCase(fallback.name);
+          this.updateMobileCaseLabel(fallback.name);
+          this.updateCasePickerInput(fallback.name);
+        }
+      }
+      this.renderCasePickerList();
+    } catch {
+      // A failed poll leaves the list as it was; the next tick retries.
+    } finally {
+      this._casePickerRefreshInFlight = false;
+    }
   },
 
   closeCasePicker() {
     const input = document.getElementById('quickStartCaseSearch');
     const list = document.getElementById('quickStartCaseList');
+    this._stopCasePickerRefresh();
     this._casePickerOpen = false;
     this._casePickerFilter = '';
     input?.setAttribute('aria-expanded', 'false');
@@ -395,34 +582,13 @@ Object.assign(CodemanApp.prototype, {
 
     try {
       const mode = this._runMode || 'claude';
-      if (mode === 'opencode') {
-        return await this.runOpenCode();
-      }
-      if (mode === 'codex') {
-        return await this.runCodex();
-      }
-      if (mode === 'gemini') {
-        return await this.runGemini();
-      }
-      if (mode === 'antigravity') {
-        return await this.runAntigravity();
-      }
-      if (mode === 'omp') {
-        return await this.runOmp();
-      }
-      if (mode === 'pi') {
-        return await this.runPi();
-      }
-      if (mode === 'grok') {
-        return await this.runGrok();
-      }
-      if (mode === 'deepseek') {
-        return await this.runDeepSeek();
-      }
       if (mode === 'shell') {
         return await this.runShell();
       }
-      return await this.runClaude();
+      if (mode === 'claude' || !isExternalCliRunMode(mode)) {
+        return await this.runClaude();
+      }
+      return await this._runCliMode(mode);
     } finally {
       const remaining = minLockMs - (Date.now() - startedAt);
       if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
@@ -452,6 +618,7 @@ Object.assign(CodemanApp.prototype, {
     e?.stopPropagation();
     const menu = document.getElementById('runModeMenu');
     if (!menu) return;
+    this.renderRegistryRunOptions();
     menu.classList.toggle('active');
     // Update selected state
     menu.querySelectorAll('.run-mode-option').forEach(btn => {
@@ -461,6 +628,7 @@ Object.assign(CodemanApp.prototype, {
     if (menu.classList.contains('active')) {
       this._loadRunModeHistory();
       this._refreshRunModeAvailability(menu);
+      this._refreshCustomModelRunOptions(menu);
       const close = (ev) => {
         if (!menu.contains(ev.target)) {
           menu.classList.remove('active');
@@ -509,13 +677,13 @@ Object.assign(CodemanApp.prototype, {
     // reporting it as a fault hid every agent mode on a freshly linked Docker case
     // behind "start it yourself first", for a container Codeman was about to create.
     const probeError = isDocker ? this._dockerCaseProbeError?.[caseName] : null;
-    for (const mode of ['claude', 'opencode', 'codex', 'gemini', 'antigravity', 'pi', 'grok', 'deepseek', 'omp']) {
-      const btn = menu.querySelector(`.run-mode-option[data-mode="${mode}"]`);
-      if (!btn) continue;
+    for (const option of menu.querySelectorAll('.run-mode-option[data-mode]')) {
+      const mode = option.dataset.mode;
+      if (!mode || mode === 'shell') continue;
       let available;
       if (isDocker) available = probeError ? false : containerModes ? containerModes.includes(mode) : true;
       else available = this.isCliAvailable(mode);
-      btn.style.display = available ? 'flex' : 'none';
+      option.style.display = available ? 'flex' : 'none';
     }
     this._renderRunModeNotice(menu, probeError);
     // DeepSeek is the one mode whose availability has two halves: `dsh` can be
@@ -532,6 +700,751 @@ Object.assign(CodemanApp.prototype, {
     // all (and is the honest thing to offer there).
     const dsWeb = menu.querySelector('#runModeDeepSeekWeb');
     if (dsWeb) dsWeb.style.display = avail.deepseekBinary ? 'flex' : 'none';
+  },
+
+  /** Render every enabled agent entry from the server's registry projection. */
+  renderRegistryRunOptions() {
+    const container = document.getElementById('runModeCliOptions');
+    if (!container) return;
+    const catalog = registryCliCatalog();
+    if (catalog.length === 0) return; // cached pages from before the catalog keep their static fallback.
+    container.replaceChildren();
+    for (const cli of catalog) {
+      if (cli.kind !== 'agent' || !cli.enabled) continue;
+      const option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'run-mode-option';
+      option.dataset.mode = cli.id;
+      option.onclick = () => this.setRunMode(cli.id);
+      const dot = document.createElement('span');
+      dot.className = `run-mode-dot ${cli.id}`;
+      dot.setAttribute('aria-hidden', 'true');
+      option.appendChild(dot);
+      option.append(cli.label);
+      container.appendChild(option);
+    }
+  },
+
+  /**
+   * Generates the Run menu's Custom Model Endpoint entries
+   * (docs/custom-model-endpoints-plan.md): one button per (capable harness, saved
+   * endpoint) pair, e.g. "Claude Code (llama.cpp)". Hidden entirely when the
+   * feature is off, no endpoint has a usable default model, or the active case is
+   * remote/docker (the apply route refuses both — see session-routes.ts).
+   *
+   * `window.__codemanCustomModelClis` is server-injected at render time from the
+   * CLI registry's own `capabilities.customModelInjection` (never a hardcoded id
+   * list here), so a CLI gaining or losing the capability shows up with no
+   * frontend change.
+   */
+  async _refreshCustomModelRunOptions(menu) {
+    const sep = menu.querySelector('#runModeCustomModelSep');
+    const header = menu.querySelector('#runModeCustomModelHeader');
+    const container = menu.querySelector('#runModeCustomModels');
+    if (!container) return;
+    const hide = () => {
+      if (sep) sep.style.display = 'none';
+      if (header) header.style.display = 'none';
+      container.innerHTML = '';
+    };
+
+    const settings = this.loadAppSettingsFromStorage();
+    // Matches _refreshRunModeAvailability's own gate: a stock entry for an
+    // uninstalled CLI is hidden, so a generated one must be too, or a box with
+    // no codex still offers "Codex (llama.cpp)" and fails at launch.
+    const capableClis = (window.__codemanCustomModelClis || []).filter((cli) => this.isCliAvailable(cli.id));
+    if (!settings.customModelEndpointsEnabled || capableClis.length === 0) return hide();
+
+    const caseName = document.getElementById('quickStartCase')?.value;
+    const activeCase = caseName ? (this.cases || []).find((c) => c.name === caseName) : null;
+    if (activeCase?.location === 'remote' || activeCase?.location === 'docker') return hide();
+
+    // GET /api/model-endpoints wraps its body in the { success, data } envelope
+    // like every other /api route (server.ts's preSerialization hook applies to
+    // arrays too) — _apiJson() unwraps it. A raw fetch().json() here would
+    // silently see the envelope object instead of the array and hide this
+    // section unconditionally.
+    const hosts = await this._apiJson('/api/model-endpoints');
+    if (!Array.isArray(hosts) || hosts.length === 0) return hide();
+
+    const rows = [];
+    for (const host of hosts) {
+      const models = host.models || [];
+      if (models.length === 0) continue; // nothing discovered yet — the settings panel explains why
+      const modelId = host.defaultModelId || models[0];
+      for (const cli of capableClis) {
+        // escapeHtml(JSON.stringify(...)) on EVERY arg, not just the untrusted
+        // one: JSON.stringify's own double quotes would otherwise terminate this
+        // double-quoted attribute at the first one, and everything after parses
+        // as raw tag content rather than a quoted string — which is what turns
+        // modelId (server-controlled, from the endpoint's own /v1/models reply,
+        // not this box's) into markup instead of inert data. Same idiom as
+        // deleteCase's onclick a few hundred lines down.
+        const args = [cli.id, host.id].map((v) => escapeHtml(JSON.stringify(v))).join(', ');
+        rows.push(`
+          <button class="run-mode-option" data-mode="${escapeHtml(cli.id)}" data-endpoint="${escapeHtml(host.id)}"
+                  onclick="app.selectCustomModelEntry(${args})"
+                  title="${escapeHtml(cli.label)} → ${escapeHtml(host.baseUrl)} (${escapeHtml(modelId)}${models.length > 1 ? `, +${models.length - 1} more` : ''})">
+            <span class="run-mode-dot ${escapeHtml(cli.id)}"></span>${escapeHtml(cli.label)} (${escapeHtml(host.label)})
+          </button>`);
+      }
+    }
+    if (rows.length === 0) return hide();
+    if (sep) sep.style.display = '';
+    if (header) header.style.display = '';
+    container.innerHTML = rows.join('');
+  },
+
+  /**
+   * Decides whether picking a Run-menu Custom Endpoint entry can launch
+   * straight away or needs to ask which model first. Re-fetches the endpoint
+   * rather than trusting anything cached from the menu render: the models
+   * list (or the default) could have changed — a re-discovery cycle running
+   * every 5 minutes in the background, or an edit in the settings panel —
+   * between opening the dropdown and clicking a row.
+   */
+  async selectCustomModelEntry(mode, endpointId) {
+    document.getElementById('runModeMenu')?.classList.remove('active');
+    const hosts = await this._apiJson('/api/model-endpoints');
+    const host = (hosts || []).find((h) => h.id === endpointId);
+    if (!host) {
+      this.showToast('That endpoint no longer exists', 'error');
+      return;
+    }
+    const models = host.models || [];
+    if (models.length === 0) {
+      this.showToast('No models discovered for this endpoint yet', 'warning');
+      return;
+    }
+    // Exactly one model: nothing to choose, so asking would just be an extra
+    // click for the same answer every time. Two or more: always ask, even
+    // with a defaultModelId set — the point of asking is letting THIS launch
+    // differ from the default, not just confirming it.
+    if (models.length === 1) {
+      return this.runCustomModelEntry(mode, endpointId, models[0]);
+    }
+    await this._openCustomModelPickModal(mode, host);
+  },
+
+  /** localStorage key for the last model launched on a given (harness, endpoint) pair — per-device by design, like every other `codeman:*` UI preference, never synced. */
+  _customModelLastUsedKey(mode, endpointId) {
+    return `codeman:customModelLastUsed:${mode}:${endpointId}`;
+  },
+
+  /** Reads the last model chosen for this (harness, endpoint) pair, or null. Never throws — a blocked/full localStorage just means no promotion, not a broken picker. */
+  _getCustomModelLastUsed(mode, endpointId) {
+    try {
+      return localStorage.getItem(this._customModelLastUsedKey(mode, endpointId));
+    } catch {
+      return null;
+    }
+  },
+
+  /** Remembers `modelId` as the last one launched for this (harness, endpoint) pair. */
+  _setCustomModelLastUsed(mode, endpointId, modelId) {
+    try {
+      localStorage.setItem(this._customModelLastUsedKey(mode, endpointId), modelId);
+    } catch {
+      // best-effort — losing the "last used" hint is cosmetic, never worth surfacing
+    }
+  },
+
+  /**
+   * Best-effort lookup of the model llama-swap currently has loaded and ready on this
+   * endpoint, so the picker can offer it first instead of making the user remember what
+   * they picked last time it mattered. Mirrors `_watchLlamaSwapLoading`'s own
+   * `state === 'ready'` check. Returns null for a plain (non-llama-swap) server, an
+   * unreachable endpoint, or a loaded model this host no longer lists as discovered —
+   * never throws, since a failed probe should just skip promotion, not break the picker.
+   *
+   * ⚠️ Client-side bounded to ~800ms via Promise.race, on top of (never instead of) the
+   * route's own 5s server-side timeout (`RUNNING_TIMEOUT_MS`, custom-model-routes.ts) —
+   * a saved endpoint keeps its discovered models cached, so "the box behind this endpoint
+   * is asleep or firewalled" is a normal way to reach this path, not an exotic one, and
+   * the modal must not sit invisible (Run menu already closed, nothing else on screen)
+   * for the full 5s a slow/dead endpoint can take. The losing side of the race is left to
+   * resolve on its own — `.catch(() => null)` only stops an unhandled-rejection warning
+   * when it eventually fails, it never cancels the in-flight fetch.
+   *
+   * `timeoutMs` exists to let a test drive this in milliseconds instead of the real
+   * 800 — same reasoning as `_watchLlamaSwapLoading`'s own `pollIntervalMs`: this code
+   * runs inside a JSDOM window's own realm, whose `setTimeout` is not the one
+   * `vi.useFakeTimers()` patches, so a param is the only way to test the timeout without
+   * actually waiting on it. Real callers never pass it.
+   */
+  async _getCustomModelCurrentlyLoaded(host, timeoutMs = 800) {
+    const probe = this._apiJson(`/api/model-endpoints/${encodeURIComponent(host.id)}/running-status`).catch(
+      () => null
+    );
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
+    const status = await Promise.race([probe, timeout]);
+    if (!status?.isLlamaSwap) return null;
+    const ready = (status.running || []).find((r) => r.state === 'ready' && (host.models || []).includes(r.model));
+    return ready?.model || null;
+  },
+
+  /**
+   * Renders the "which model" picker for a (harness, endpoint) pair with more than one
+   * discovered model. Async since it now awaits the currently-loaded-model probe below,
+   * so a SECOND call (a different custom-model entry clicked while the first one's probe
+   * is still in flight — the probe has its own 5s timeout) must not let the first call's
+   * later-arriving response clobber the second's already-rendered, already-correct modal.
+   * `_customModelPickGeneration` is the same guard-a-mutable-counter pattern
+   * `_watchLlamaSwapLoading` uses for the same reason: every DOM write below, including
+   * `_pendingCustomModelPick` itself, stays deferred until after the await, and a call
+   * that finds a newer generation already claimed bails out untouched rather than only
+   * skipping the model-list write and leaving title/hint/`_pendingCustomModelPick`
+   * inconsistent with what's on screen.
+   */
+  async _openCustomModelPickModal(mode, host) {
+    const modal = document.getElementById('customModelPickModal');
+    const list = document.getElementById('customModelPickList');
+    if (!modal || !list) return;
+    const generation = (this._customModelPickGeneration = (this._customModelPickGeneration || 0) + 1);
+    const isCurrent = () => this._customModelPickGeneration === generation;
+
+    // Whichever model llama-swap actually has loaded right now beats a merely
+    // remembered choice — it's what a launch would attach to with zero wait, while
+    // "last used" might have been swapped out by another session since. Neither
+    // reorders past the top: exactly one model is promoted, everything else keeps
+    // its discovery order.
+    const currentlyLoaded = await this._getCustomModelCurrentlyLoaded(host);
+    if (!isCurrent()) return; // a newer pick opened (and possibly already rendered) while this probe was in flight
+    const lastUsed = currentlyLoaded ? null : this._getCustomModelLastUsed(mode, host.id);
+    const promoted = currentlyLoaded || lastUsed;
+    const models = [...(host.models || [])];
+    if (promoted && models.includes(promoted)) {
+      models.splice(models.indexOf(promoted), 1);
+      models.unshift(promoted);
+    }
+
+    this._pendingCustomModelPick = { mode, endpointId: host.id };
+    const cliLabel = (window.__codemanCustomModelClis || []).find((c) => c.id === mode)?.label || mode;
+    // A static title (translatable by i18n.js's exact-string walker) plus a
+    // dynamic hint carrying the specifics — same split webviewModalTitle uses,
+    // since the walker cannot i18n a string a variable is already spliced into.
+    document.getElementById('customModelPickTitle').textContent = 'Choose a model';
+    document.getElementById('customModelPickHint').textContent =
+      `${cliLabel} → ${host.label} — ${(host.models || []).length} models discovered.`;
+    list.innerHTML = models
+      .map((m) => {
+        // Two independent tags, never one exclusive slot: the promotion tag says what
+        // llama-swap (or this device's history) knows about the model, the Default pill
+        // says what the saved endpoint says about it, and on a single-purpose GPU box the
+        // promoted model IS the default more often than not. One slot holding whichever
+        // applied first silently dropped the Default marking for exactly that row.
+        const promotion = m === currentlyLoaded ? 'Currently loaded' : m === lastUsed ? 'Last used' : null;
+        const tags = [promotion, m === host.defaultModelId ? 'Default' : null].filter(Boolean);
+        const arg = escapeHtml(JSON.stringify(m));
+        return `
+          <button class="run-mode-option" onclick="app.chooseCustomModelAndRun(${arg})">
+            <span class="run-mode-dot ${escapeHtml(mode)}"></span>${escapeHtml(m)}${tags.map((t) => ` <span class="set-scope">${escapeHtml(t)}</span>`).join('')}
+          </button>`;
+      })
+      .join('');
+    modal.classList.add('active');
+  },
+
+  closeCustomModelPickModal() {
+    document.getElementById('customModelPickModal')?.classList.remove('active');
+    this._pendingCustomModelPick = null;
+  },
+
+  /**
+   * In-app replacement for a native `confirm()` popup, used specifically for the
+   * llama-swap "this will unload it for session X" warning (both launch paths below) —
+   * a browser-chrome dialog there looked out of place next to the rest of the app's own
+   * modals. Resolves true/false the same way `confirm()` would; `_resolveModelSwapConfirm`
+   * (the modal's own Cancel/Switch-anyway buttons, and its backdrop click) is what settles
+   * the returned promise.
+   */
+  _confirmModelSwap(message) {
+    const modal = document.getElementById('customModelSwapConfirmModal');
+    const messageEl = document.getElementById('customModelSwapConfirmMessage');
+    if (messageEl) messageEl.textContent = message;
+    modal?.classList.add('active');
+    return new Promise((resolve) => {
+      this._resolveModelSwapConfirmPromise = resolve;
+    });
+  },
+
+  /** Called by the modal's Cancel/Switch-anyway buttons and its backdrop click. */
+  _resolveModelSwapConfirm(proceed) {
+    document.getElementById('customModelSwapConfirmModal')?.classList.remove('active');
+    const resolve = this._resolveModelSwapConfirmPromise;
+    this._resolveModelSwapConfirmPromise = null;
+    resolve?.(proceed);
+  },
+
+  /**
+   * In-app warning shown when the apply route reports `requiresContextWarning`: this
+   * model's real discovered context is smaller than the CLI's own fixed system-prompt/
+   * tool-schema overhead, which guarantees the very first message fails outright — no
+   * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value fixes that, since there is no conversation
+   * history yet for compaction to trim. Same promise-based pattern as
+   * `_confirmModelSwap`; `_resolveContextWarningConfirm` settles it.
+   */
+  _confirmContextWarning(modelId, contextLength, minSafeContextTokens) {
+    const modal = document.getElementById('customModelContextWarningModal');
+    const messageEl = document.getElementById('customModelContextWarningMessage');
+    if (messageEl) {
+      const known = typeof contextLength === 'number';
+      messageEl.textContent =
+        `${modelId} is configured with ` +
+        (known ? `only ${contextLength.toLocaleString()} tokens of` : 'an unknown (too small)') +
+        ` context, but this CLI needs roughly ${minSafeContextTokens.toLocaleString()}+ tokens just for its own ` +
+        `system prompt and tools — before any conversation history. Its very first message will fail outright, ` +
+        `no matter what context size Codeman tells it to expect.\n\n` +
+        `To fix this, reconfigure llama-swap to give this model (or a smaller one) an explicit larger context ` +
+        `instead of relying on auto-fit (--fit-ctx), which optimizes for the biggest MODEL that fits, not the ` +
+        `biggest CONTEXT — e.g. add "-c 65536" (or as large a --ctx-size as your hardware holds) to its llama-swap ` +
+        `config entry. A smaller model at a much larger explicit context often fits in the same VRAM a bigger ` +
+        `model's auto-fit context gets shrunk to make room for.`;
+    }
+    modal?.classList.add('active');
+    return new Promise((resolve) => {
+      this._resolveContextWarningConfirmPromise = resolve;
+    });
+  },
+
+  /** Called by the modal's Cancel/Launch-anyway buttons and its backdrop click. */
+  _resolveContextWarningConfirm(proceed) {
+    document.getElementById('customModelContextWarningModal')?.classList.remove('active');
+    const resolve = this._resolveContextWarningConfirmPromise;
+    this._resolveContextWarningConfirmPromise = null;
+    resolve?.(proceed);
+  },
+
+  /** A model row in the picker modal was clicked: close it and launch with that choice. */
+  chooseCustomModelAndRun(modelId) {
+    const pending = this._pendingCustomModelPick;
+    this.closeCustomModelPickModal();
+    if (!pending) return; // modal reopened/closed from elsewhere between render and click
+    void this.runCustomModelEntry(pending.mode, pending.endpointId, modelId);
+  },
+
+  /**
+   * Runs a session on `mode` and immediately applies `endpointId`/`modelId` to it
+   * via POST /api/sessions/:id/custom-model (see session-routes.ts) — the same
+   * restart-in-place apply path the (not-yet-built) endpoint-management surface
+   * would use for an already-running session. A custom-model run is a one-off
+   * "try this endpoint" action, not a sticky mode.
+   *
+   * Routes through run() itself, via a temporary `_runMode` swap, rather than a
+   * parallel dispatch table: that is what gives this the same in-flight lock
+   * every other Run click gets (CLAUDE.md, Run launch synchronization — the lock
+   * exists so a double click cannot create duplicate sessions with the same
+   * `w<n>-<case>` name, and it guards the OTHER direction too: without it, the
+   * main Run button could start a second concurrent launch while this one was
+   * still resolving), and it means a CLI whose customModelInjection recipe
+   * lands later needs no update here, only in run()'s own dispatch. The swap
+   * never persists — setRunMode() would sync it to the server as the user's new
+   * default, which a one-off endpoint run must not do — and is restored in
+   * `finally` even if run() throws.
+   */
+  /**
+   * Dispatches to the ONE-SHOT launch path (below) for every custom-model-eligible CLI
+   * except claude, which still goes through the restart-after-native-boot path
+   * (`_runCustomModelEntryViaRestart`): claude's own `runClaude()` carries multi-tab
+   * launch and a docker-config-drift confirm/retry loop neither of the other seven
+   * functions has, and folding those into the one-shot flow is unstarted, separate work.
+   * The other seven (opencode/codex/gemini/pi/grok/deepseek/omp) are each a single,
+   * simple launch, so they get the one-shot path — the one visibly worth it, since a
+   * native-boot-then-restart is far more jarring on a CLI whose TUI fully reinitializes
+   * (Codex, confirmed live) than on claude's own `--resume`-based restart.
+   */
+  async runCustomModelEntry(mode, endpointId, modelId) {
+    // "Last used" is recorded by each path itself, ONLY once the model is actually
+    // applied — never here, unconditionally, on the mere attempt. A context-window
+    // warning or a swap-conflict question can still say no after this call, and the
+    // context-warning case is the one that bites: declining it means this exact
+    // model cannot work with this CLI at all, so promoting it as "Last used" next
+    // time the picker opens would be actively wrong, not just premature.
+    if (mode === 'claude') {
+      return this._runCustomModelEntryViaRestart(mode, endpointId, modelId);
+    }
+    return this._runCustomModelEntryOneShot(mode, endpointId, modelId);
+  },
+
+  /**
+   * Launches directly on the endpoint — no restart, so no visible relaunch. Stashes the
+   * pick on `_pendingCustomModelForLaunch` for the targeted run<Mode>() function to read
+   * and fold into its own /api/quick-start body (see `_quickStartWithCustomModelConfirm`);
+   * cleared in `finally` the same way `_runMode`'s temporary swap is, even if run() throws.
+   */
+  async _runCustomModelEntryOneShot(mode, endpointId, modelId) {
+    document.getElementById('runModeMenu')?.classList.remove('active');
+    const previousRunMode = this._runMode;
+    const tabCountEl = document.getElementById('tabCount');
+    const prevTabCount = tabCountEl?.value;
+    this._runMode = mode;
+    this._pendingCustomModelForLaunch = { endpointId, modelId };
+    if (tabCountEl) tabCountEl.value = '1';
+    try {
+      await this.run();
+    } finally {
+      this._runMode = previousRunMode;
+      this._pendingCustomModelForLaunch = undefined;
+      if (tabCountEl && prevTabCount !== undefined) tabCountEl.value = prevTabCount;
+    }
+
+    // run() (via _quickStartWithCustomModelConfirm) reports its own launch error or
+    // cancellation via toast and leaves this unset — nothing more to do here then.
+    const result = this._lastCustomModelLaunchResult;
+    this._lastCustomModelLaunchResult = undefined;
+    if (result?.modelSwapInProgress) {
+      void this._watchLlamaSwapLoading(endpointId, modelId, result.sessionId);
+    }
+  },
+
+  /**
+   * POSTs a /api/quick-start body already carrying `customModel` (see the run<Mode>()
+   * call sites below), showing the same llama-swap "this will unload it for session X"
+   * warning the restart path's `_applyCustomModelToSession` shows when the route asks
+   * for confirmation, and retrying with that question's own flag on accept. Stashes the final
+   * response's payload on `_lastCustomModelLaunchResult` for
+   * `_runCustomModelEntryOneShot` to read `modelSwapInProgress` off afterward — run()'s
+   * eleven per-mode dispatch targets have no shared return-value contract of their own,
+   * so a side channel here is simpler than threading one through every one of them.
+   */
+  async _quickStartWithCustomModelConfirm(bodyObj) {
+    const post = async (body) => {
+      const res = await fetch('/api/quick-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    };
+    // Each question is answered with its OWN flag, and the answer accumulates, so the
+    // second POST still carries the first answer. Never the blanket `confirmed`: the two
+    // questions are about different people (a context window too small is the caller's
+    // problem, unloading a model is another session's), and while they shared one flag
+    // clicking past the context warning silently answered the swap question too.
+    let answered = {};
+    let data = await post(bodyObj);
+    if (data?.data?.requiresContextWarning) {
+      const { modelId, contextLength, minSafeContextTokens } = data.data;
+      const proceed = await this._confirmContextWarning(modelId, contextLength, minSafeContextTokens);
+      if (!proceed) {
+        this._lastCustomModelLaunchResult = undefined;
+        return { success: false, error: 'Launch cancelled — context window too small' };
+      }
+      answered = { ...answered, confirmedContext: true };
+      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, ...answered } });
+    }
+    if (data?.data?.requiresConfirmation) {
+      const { currentlyLoadedModel, affectedSessions } = data.data;
+      // The swap is blocked regardless of ownership, but multi-user mode scopes which
+      // sessions get NAMED, so this list can be empty while the conflict is real.
+      const names = affectedSessions.map((s) => s.name || s.id).join(', ');
+      const who = names
+        ? `${names} ${affectedSessions.length === 1 ? 'is' : 'are'} currently using`
+        : 'Another session on this endpoint is currently using';
+      const them = names && affectedSessions.length > 1 ? 'those sessions' : 'that session';
+      const proceed = await this._confirmModelSwap(
+        `${who} ${currentlyLoadedModel} on this endpoint. Switching will unload it for ` + `${them} too. Continue?`
+      );
+      if (!proceed) {
+        this._lastCustomModelLaunchResult = undefined;
+        return { success: false, error: 'Model switch cancelled' };
+      }
+      answered = { ...answered, confirmedSwap: true };
+      data = await post({ ...bodyObj, customModel: { ...bodyObj.customModel, ...answered } });
+    }
+    const launched = data?.success !== false;
+    this._lastCustomModelLaunchResult = launched ? data?.data : undefined;
+    // Only once actually launched, and only for a call that carried a custom-model pick
+    // at all — `_launchQuickStartInstances` runs every quick-start body (custom-model or
+    // not) through this same function, so a plain launch must not fall through here with
+    // an undefined endpointId/modelId that quietly no-ops the (mode, endpointId) key.
+    if (launched && bodyObj.customModel) {
+      this._setCustomModelLastUsed(bodyObj.mode, bodyObj.customModel.endpointId, bodyObj.customModel.modelId);
+    }
+    return data;
+  },
+
+  /** The restart-after-native-boot path — see `runCustomModelEntry`'s own comment for
+   *  which CLIs still use this one. */
+  async _runCustomModelEntryViaRestart(mode, endpointId, modelId) {
+    document.getElementById('runModeMenu')?.classList.remove('active');
+
+    const previousRunMode = this._runMode;
+    const before = this.activeSessionId;
+    const tabCountEl = document.getElementById('tabCount');
+    const prevTabCount = tabCountEl?.value;
+    this._runMode = mode;
+    if (tabCountEl) tabCountEl.value = '1';
+    try {
+      await this.run();
+    } finally {
+      this._runMode = previousRunMode;
+      if (tabCountEl && prevTabCount !== undefined) tabCountEl.value = prevTabCount;
+    }
+
+    // run() reports its own errors via toast. Every run*() function handles its
+    // own failure internally and returns normally rather than throwing or
+    // leaving activeSessionId null, so a declined/failed launch (missing CLI, a
+    // caught exception, isBusy on the session the launch would have targeted)
+    // falls through to here with the PREVIOUSLY active session still active.
+    // Requiring the id to have actually changed — not just to be non-null — is
+    // what stops that case from silently re-pointing and restarting whatever
+    // session the user was already looking at.
+    const sessionId = this.activeSessionId;
+    if (!sessionId || sessionId === before) return;
+
+    // Claude just launched on the NATIVE backend and is about to be restarted onto
+    // the endpoint — without something saying so, that native boot (which can talk
+    // to Opus for a moment) reads as "the endpoint didn't apply" rather than "the
+    // switch hasn't happened yet". Prominent and screen-centred (not a corner toast)
+    // since this can sit on screen for a while; sticky until the apply below settles
+    // one way or the other, or hands off to _watchLlamaSwapLoading's own banner.
+    const switchingToast = this._showCenterStatus(`Claude started — switching to ${endpointId}…`);
+
+    // A freshly launched CLI reports its OWN startup as 'busy' (spinner, the
+    // workspace-trust check, whatever else it does before its first prompt) —
+    // measured landing well before this line reliably reaches it — and the
+    // apply route's isBusy() guard correctly refuses to restart a session
+    // mid-turn, "mid-turn" included, which this fresh boot looks exactly
+    // like from the outside. Give it a bounded chance to settle first rather
+    // than raising a false "Session is busy" on every single launch. Per the
+    // wait contract a timeout here is a normal 200, never an error — a
+    // session still busy after 20s just reaches the apply call below and
+    // gets the route's own honest, now-visible SESSION_BUSY error instead of
+    // this guessing about it.
+    await this._apiJson(`/api/sessions/${sessionId}/wait?until=idle&timeout=20000`);
+
+    // _apiJson() (used everywhere else in this file) unwraps a success body to
+    // its `data`, but on failure it swallows the response entirely and returns
+    // null — exactly the `error` text a caller needs to tell "the endpoint is
+    // unreachable" apart from "the CLI can't be redirected" or "this is a
+    // Docker/remote session". Go through the
+    // raw response here instead so a failure is diagnosable, not just present.
+    let { ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId);
+
+    // A success body comes back as {success:true, data:{...}} (server.ts's preSerialization
+    // envelope), but a route-level error is {success:false, error, errorCode} with no nested
+    // data — createErrorResponse() never wraps one. `payload` below is only ever meaningful
+    // once `data.success !== false`.
+    let payload = data?.success !== false ? data?.data : undefined;
+
+    // Accumulates the questions the user has answered, so a second retry still carries
+    // the first answer. See _applyCustomModelToSession for why these are per-question.
+    let answered = {};
+
+    // This CLI's own fixed overhead (system prompt + tool schemas) may exceed the
+    // model's real discovered context outright — no context-length declaration can
+    // fix that, since compaction only trims conversation history and there is none
+    // on message 1. Warn and let the user decide whether to launch anyway, same
+    // re-send pattern as the swap check below.
+    if (ok && payload?.requiresContextWarning) {
+      const proceed = await this._confirmContextWarning(
+        payload.modelId,
+        payload.contextLength,
+        payload.minSafeContextTokens
+      );
+      if (!proceed) {
+        switchingToast?.dismiss();
+        this.showToast('Kept the native backend — context window too small', 'info');
+        return;
+      }
+      answered = { ...answered, confirmedContext: true };
+      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, answered));
+      payload = data?.success !== false ? data?.data : undefined;
+    }
+
+    // llama-swap runs one model at a time: switching would unload it out from under
+    // another session actively using it. The route only asks when that's actually true
+    // (never just because a swap is needed at all) — confirming re-sends the same call
+    // with `confirmedSwap` so the route skips THIS check, and only this one, next time.
+    if (ok && payload?.requiresConfirmation) {
+      // See the one-shot path above: an empty list means the conflicting sessions are
+      // ones this caller may not be told about, not that there is no conflict.
+      const names = payload.affectedSessions.map((s) => s.name || s.id).join(', ');
+      const who = names
+        ? `${names} ${payload.affectedSessions.length === 1 ? 'is' : 'are'} currently using`
+        : 'Another session on this endpoint is currently using';
+      const them = names && payload.affectedSessions.length > 1 ? 'those sessions' : 'that session';
+      const proceed = await this._confirmModelSwap(
+        `${who} ${payload.currentlyLoadedModel} on this endpoint. Switching to ${modelId} will unload it ` +
+          `for ${them} too. Continue?`
+      );
+      if (!proceed) {
+        switchingToast?.dismiss();
+        this.showToast('Kept the native backend — model switch cancelled', 'info');
+        return;
+      }
+      answered = { ...answered, confirmedSwap: true };
+      ({ ok, data, res } = await this._applyCustomModelToSession(sessionId, endpointId, modelId, answered));
+      payload = data?.success !== false ? data?.data : undefined;
+    }
+
+    if (!ok || !data || data.success === false) {
+      switchingToast?.dismiss();
+      const detail = data?.error ? `: ${data.error}` : res ? ` (HTTP ${res.status})` : ' (request failed)';
+      this.showToast(`Session started on the native backend — could not apply the custom endpoint${detail}`, 'error', {
+        duration: 0,
+      });
+      return;
+    }
+
+    // The apply has actually succeeded and both questions (if asked) are answered
+    // yes — only now is this a real "last used" for the picker's next open, not
+    // before either confirmation had a chance to decline it.
+    this._setCustomModelLastUsed(mode, endpointId, modelId);
+
+    // The apply above already succeeded — the session IS pointed at the endpoint — but
+    // llama-swap itself may still be unloading the old model and loading this one, which
+    // can take well over a minute. Without this, a prompt sent during that window either
+    // hangs silently or (the bug this whole feature exists to fix) gets answered by
+    // whatever was loaded a moment ago, reading as "it's still using the wrong model."
+    // Hand off to its own sticky toast rather than stacking a second one on top.
+    if (payload?.modelSwapInProgress) {
+      switchingToast?.dismiss();
+      void this._watchLlamaSwapLoading(endpointId, modelId, sessionId);
+      return;
+    }
+
+    switchingToast?.setMessage(`Pointed at ${endpointId} — restarting the session...`);
+    setTimeout(() => switchingToast?.dismiss(), 3000);
+  },
+
+  /** POST /api/sessions/:id/custom-model, returning {ok, data, res} rather than throwing —
+   *  see runCustomModelEntry's own comment for why this goes through `_api()` (raw fetch)
+   *  rather than `_apiJson()`: a failure's `error` detail must survive to the caller. */
+  /**
+   * `answered` carries the questions the user has ALREADY said yes to, as the route's own
+   * per-question flags (`confirmedContext`, `confirmedSwap`). Never the blanket
+   * `confirmed`: the two questions are about different people, so answering one must not
+   * answer the other. It accumulates, so the second retry still carries the first answer.
+   */
+  async _applyCustomModelToSession(sessionId, endpointId, modelId, answered) {
+    const res = await this._api(`/api/sessions/${sessionId}/custom-model`, {
+      method: 'POST',
+      body: { endpointId, modelId, ...(answered || {}) },
+    });
+    const data = res ? await res.json().catch(() => null) : null;
+    return { ok: !!res, data, res };
+  },
+
+  /**
+   * Best-effort: looks up `modelId`'s discovered file size (GB) off the endpoint's own
+   * saved host record (`CustomModelHost.modelSizesGB`, populated during discovery by
+   * parsing llama-swap's own `description` field for an auto-discovered model). Returns
+   * `undefined` for a hand-configured profile with no parseable size, an unreachable
+   * server, or any other failure — never a guess.
+   */
+  async _lookupModelSizeGB(endpointId, modelId) {
+    const hosts = await this._apiJson('/api/model-endpoints').catch(() => null);
+    if (!Array.isArray(hosts)) return undefined;
+    const host = hosts.find((h) => h.id === endpointId);
+    const size = host?.modelSizesGB?.[modelId];
+    return typeof size === 'number' && Number.isFinite(size) && size > 0 ? size : undefined;
+  },
+
+  /**
+   * Strips llama.cpp's own bootlog prefix (`<uptime> <I|W|E> <component>  `, e.g.
+   * `0.31.428.568 I srv  llama_server: model loaded`) for display, leaving just
+   * `llama_server: model loaded` — the raw line from the server is kept as-is
+   * (`GET .../running-status`'s `logLine` field), this trims it only for the loading
+   * banner's second line. Defensive: a line that doesn't match this shape (a different
+   * llama.cpp build, or llama-swap's own format changing) is shown verbatim rather than
+   * mangled or dropped.
+   */
+  _formatLlamaLogLine(line) {
+    return typeof line === 'string' ? line.replace(/^[\d.]+\s+[IWE]\s+\S+\s+/, '') : line;
+  },
+
+  /**
+   * Polls llama-swap's own `/running` (via the read-only running-status route) until
+   * `modelId` reports `state: 'ready'`, showing a sticky banner the whole time so a slow
+   * unload/reload (measured well over a minute for a large model) reads as "loading,
+   * still working on it", never as silence or a wrong answer from whatever was loaded
+   * before. Checks immediately (a fast load, or a re-apply onto an already-ready model,
+   * shouldn't wait a full interval to say so), then every `pollIntervalMs`.
+   *
+   * Deliberately UNBOUNDED — no estimate, no countdown, no automatic give-up. An earlier
+   * version scaled a timeout off the model's discovered file size and auto-closed the
+   * session when it elapsed, but a real load's actual duration depends on hardware this
+   * feature has no way to know (VRAM, storage speed, what else is contending for the
+   * GPU), so any fixed number was a guess dressed up as a fact — the banner now says so
+   * outright instead of pretending to a precision it doesn't have, and a Cancel button on
+   * the banner itself (`_showCenterStatus`'s `onCancel`) is how the user ends it if it's
+   * taking too long, closing `sessionId` the same way the old timeout used to.
+   *
+   * `_watchLlamaSwapGeneration` guards against two overlapping calls (a second launch
+   * started before the first one's loop finished) clobbering each other's banner:
+   * `_showCenterStatus` reuses one shared DOM node, so an older loop's `dismiss()`/message
+   * update firing after a newer one has already taken over the banner would otherwise hide
+   * or overwrite the WRONG one, or close the WRONG session. Each call claims the counter
+   * as its own "generation" and checks it still owns it before touching either.
+   *
+   * `pollIntervalMs` exists to let a test drive this in milliseconds instead of seconds —
+   * real callers never pass it.
+   */
+  async _watchLlamaSwapLoading(endpointId, modelId, sessionId, pollIntervalMs = 1000) {
+    const generation = (this._watchLlamaSwapGeneration = (this._watchLlamaSwapGeneration || 0) + 1);
+    const isCurrent = () => this._watchLlamaSwapGeneration === generation;
+    const sizeGB = await this._lookupModelSizeGB(endpointId, modelId);
+    if (!isCurrent()) return; // a newer launch already took over before the lookup even finished
+    const sizeSuffix = sizeGB ? ` (${sizeGB.toFixed(1)} GB)` : '';
+    const baseMessage =
+      `Loading ${modelId}${sizeSuffix} on ${endpointId} — this can take a while depending on ` +
+      `your hardware and the model size.`;
+    // Second line, when llama-swap's own event feed actually gives us one: the real
+    // backend llama-server process's own latest log line (load_model:/llama_server: ...,
+    // see getLatestLlamaSwapLogLine) — a bare "please wait" says nothing is broken, this
+    // says what's actually happening. Absent on the very first render (no poll has
+    // landed yet) and whenever the endpoint doesn't expose it at all — never fabricated,
+    // and never cleared back to blank once seen (stays on the last real thing llama.cpp
+    // said if a later poll comes back with nothing new).
+    const buildMessage = (logLine) => {
+      const line = this._formatLlamaLogLine(logLine);
+      return baseMessage + (line ? `\nllama.cpp: ${line}` : '');
+    };
+    let cancelled = false;
+    // Prominent and screen-centred, not a corner toast — a real llama-swap model load can
+    // sit on screen for well over a minute, easy to mistake for nothing happening there.
+    const toast = this._showCenterStatus(buildMessage(), {
+      onCancel: () => {
+        cancelled = true;
+      },
+    });
+    while (!cancelled) {
+      const status = await this._apiJson(`/api/model-endpoints/${encodeURIComponent(endpointId)}/running-status`);
+      if (!isCurrent()) return; // a newer launch took over the banner — this loop is done
+      if (cancelled) break;
+      if (!status) {
+        // transient failure — keep waiting rather than giving up early
+      } else if (!status.isLlamaSwap) {
+        // Endpoint changed under us, or wasn't llama-swap after all — nothing more to
+        // watch for, and not a failure worth a toast of its own.
+        toast?.dismiss();
+        return;
+      } else if (status.running.some((r) => r.model === modelId && r.state === 'ready')) {
+        toast?.dismiss();
+        this.showToast(`${modelId} is ready`, 'success', { duration: 2500 });
+        return;
+      }
+      if (!isCurrent() || cancelled) break;
+      toast?.setMessage(buildMessage(status?.logLine));
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+    if (!isCurrent()) return;
+    // Cancelled by the user, not a timeout — an ordinary info toast, not a scary error
+    // banner, since this was deliberate rather than something going wrong.
+    toast?.dismiss();
+    this.showToast(
+      `Cancelled loading ${modelId} on ${endpointId}` + (sessionId ? ' — the session has been closed.' : '.'),
+      'info'
+    );
+    if (sessionId) {
+      try {
+        await this.closeSession(sessionId);
+      } catch {
+        // closeSession already reports its own failure via toast — nothing more to do here
+      }
+    }
   },
 
   /**
@@ -825,7 +1738,8 @@ Object.assign(CodemanApp.prototype, {
       gearBtn.className = `btn-toolbar btn-run-gear mode-${mode}`;
     }
     if (label) {
-      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'pi' ? 'Run PI' : mode === 'grok' ? 'Run GK' : mode === 'deepseek' ? 'Run DS' : mode === 'omp' ? 'Run OMP' : mode === 'shell' ? 'Run SH' : 'Run';
+      const registryEntry = registryCliById(mode);
+      label.textContent = mode === 'opencode' ? 'Run OC' : mode === 'codex' ? 'Run CX' : mode === 'gemini' ? 'Run GM' : mode === 'antigravity' ? 'Run AG' : mode === 'pi' ? 'Run PI' : mode === 'grok' ? 'Run GK' : mode === 'deepseek' ? 'Run DS' : mode === 'omp' ? 'Run OMP' : mode === 'shell' ? 'Run SH' : registryEntry ? `Run ${registryEntry.shortBadge}` : 'Run';
     }
   },
 
@@ -852,7 +1766,12 @@ Object.assign(CodemanApp.prototype, {
   },
 
   _initRunMode() {
-    try { this._runMode = localStorage.getItem('codeman_runMode') || 'claude'; } catch { this._runMode = 'claude'; }
+    this.renderRegistryRunOptions();
+    let savedMode = 'claude';
+    try { savedMode = localStorage.getItem('codeman_runMode') || 'claude'; } catch { /* localStorage unavailable */ }
+    // Go through the setter so a CLI disabled after the previous visit, or a
+    // removed custom CLI, cannot survive in localStorage as a runnable mode.
+    this.runMode = savedMode;
     this._applyRunMode();
   },
 
@@ -930,7 +1849,7 @@ Object.assign(CodemanApp.prototype, {
 
   async runClaude() {
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    const tabCount = Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount').value) || 1));
+    const tabCount = this._readTabCount();
 
     const ownsLaunchTerminal = this._beginSessionLaunchStatus(
       `Starting ${tabCount} Claude session(s) in ${caseName}...`
@@ -1257,466 +2176,172 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
-  async runOpenCode() {
+  /**
+   * Reads the "Instance count" stepper, clamped to 1..20. Single source for every
+   * run*(), runClaude() included. Optional-chained because callers read it BEFORE
+   * their try block, to put the count in the opening banner: `#tabCount` ships
+   * unconditionally today, but a throw here would escape the launch-error path.
+   */
+  _readTabCount() {
+    return Math.min(20, Math.max(1, parseInt(document.getElementById('tabCount')?.value) || 1));
+  },
+
+  /**
+   * Launches `tabCount` quick-start sessions of one non-Claude mode
+   * sequentially, selecting the first once all are up. Shared by every
+   * run*() below except runClaude() (which has its own remote/docker
+   * branching and parallel-create path) — before this helper existed, each
+   * of them ignored the "Instance count" stepper entirely and always
+   * launched exactly one session, with no error, just the wrong count.
+   * `buildBody(sessionName)` returns that mode's quick-start POST body.
+   */
+  async _launchQuickStartInstances(caseName, tabCount, label, buildBody, ownsLaunchTerminal) {
+    const startNumber = this._nextCaseSessionStartNumber(caseName);
+    let firstSessionId = null;
+    // A custom-model launch can ask up to two questions before it starts anything: the
+    // endpoint's context window is too small for this model, and loading it will unload
+    // the model another session is using. Both are decisions about the ENDPOINT, not
+    // about each session, and every instance in this batch targets the same one, so the
+    // answer is taken once and carried to the rest. Without this a 20-instance launch
+    // asks the same question 20 times, which is the interaction between the Instance
+    // count stepper and the custom-model picker that neither feature had on its own.
+    let customModelAnswered = false;
+    for (let i = 0; i < tabCount; i++) {
+      const sessionName = `w${startNumber + i}-${caseName}`;
+      const body = buildBody(sessionName);
+      const data = await this._quickStartWithCustomModelConfirm(
+        customModelAnswered && body.customModel
+          ? { ...body, customModel: { ...body.customModel, confirmedContext: true, confirmedSwap: true } }
+          : body
+      );
+      if (!data.success) throw new Error(data.error || `Failed to start ${label}`);
+      customModelAnswered = true;
+      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+      if (!firstSessionId) firstSessionId = data.data.sessionId;
+    }
+    if (tabCount > 1) {
+      this._appendSessionLaunchStatus(ownsLaunchTerminal, `All ${tabCount} ${label} session(s) ready`);
+    }
+    return firstSessionId;
+  },
+
+  /**
+   * Shared launcher for every RUN_MODE_LAUNCH entry (every run mode except
+   * claude/shell, which have their own flows — claude for its remote/docker
+   * branching and parallel-create path, shell for needing no CLI probe at
+   * all). The eight run<Mode>() methods below are thin named wrappers: their
+   * names stay because index.html's welcome-screen buttons and the run-mode
+   * menu call them directly by name (`app.runOpenCode()` etc.), and several
+   * tests assert on that name directly too.
+   */
+  async _runCliMode(mode) {
+    const catalogEntry = registryCliById(mode);
+    const entry = RUN_MODE_LAUNCH[mode] ||
+      (catalogEntry && {
+        label: catalogEntry.label,
+        installHint: `${catalogEntry.label} is not available on this host.`,
+        supportsCustomModel: false,
+        buildConfig: () => null,
+      });
+    if (!entry) throw new Error(`Unknown run mode: ${mode}`);
     const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote cases run the CLI on the REMOTE host — the local /api/opencode/status
-    // probe and the local-only config/env below don't apply (quick-start rejects them).
+    // Remote/docker cases run the CLI on the OTHER side — the local status
+    // probe and the local-only config/env below don't apply (quick-start
+    // rejects them for remote cases).
     const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
     const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
 
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting OpenCode session in ${caseName}...`);
+    const tabCount = this._readTabCount();
+    const ownsLaunchTerminal = this._beginSessionLaunchStatus(
+      `Starting ${tabCount} ${entry.label} session(s) in ${caseName}...`
+    );
     // Focus in sync gesture context (see runClaude comment)
     this.terminal.focus();
 
     try {
-      // Check if OpenCode is available (local sessions only)
-      if (!isRemote) {
-        const statusRes = await fetch('/api/opencode/status');
+      if (!isRemote && RUN_MODE_LAUNCH[mode]) {
+        const statusRes = await fetch(`/api/${mode}/status`);
         const status = (await statusRes.json()).data;
         if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'OpenCode CLI not found. Install with: curl -fsSL https://opencode.ai/install | bash'
-          );
+          this._reportSessionLaunchError(ownsLaunchTerminal, entry.installHint);
           return;
         }
-      }
-
-      // Quick-start with opencode mode (auto-allow tools by default).
-      // No `effort` field — it's Claude-specific (OpenCode has no /effort).
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'opencode',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            openCodeConfig: { autoAllowTools: true },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start OpenCode');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      // Switch to the new session (don't pre-set activeSessionId — selectSession
-      // early-returns when IDs match, skipping buffer load and sendResize)
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
-  },
-
-  async runCodex() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote cases run Codex on the REMOTE host — skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Codex session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/codex/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'Codex CLI not found. Install with: npm install -g @openai/codex'
-          );
+        if (entry.unrunnableHint && !status.runnable) {
+          this._reportSessionLaunchError(ownsLaunchTerminal, entry.unrunnableHint);
           return;
         }
+      } else if (!isRemote && !this.isCliAvailable(mode)) {
+        this._reportSessionLaunchError(ownsLaunchTerminal, entry.installHint);
+        return;
       }
 
       const globalSettings = this.loadAppSettingsFromStorage();
       const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), globalSettings);
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      // No `effort` field for ANY entry in RUN_MODE_LAUNCH: effort is
+      // Claude-specific (runClaude() alone sends it, and the backend turns it
+      // into `claude --settings`); none of these CLIs has an /effort. Each of
+      // the eight bodies this launcher replaced carried that rule as a comment.
+      const firstSessionId = await this._launchQuickStartInstances(
+        caseName,
+        tabCount,
+        entry.label,
+        (sessionName) => ({
           caseName,
-          mode: 'codex',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
+          mode,
+          sessionName,
           ...(isRemote ? {} : {
-            codexConfig: {
-              dangerouslyBypassApprovals: globalSettings.codexDangerouslyBypassApprovals ?? false,
-              animations: globalSettings.codexAnimationsEnabled ?? false,
-              renderMode: 'hybrid',
-            },
+            ...(entry.buildConfig(globalSettings) || {}),
             ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
+            ...(entry.supportsCustomModel && this._pendingCustomModelForLaunch
+              ? { customModel: this._pendingCustomModelForLaunch }
+              : {}),
           }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Codex');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
+        }),
+        ownsLaunchTerminal
+      );
 
       // Switch to the new session (don't pre-set activeSessionId — selectSession
       // early-returns when IDs match, skipping buffer load and sendResize)
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
+      if (firstSessionId) {
+        await this.selectSession(firstSessionId);
       }
 
       this.terminal.focus();
     } catch (err) {
       this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
     }
+  },
+
+  async runOpenCode() {
+    return this._runCliMode('opencode');
+  },
+
+  async runCodex() {
+    return this._runCliMode('codex');
   },
 
   async runGemini() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote cases run Gemini on the REMOTE host — skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Gemini session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/gemini/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'Gemini CLI not found. Install with: npm install -g @google/gemini-cli'
-          );
-          return;
-        }
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'gemini',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            geminiConfig: { approvalMode: 'yolo' },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Gemini');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
+    return this._runCliMode('gemini');
   },
 
   async runAntigravity() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote/docker cases run agy on the OTHER side — skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Antigravity session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/antigravity/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'Antigravity CLI not found. Install with: curl -fsSL https://antigravity.google/cli/install.sh | bash'
-          );
-          return;
-        }
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'antigravity',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            antigravityConfig: { dangerouslySkipPermissions: true },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Antigravity');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
+    return this._runCliMode('antigravity');
   },
 
-  /**
-   * Launch a Pi (pi.dev) session.
-   *
-   * Deliberately sends NO piConfig: pi has no permission prompts, so there is no
-   * bypass to opt into, and project trust is pi's own `defaultProjectTrust`
-   * decision (an interactive prompt the user answers in the terminal). Sending
-   * `approveProjectTrust: true` here would silently opt every browser-launched pi
-   * session into executing repo-supplied TypeScript.
-   */
   async runPi() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote/docker cases run pi on the OTHER side — skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Pi session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/pi/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'Pi CLI not found. Install with: npm install -g --ignore-scripts @earendil-works/pi-coding-agent'
-          );
-          return;
-        }
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'pi',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote || Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Pi');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
+    return this._runCliMode('pi');
   },
 
   async runOmp() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote/docker cases run omp on the OTHER side — skip the local status probe
-    // and the local-only config below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting OMP session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/omp/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'OMP CLI not found. Install with: curl -fsSL https://omp.sh/install | sh'
-          );
-          return;
-        }
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'omp',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start OMP');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
+    return this._runCliMode('omp');
   },
 
-  /**
-   * Launch a Grok Build (xAI `grok`) session.
-   *
-   * Sends `grokConfig: { alwaysApprove: true }` the way runAntigravity() sends
-   * `dangerouslySkipPermissions: true`: Codeman sessions exist for autonomous
-   * work, so the Run button opts into grok's bypassPermissions mode
-   * (`--always-approve`; config-level deny rules still apply on top). The
-   * multi-user clamp forces it back off for non-granted owners server-side.
-   */
   async runGrok() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote/docker cases run grok on the OTHER side: skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting Grok session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/grok/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'Grok CLI not found. Install with: curl -fsSL https://x.ai/cli/install.sh | bash'
-          );
-          return;
-        }
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'grok',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            grokConfig: { alwaysApprove: true },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start Grok');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
+    return this._runCliMode('grok');
   },
 
-  /**
-   * Launch a DeepSeek Harness (`dsh`) session.
-   *
-   * Sends `permissionMode: 'danger-full-access'` for the same reason every
-   * sibling Run button sends its bypass switch: Codeman sessions exist for
-   * autonomous work. The harness has no bypass FLAG, so this rides the
-   * `DSH_PERMISSION_MODE` export instead, and the multi-user clamp forces it
-   * back down to `workspace-write` for non-granted owners server-side.
-   *
-   * `statusReporting` is left unset, i.e. ON: it is what upgrades this mode from
-   * output-stabilization guessing to definitive idle/blocked hook events.
-   *
-   * The two-part availability check is deliberate. `dsh` being installed is not
-   * enough — DeepSeek ships no terminal front door, so a box can have a perfect
-   * binary and nothing a pane can run. Reporting that precisely, with the exact
-   * command that fixes it, is the difference between "the Run button is broken"
-   * and a 30-second fix.
-   */
   async runDeepSeek() {
-    const caseName = document.getElementById('quickStartCase').value || 'testcase';
-    // Remote/docker cases run dsh on the OTHER side: skip the local status probe and the
-    // local-only config/env below (quick-start rejects them for remote cases).
-    const _runLoc = (this.cases || []).find(c => c.name === caseName)?.location;
-    const isRemote = _runLoc === 'remote' || _runLoc === 'docker';
-
-    const ownsLaunchTerminal = this._beginSessionLaunchStatus(`Starting DeepSeek session in ${caseName}...`);
-    this.terminal.focus();
-
-    try {
-      if (!isRemote) {
-        const statusRes = await fetch('/api/deepseek/status');
-        const status = (await statusRes.json()).data;
-        if (!status.available) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'DeepSeek Harness CLI (dsh) not found. Install with: npm install -g @deepseek-ai/dsh'
-          );
-          return;
-        }
-        if (!status.runnable) {
-          this._reportSessionLaunchError(
-            ownsLaunchTerminal,
-            'No interactive DeepSeek Harness profile is installed. DeepSeek ships only web and headless ' +
-            'profiles, so the terminal agent comes from a plugin. Install one from the Run menu, or run: ' +
-            'dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui'
-          );
-          return;
-        }
-      }
-
-      const envOverrides = this.buildEnvOverrides(this.getCaseSettings(caseName), this.loadAppSettingsFromStorage());
-      const res = await fetch('/api/quick-start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          caseName,
-          mode: 'deepseek',
-          sessionName: `w${this._nextCaseSessionStartNumber(caseName)}-${caseName}`,
-          ...(isRemote ? {} : {
-            deepSeekConfig: { permissionMode: 'danger-full-access' },
-            ...(Object.keys(envOverrides).length > 0 ? { envOverrides } : {}),
-          }),
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to start DeepSeek');
-      await this._ensureCreatedSessionVisible(data.data.sessionId, data.data.session);
-
-      if (data.data.sessionId) {
-        await this.selectSession(data.data.sessionId);
-      }
-
-      this.terminal.focus();
-    } catch (err) {
-      this._reportSessionLaunchError(ownsLaunchTerminal, err.message);
-    }
+    return this._runCliMode('deepseek');
   },
 
 
@@ -1784,7 +2409,7 @@ Object.assign(CodemanApp.prototype, {
     if (detachToggle) detachToggle.checked = this.hasTabDetachOverride(sessionId);
 
     // Reset to an appropriate tab — Summary for external CLIs (Respawn/Ralph are Claude-only)
-    const isAltMode = session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity' || session.mode === 'pi' || session.mode === 'grok' || session.mode === 'deepseek' || session.mode === 'omp';
+    const isAltMode = isExternalCliRunMode(session.mode);
     this.switchOptionsTab(isAltMode ? 'summary' : 'respawn');
 
     // Update respawn status display and buttons
@@ -1814,7 +2439,7 @@ Object.assign(CodemanApp.prototype, {
     }
 
     // Hide Claude-specific options for external CLI sessions
-    const isExternalCli = session.mode === 'opencode' || session.mode === 'codex' || session.mode === 'gemini' || session.mode === 'antigravity' || session.mode === 'pi' || session.mode === 'grok' || session.mode === 'deepseek' || session.mode === 'omp';
+    const isExternalCli = isAltMode;
     const claudeOnlyEls = document.querySelectorAll('[data-claude-only]');
     claudeOnlyEls.forEach(el => { el.style.display = isExternalCli ? 'none' : ''; });
 
@@ -2474,6 +3099,10 @@ Object.assign(CodemanApp.prototype, {
       'remoteHostSocksProxy',
       'remoteHostJumpHost',
       'remoteHostExtraSshOptions',
+      // Wake-on-LAN: they belong to the HOST being configured, so leaving them filled in
+      // would carry one host's MAC/command onto the next host this form saves.
+      'remoteHostWakeMac',
+      'remoteHostWakeCommand',
     ];
     remoteFields.forEach(id => {
       const el = document.getElementById(id);
@@ -3071,6 +3700,9 @@ Object.assign(CodemanApp.prototype, {
     const identityFile = document.getElementById('remoteHostIdentityFile').value.trim();
     const socksProxy = document.getElementById('remoteHostSocksProxy').value.trim();
     const jumpHost = document.getElementById('remoteHostJumpHost').value.trim();
+    // Wake-on-LAN: keep in sync with `_readRemoteHostFromForm` (the Discover path).
+    const wakeMac = document.getElementById('remoteHostWakeMac').value.trim();
+    const wakeCommand = document.getElementById('remoteHostWakeCommand').value.trim();
     const extraSshOptions = document.getElementById('remoteHostExtraSshOptions').value
       .split('\n')
       .map(line => line.trim())
@@ -3108,6 +3740,8 @@ Object.assign(CodemanApp.prototype, {
         ...(socksProxy ? { socksProxy } : {}),
         ...(jumpHost ? { jumpHost } : {}),
         ...(extraSshOptions.length ? { extraSshOptions } : {}),
+        ...(wakeMac ? { wakeMac } : {}),
+        ...(wakeCommand ? { wakeCommand } : {}),
         ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
       };
       const hostRes = await fetch('/api/remote-hosts', {
@@ -3153,7 +3787,10 @@ Object.assign(CodemanApp.prototype, {
     const adopting = document.getElementById('dockerAdoptExisting')?.checked;
     if (adopting) modal.setAttribute('data-docker-adopt', '1');
     else modal.removeAttribute('data-docker-adopt');
-    if (adopting) void this._loadDockerContainerOptions();
+    if (adopting) {
+      void this._loadDockerContainerOptions();
+      void this._loadDockerCloneOptions();
+    }
   },
 
   /**
@@ -3165,6 +3802,120 @@ Object.assign(CodemanApp.prototype, {
    * Best-effort by design — the endpoint returns [] for an unreachable daemon,
    * and an empty list simply leaves the field as plain text input.
    */
+  /**
+   * Fill the "Duplicate an Existing Case" picker with the ADOPTED docker cases.
+   *
+   * One adopted container can back several cases, each pointing at a different
+   * directory inside it (classifyAdoptContainerConflict) — but re-typing the
+   * container, host and workspace by hand for every directory is exactly the
+   * friction that makes the capability go unused. Picking a case here fills those
+   * three and leaves only the two fields that MUST differ: the case name and the
+   * container workdir.
+   *
+   * ⚠️ Adopted cases only (`docker.owned === false`). An owned container's
+   * lifecycle belongs to its one case — a second case on it would be destroyed
+   * out from under itself by that case's recreate or delete — and the server
+   * refuses it, so offering it here would only produce a confusing error.
+   */
+  async _loadDockerCloneOptions() {
+    const select = document.getElementById('dockerAdoptCloneFrom');
+    const row = document.getElementById('dockerAdoptCloneRow');
+    if (!select || !row) return;
+    let cases = [];
+    try {
+      const res = await fetch('/api/cases');
+      const data = await res.json();
+      cases = (Array.isArray(data) ? data : data?.data || []).filter(
+        (c) => c?.docker && c.docker.owned === false
+      );
+    } catch {
+      cases = [];
+    }
+    select.textContent = '';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Start from scratch';
+    select.appendChild(blank);
+    for (const c of cases) {
+      const option = document.createElement('option');
+      option.value = c.name;
+      // Server-supplied strings: textContent, never markup.
+      option.textContent = `${c.name} — ${c.docker.container}:${c.docker.containerWorkdir || c.docker.path}`;
+      option.dataset.container = c.docker.container;
+      option.dataset.hostId = c.docker.hostId;
+      option.dataset.path = c.docker.path;
+      option.dataset.workdir = c.docker.containerWorkdir || c.docker.path;
+      select.appendChild(option);
+    }
+    // Nothing to duplicate yet: an empty picker is noise on the first adoption.
+    row.hidden = cases.length === 0;
+  },
+
+  /**
+   * Apply the picked case: carry over what STAYS the same, clear what must not.
+   *
+   * The two cleared fields are the point of the feature — a duplicate that kept
+   * the original's name would be rejected as an existing case, and one that kept
+   * its container workdir would be rejected as an exact twin (both by the server,
+   * with a clear message, but a form that pre-fills a value it knows will be
+   * refused is just a trap).
+   */
+  applyDockerCloneSource() {
+    const select = document.getElementById('dockerAdoptCloneFrom');
+    const option = select?.selectedOptions?.[0];
+    if (!option || !option.value) return;
+    const set = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = value || '';
+    };
+    set('dockerContainerName', option.dataset.container);
+    set('dockerHostId', option.dataset.hostId);
+    set('dockerWorkspacePath', option.dataset.path);
+    // Pre-filled, NOT cleared: these two must differ from the source, but editing
+    // `/srv/app/api` into `/srv/app/web` beats retyping a long path, and the same
+    // goes for the name. What keeps a duplicate from being submitted unchanged is
+    // the guard below (dockerCloneGuard), which is a better trade than an empty
+    // field: the form stays a starting point instead of a blank form with three
+    // fields mysteriously filled in.
+    set('dockerCaseName', option.value);
+    set('dockerAdoptWorkdir', option.dataset.workdir);
+    // Remembered so the guard can tell "unchanged" from "happens to look similar".
+    select.dataset.appliedName = option.value;
+    select.dataset.appliedWorkdir = option.dataset.workdir || '';
+    const workdir = document.getElementById('dockerAdoptWorkdir');
+    workdir?.focus();
+    // Caret at the end: the tail is the part that changes.
+    if (workdir) workdir.setSelectionRange(workdir.value.length, workdir.value.length);
+  },
+
+  /**
+   * Refuse a duplicate that still carries the source case's name or directory.
+   *
+   * Both are pre-filled so they can be EDITED, which means both can also be left
+   * alone by accident. The server refuses either (an existing case name, or an
+   * exact same-container-same-directory twin) with a clear message, but a
+   * round-trip to be told "you forgot to change the field you were looking at" is
+   * worse than saying so here, next to the field, before anything is sent.
+   *
+   * Returns the offending element, or null when the form is fine.
+   */
+  dockerCloneGuard() {
+    const select = document.getElementById('dockerAdoptCloneFrom');
+    if (!select || !select.value) return null;
+    const name = document.getElementById('dockerCaseName');
+    const workdir = document.getElementById('dockerAdoptWorkdir');
+    if (name && name.value.trim() === (select.dataset.appliedName || '')) {
+      return { el: name, message: `"${name.value.trim()}" is the case you copied from — give this one a new name.` };
+    }
+    if (workdir && workdir.value.trim() === (select.dataset.appliedWorkdir || '')) {
+      return {
+        el: workdir,
+        message: 'Same container and same directory as the case you copied from — point this one at another directory.',
+      };
+    }
+    return null;
+  },
+
   async _loadDockerContainerOptions() {
     const list = document.getElementById('dockerContainerList');
     if (!list) return;
@@ -3263,6 +4014,17 @@ Object.assign(CodemanApp.prototype, {
     }
     if (adopting && !container) {
       this.showToast('Enter the name of the running container to attach to', 'error');
+      return;
+    }
+    // A duplicate that still carries the source's name or directory: say so here,
+    // beside the field, rather than sending a request certain to come back refused.
+    const cloneIssue = adopting ? this.dockerCloneGuard() : null;
+    if (cloneIssue) {
+      this.showToast(cloneIssue.message, 'error');
+      const statusEl = document.getElementById('dockerLinkStatus');
+      if (statusEl) statusEl.textContent = cloneIssue.message;
+      cloneIssue.el.focus();
+      cloneIssue.el.select?.();
       return;
     }
 
@@ -3440,6 +4202,9 @@ Object.assign(CodemanApp.prototype, {
     const socksProxy = document.getElementById('remoteHostSocksProxy').value.trim();
     const jumpHost = document.getElementById('remoteHostJumpHost').value.trim();
     const codexCommand = document.getElementById('remoteHostCodexCommand').value.trim();
+    // Wake-on-LAN: keep in sync with `linkRemoteCase`'s inline payload.
+    const wakeMac = document.getElementById('remoteHostWakeMac').value.trim();
+    const wakeCommand = document.getElementById('remoteHostWakeCommand').value.trim();
     const extraSshOptions = document.getElementById('remoteHostExtraSshOptions').value
       .split('\n')
       .map(line => line.trim())
@@ -3459,6 +4224,8 @@ Object.assign(CodemanApp.prototype, {
       ...(socksProxy ? { socksProxy } : {}),
       ...(jumpHost ? { jumpHost } : {}),
       ...(extraSshOptions.length ? { extraSshOptions } : {}),
+      ...(wakeMac ? { wakeMac } : {}),
+      ...(wakeCommand ? { wakeCommand } : {}),
       ...(codexCommand ? { commands: { codex: codexCommand } } : {}),
     };
   },
@@ -3580,6 +4347,11 @@ Object.assign(CodemanApp.prototype, {
   // Case Management (reorder + delete)
   // ═══════════════════════════════════════════════════════════════
 
+  setCaseManageFilter(value) {
+    this._caseManageFilter = String(value || '');
+    this.renderCaseManageList();
+  },
+
   renderCaseManageList() {
     const container = document.getElementById('caseManageList');
     const cases = this.cases || [];
@@ -3587,6 +4359,18 @@ Object.assign(CodemanApp.prototype, {
       container.innerHTML = '<div class="form-hint" style="text-align: center; padding: 2rem 0;">No cases yet</div>';
       return;
     }
+
+    // Every term must appear in the name or path (same rule as the Run picker's
+    // filter). Reordering stays on the FULL list, so the arrows are disabled while
+    // a filter is active: a swap with a neighbour the user cannot see is a surprise.
+    const terms = (this._caseManageFilter || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const filtering = terms.length > 0;
+    const visible = filtering
+      ? cases.filter(c => {
+          const haystack = `${c.name} ${c.path || ''}`.toLowerCase();
+          return terms.every(term => haystack.includes(term));
+        })
+      : cases;
 
     // Cases an agent worker created (server-side marker file, see agent-case-marker.ts).
     // A long orchestration leaves one scratch directory per worker behind, so they get
@@ -3599,9 +4383,14 @@ Object.assign(CodemanApp.prototype, {
                   title="Review and delete the scratch cases agent workers left behind">Clean up</button>
          </div>`
       : '';
-    cases.forEach((c, idx) => {
-      const isFirst = idx === 0;
-      const isLast = idx === cases.length - 1;
+    if (filtering && visible.length === 0) {
+      html += '<div class="form-hint" style="text-align: center; padding: 2rem 0;">No cases match</div>';
+    }
+    visible.forEach(c => {
+      const idx = cases.indexOf(c);
+      const isFirst = filtering || idx === 0;
+      const isLast = filtering || idx === cases.length - 1;
+      const reorderTitle = filtering ? 'Clear the search to reorder' : null;
       // Was `/Users/<user>` only, the mirror image of the Run menu's bug: every
       // case path on a Linux host rendered in full, unabbreviated.
       const pathDisplay = c.path ? this._shortenHomePath(c.path) : '';
@@ -3625,9 +4414,9 @@ Object.assign(CodemanApp.prototype, {
                 : ''
             }
             <button class="case-manage-btn" onclick="app.moveCaseUp(${escapeHtml(JSON.stringify(c.name))})"
-                    title="Move up" ${isFirst ? 'disabled' : ''}>&#x25B2;</button>
+                    title="${reorderTitle || 'Move up'}" ${isFirst ? 'disabled' : ''}>&#x25B2;</button>
             <button class="case-manage-btn" onclick="app.moveCaseDown(${escapeHtml(JSON.stringify(c.name))})"
-                    title="Move down" ${isLast ? 'disabled' : ''}>&#x25BC;</button>
+                    title="${reorderTitle || 'Move down'}" ${isLast ? 'disabled' : ''}>&#x25BC;</button>
             <button class="case-manage-btn case-manage-btn-delete" onclick="app.deleteCase(${escapeHtml(JSON.stringify(c.name))})"
                     title="Delete case">&#x2715;</button>
           </div>
@@ -3800,6 +4589,7 @@ Object.assign(CodemanApp.prototype, {
       const isSelected = c.name === currentCase;
       html += `
         <button class="mobile-case-item ${isSelected ? 'selected' : ''}"
+                data-search="${escapeHtml(`${c.label} ${c.name}`.toLowerCase())}"
                 onclick="app.selectMobileCase(${escapeHtml(JSON.stringify(c.name))})">
           <span class="mobile-case-item-icon">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -3822,7 +4612,61 @@ Object.assign(CodemanApp.prototype, {
     }
 
     listContainer.innerHTML = html;
+    // Every open starts unfiltered. The search box is not focused on purpose:
+    // that would raise the phone keyboard over a list most opens just tap.
+    const search = document.getElementById('mobileCaseSearch');
+    if (search) search.value = '';
+    listContainer.parentElement.style.minHeight = '';
+    this.filterMobileCases();
     modal.classList.add('active');
+    // Bring the current case into view when the list is longer than the sheet.
+    // Scroll the list's own box, never scrollIntoView(), which can also scroll
+    // the document under the fixed header.
+    const body = listContainer.parentElement;
+    const selected = listContainer.querySelector('.mobile-case-item.selected');
+    if (body && selected) {
+      const top = selected.offsetTop - body.offsetTop;
+      if (top + selected.offsetHeight > body.scrollTop + body.clientHeight) {
+        body.scrollTop = top - (body.clientHeight - selected.offsetHeight) / 2;
+      }
+    }
+  },
+
+  /** Hide case rows whose name does not contain every word typed in the search box. */
+  filterMobileCases() {
+    const search = document.getElementById('mobileCaseSearch');
+    const words = (search?.value || '').toLowerCase().split(/\s+/).filter(Boolean);
+    // Hold the list at its unfiltered height while searching, so the sheet (and
+    // the input under the thumb) does not jump as rows disappear.
+    const body = document.querySelector('.mobile-case-picker-body');
+    if (body && words.length && !body.style.minHeight) body.style.minHeight = `${body.offsetHeight}px`;
+    let shown = 0;
+    for (const item of document.querySelectorAll('#mobileCaseList .mobile-case-item')) {
+      const hay = item.dataset.search || '';
+      const match = words.every((w) => hay.includes(w));
+      item.hidden = !match;
+      if (match) shown++;
+    }
+    const empty = document.getElementById('mobileCaseEmpty');
+    if (empty) empty.hidden = shown > 0;
+  },
+
+  /** Enter picks the case when the search narrows the list to exactly one; Escape clears, then closes. */
+  onMobileCaseSearchKey(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const visible = [...document.querySelectorAll('#mobileCaseList .mobile-case-item:not([hidden])')];
+      if (visible.length === 1) visible[0].click();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.target.value) {
+        event.target.value = '';
+        this.filterMobileCases();
+      } else {
+        this.closeMobileCasePicker();
+      }
+    }
   },
 
   closeMobileCasePicker() {
@@ -3895,9 +4739,15 @@ Object.defineProperty(CodemanApp.prototype, 'runMode', {
     return this._runMode || 'claude';
   },
   set(mode) {
-    this._runMode =
-      mode === 'opencode' || mode === 'codex' || mode === 'gemini' || mode === 'antigravity' || mode === 'pi' || mode === 'grok' || mode === 'deepseek' || mode === 'omp' || mode === 'claude'
-        ? mode
-        : 'claude';
+    const entry = registryCliById(mode);
+    if ((entry && entry.enabled) || (!entry && BUILT_IN_RUN_MODES.has(mode))) {
+      this._runMode = mode;
+      return;
+    }
+    // A disabled (or unknown) mode falls back to the first ENABLED catalogue entry, never a
+    // hardcoded 'claude': claude can be disabled too, and the server rejects a disabled mode.
+    const catalog = registryCliCatalog();
+    const firstEnabled = catalog.find((cli) => cli.enabled && cli.kind === 'agent') || catalog.find((cli) => cli.enabled);
+    this._runMode = firstEnabled ? firstEnabled.id : 'claude';
   },
 });

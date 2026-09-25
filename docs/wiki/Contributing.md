@@ -108,7 +108,7 @@ Conventions for wiki pages:
 - Images are referenced from the main repository over raw URLs rather than being copied into
   the wiki.
 - Say what the default is, especially when it is off. Most of Codeman is opt-in.
-- Label Claude-only behaviour every time it appears. Six of the seven run modes are not
+- Label Claude-only behaviour every time it appears. Nine of the ten run modes are not
   Claude.
 
 ## Conduct

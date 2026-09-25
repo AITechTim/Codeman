@@ -159,6 +159,24 @@ layers cooperate so a dashboard talking to its own backend just works:
    using its `Referer` to identify the dashboard. This only fires for a request
    that already missed every Codeman route, and never for one that resolves to a
    real route, which is what keeps it from being an authentication bypass.
+5. The same script **masks the proxy prefix off the page's own URL** before any
+   of the page's code runs (`history.replaceState` to the path the page would see
+   on its own origin). A single-page app routes on `location.pathname` at boot,
+   and `/webview/<cap>/` is a path no app has a route for: without this, a React
+   Router / Vue Router / Next dev server painted its HTML and CSS and then replaced
+   them with its own "page not found" the moment its script ran. The page only
+   *reads* the masked path; every URL it emits still goes through the layers above.
+6. A navigation the page starts **itself** after that — `location.reload()` (a dev
+   server's full-reload HMR), a root-absolute `location.href = '/login'` — now
+   targets Codeman's root with no capability anywhere on it. Codeman recognises
+   that request by shape (a top-level `<iframe>` navigation asking for HTML, for a
+   path it does not serve) and answers a static page that does nothing but tell
+   the owning tab which path was lost; the tab remounts the frame inside the
+   prefix at that path. It never counts as a failed login, so a dev server that
+   reloads on every save cannot rate-limit its user out of Codeman. The landing
+   page is the one served path that gets the same answer: it masks to exactly
+   `/`, and a reload there is admitted as long as the request carries no Codeman
+   credentials, which a sandboxed frame never does.
 
 On top of that, the proxy answers those requests with CORS headers. That sounds
 wrong for same-host requests, but a sandboxed iframe has an *opaque* origin, so the
@@ -172,10 +190,22 @@ then every API call fails, which looks like the dashboard being broken.
   EventSource, normal markup, the DOM sinks a page uses to build markup at runtime,
   and `url()` inside stylesheets. Something that constructs requests by an unusual
   route can still slip through. Symptom: the page renders but a panel stays empty.
-- **Root-absolute `location` navigation.** A dashboard that navigates itself with
-  `location.href = '/login'` escapes the prefix, because `Location.href` is
-  unforgeable and cannot be patched the way the other sinks are. A relative
-  `location.href = 'login'` is fine (`<base>` covers it).
+- **A root-absolute `url()` inside an inline `<style>` is not rescued.** Masking the
+  page's URL (layer 5) trades away the `Referer` safety net of layer 4 for
+  requests the shim cannot see, and only HTML is rewritten server-side. An
+  external stylesheet is fine: a `url()` it references is fetched with the
+  stylesheet's own URL as `Referer`, which is still inside the prefix. A
+  root-absolute `url(/img.png)` written directly into a `<style>` block in the
+  document has the masked document as its `Referer`, so it 404s where the
+  fallback used to rescue it. Symptom: one background image missing while
+  everything else renders. Narrow, and a `url()` the page sets from script is
+  still covered by layer 3.
+- **Root-absolute `location` navigation is recovered, not prevented.** `Location`
+  is unforgeable, so `location.href = '/login'` or `location.reload()` really does
+  leave the prefix; the frame comes back through the recovery hop in layer 6 above,
+  which needs a browser that sends `Sec-Fetch-Dest` (every current one; iOS Safari
+  since 16.4). Older browsers show Codeman's 404 in the frame; the tab's **Reload**
+  button puts it back.
 - **Cross-origin redirects are not followed.** If a dashboard bounces to a different
   host (an external SSO provider, say), the proxy hands the redirect back unchanged
   rather than relaying it, because relaying would make this an open proxy. Use

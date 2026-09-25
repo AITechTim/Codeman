@@ -5,7 +5,7 @@
  * and referenced by the frontend (`SSE_EVENTS` in `constants.js`).
  * Both files MUST be kept in sync.
  *
- * 158 event constants organized by category:
+ * 161 event constants organized by category:
  * - **Core** (1): init
  * - **Transport** (1): sse:heartbeat
  * - **Session lifecycle** (23): created, updated, deleted, terminal, idle, working, ...
@@ -14,7 +14,7 @@
  * - **Session: Plan** (4): planTaskUpdate, planCheckpoint, planRollback, planTaskAdded
  * - **Tasks** (4): created, completed, failed, updated
  * - **Mux** (4): created, killed, died, statsUpdated
- * - **Remote auto-reconnect** (3): sessionDropped, sessionReconnected, reconnectExhausted
+ * - **Remote auto-reconnect / wake** (5): sessionDropped, sessionReconnected, reconnectExhausted, hostWaking, hostWakeFailed
  * - **Respawn** (24): stateChanged, cycleStarted/Completed, step*, aiCheck*, planCheck*, timer*, log, ...
  * - **Subagents** (7): discovered, updated, tool_call, tool_result, progress, message, completed
  * - **Workflow runs** (3): run_discovered, run_updated, run_removed (ultracode / Workflow tool)
@@ -28,6 +28,7 @@
  * - **Hooks** (10): idle_prompt, permission_prompt, elicitation_dialog, elicitation_complete, elicitation_response, stop, agent_working, teammate_idle, task_completed, prompt_submitted
  *   (agent_working is the odd one out: reported by the DeepSeek Harness status bridge, not by a Claude Code hook)
  * - **Approvals** (3): pending, updated, resolved (cross-session Approvals Inbox)
+ * - **Custom Model Endpoint Profiles** (1): swapped-out (a session's model got evicted by another session on the same llama-swap endpoint)
  * - **Orchestrator** (12): stateChanged, planProgress, planReady, phase*, verification, task*, completed, error
  * - **Clipboard** (1): write
  * - **Cases** (4): created, linked, deleted, order-changed
@@ -176,7 +177,9 @@ export const MuxDied = 'mux:died' as const;
 /** tmux session stats refreshed. */
 export const MuxStatsUpdated = 'mux:statsUpdated' as const;
 
-// ─── Remote auto-reconnect (COD-108) ─────────────────────────────────────────
+// ─── Remote auto-reconnect (COD-108) + wake-on-LAN ───────────────────────────
+// Session-scoped in multi-user mode (`deriveSseHint`): routed to the session's owner,
+// or — for a wake with no session yet — to the requesting `username` in the payload.
 
 /** A remote session's local ssh pane died; an auto-reconnect attempt is starting. */
 export const RemoteSessionDropped = 'remote:sessionDropped' as const;
@@ -184,6 +187,15 @@ export const RemoteSessionDropped = 'remote:sessionDropped' as const;
 export const RemoteSessionReconnected = 'remote:sessionReconnected' as const;
 /** Auto-reconnect gave up after the bounded backoff cap — manual reconnect needed. */
 export const RemoteReconnectExhausted = 'remote:reconnectExhausted' as const;
+/**
+ * User input arrived for a session whose host is unreachable, so a Wake-on-LAN
+ * command was started (see `remote-wake.ts`). Input sent meanwhile is buffered.
+ * Payload: `sessionId` (session wake) or `forNewSession: true` + `username`
+ * (create/attach wake), `hostId`, `label`, `queuedInput`.
+ */
+export const RemoteHostWaking = 'remote:hostWaking' as const;
+/** The host did not come back within the wake timeout — buffered input is still held. */
+export const RemoteHostWakeFailed = 'remote:hostWakeFailed' as const;
 
 // ─── Respawn ─────────────────────────────────────────────────────────────────
 
@@ -384,6 +396,19 @@ export const ApprovalUpdated = 'approval:updated' as const;
 /** A pending approval left the inbox (answered, superseded, expired, ...). */
 export const ApprovalResolved = 'approval:resolved' as const;
 
+// ─── Custom Model Endpoint Profiles ──────────────────────────────────────────
+
+/**
+ * A session's own custom-model selection is no longer the model llama-swap has loaded —
+ * ANOTHER session's activity on the same endpoint evicted it (llama.cpp/llama-swap runs
+ * one model at a time). Detected after the fact by a periodic sweep (`server.ts`), never
+ * at the moment of eviction itself, since llama-swap has no push notification of its own;
+ * this session's next prompt will trigger reloading its model, evicting whatever displaced
+ * it in turn. Fires at most once per displacement (cleared once the sweep sees the
+ * session's own model loaded again), so it can't spam on every sweep interval.
+ */
+export const CustomModelSwappedOut = 'custom-model:swapped-out' as const;
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 /** Orchestrator state machine transitioned. */
@@ -535,6 +560,8 @@ export const SseEvent = {
   RemoteSessionDropped,
   RemoteSessionReconnected,
   RemoteReconnectExhausted,
+  RemoteHostWaking,
+  RemoteHostWakeFailed,
 
   // Respawn
   RespawnStarted,
@@ -637,6 +664,9 @@ export const SseEvent = {
   ApprovalPending,
   ApprovalUpdated,
   ApprovalResolved,
+
+  // Custom Model Endpoint Profiles
+  CustomModelSwappedOut,
 
   // Orchestrator
   OrchestratorStateChanged,

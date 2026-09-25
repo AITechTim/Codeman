@@ -17,6 +17,7 @@ FROM node:22-bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git \
+      libsecret-1-0 \
       tmux \
       ripgrep \
       curl \
@@ -25,6 +26,88 @@ RUN apt-get update \
       procps \
       openssh-client \
  && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI and Azure CLI (+ the azure-devops extension) with the same system
+# git credential helpers as docker/server.Dockerfile, so an agent in a Docker
+# case can clone and push to private GitHub / Azure DevOps repositories. The
+# sign-ins themselves are NOT baked in: `~/.config/gh` and `~/.azure` are seeded
+# per container at launch like every other CLI's credentials (CRED_STORES in
+# src/docker-hosts.ts), and a helper whose CLI is not signed in prints nothing,
+# so git fails fast instead of prompting. See server.Dockerfile for why the
+# vendor apt repositories are configured here rather than via deb_install.sh.
+#
+# Each is OPT-IN and OFF by default, like the server image: CODEMAN_INSTALL_GH=1
+# / CODEMAN_INSTALL_AZ=1 turn one on; off leaves no repository, package,
+# extension or helper entry. scripts/build-agent-image.mjs and the in-app
+# auto-build pass them from CODEMAN_AGENT_IMAGE_INSTALL_GH / _AZ in their own
+# environment (for the Compose deployment: `environment:` in
+# docker-compose.override.yml), and pass nothing when those are unset, so
+# these defaults (off) apply.
+ARG CODEMAN_INSTALL_GH=0
+ARG CODEMAN_INSTALL_AZ=0
+RUN set -eux; \
+    for flag in "CODEMAN_INSTALL_GH=${CODEMAN_INSTALL_GH}" "CODEMAN_INSTALL_AZ=${CODEMAN_INSTALL_AZ}"; do \
+      case "${flag#*=}" in 0|1) ;; *) echo "${flag%%=*} must be 0 or 1, got '${flag#*=}'" >&2; exit 1;; esac; \
+    done; \
+    codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"; \
+    arch="$(dpkg --print-architecture)"; \
+    pkgs=""; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    if [ "${CODEMAN_INSTALL_GH}" = 1 ]; then \
+      curl -fsSL -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+        https://cli.github.com/packages/githubcli-archive-keyring.gpg; \
+      chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+      echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list; \
+      pkgs="${pkgs} gh"; \
+    fi; \
+    if [ "${CODEMAN_INSTALL_AZ}" = 1 ]; then \
+      curl -fsSL -o /etc/apt/keyrings/microsoft.asc \
+        https://packages.microsoft.com/keys/microsoft.asc; \
+      chmod go+r /etc/apt/keyrings/microsoft.asc; \
+      echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/microsoft.asc] https://packages.microsoft.com/repos/azure-cli/ ${codename} main" \
+        > /etc/apt/sources.list.d/azure-cli.list; \
+      pkgs="${pkgs} azure-cli"; \
+    fi; \
+    if [ -n "${pkgs}" ]; then \
+      apt-get update; \
+      apt-get install -y --no-install-recommends ${pkgs}; \
+      rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    if [ "${CODEMAN_INSTALL_GH}" = 1 ]; then gh --version; fi; \
+    if [ "${CODEMAN_INSTALL_AZ}" = 1 ]; then az version --output none; fi
+
+# Outside HOME so the seeded `~/.azure` (auth files only) never has to carry
+# extensions. gid 0 + group-writable, the same arbitrary-uid convention as HOME
+# below, so `az extension update` works as whatever uid the container runs as.
+# Created even without az; an empty directory costs nothing.
+ENV AZURE_EXTENSION_DIR=/opt/az-extensions
+RUN set -eux; \
+    install -d -m 0755 "${AZURE_EXTENSION_DIR}"; \
+    if [ "${CODEMAN_INSTALL_AZ}" = 1 ]; then \
+      az extension add --name azure-devops --only-show-errors; \
+      rm -rf /root/.azure; \
+    fi; \
+    chgrp -R 0 "${AZURE_EXTENSION_DIR}"; \
+    chmod -R g=u "${AZURE_EXTENSION_DIR}"
+
+# Only an installed CLI gets a helper entry (see server.Dockerfile).
+COPY docker/git-credential-azure-cli /usr/local/bin/git-credential-azure-cli
+RUN set -eux; \
+    if [ "${CODEMAN_INSTALL_GH}" = 1 ]; then \
+      for host in https://github.com https://gist.github.com; do \
+        git config --system "credential.${host}.helper" '!/usr/bin/gh auth git-credential'; \
+      done; \
+    fi; \
+    if [ "${CODEMAN_INSTALL_AZ}" = 1 ]; then \
+      chmod 0755 /usr/local/bin/git-credential-azure-cli; \
+      for host in https://dev.azure.com 'https://*.visualstudio.com'; do \
+        git config --system "credential.${host}.helper" /usr/local/bin/git-credential-azure-cli; \
+        git config --system "credential.${host}.useHttpPath" true; \
+      done; \
+    else \
+      rm -f /usr/local/bin/git-credential-azure-cli; \
+    fi
 
 # The npm-published agent CLIs, supplied by scripts/build-agent-image.mjs from
 # config/clis.stock.json so a new stock CLI needs no edit here. The default is
@@ -44,6 +127,10 @@ RUN apt-get update \
 # A different order is a different RUN string, which is a different layer hash and
 # so a needless cache miss between a bare `docker build` and a scripted one.
 ARG CLI_NPM_PACKAGES="@anthropic-ai/claude-code opencode-ai @openai/codex @google/gemini-cli"
+# uv/uvx: MCP servers are commonly launched with `uvx <package>` (e.g. the Nginx
+# Proxy Manager MCP), and Codex failed to enable them with "uvx not found". Copied
+# from the pinned upstream image into root-owned /usr/local/bin, never pip-installed.
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /usr/local/bin/
 RUN npm install -g ${CLI_NPM_PACKAGES} \
  && npm cache clean --force
 

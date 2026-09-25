@@ -14,6 +14,14 @@
 Object.assign(CodemanApp.prototype, {
   // Hooks (Claude Code hook events)
   _onHookIdlePrompt(data) {
+    // A prompt the server opened ALREADY acknowledged raises no alert here. Today that
+    // means the session is watching work it started itself (`acknowledgedReason` reads
+    // "watching 1 monitor"), so the pane is quiet because the agent is waiting for its
+    // own monitor, not for you. The item still exists and still shows in the drawer;
+    // only the tab alert and the desktop notification are declined. A page that reloads
+    // instead of receiving this event reaches the same conclusion from `acknowledgedAt`
+    // in seedApprovals (approvals-ui.js).
+    if (data.acknowledgedReason) return;
     // Always track pending hook - alert will show when switching away from session
     if (data.sessionId) {
       this.setPendingHook(data.sessionId, 'idle_prompt');
@@ -395,11 +403,25 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsShowUltracodeAgents').checked = settings.showUltracodeAgents ?? defaults.showUltracodeAgents ?? false;
     // Approvals Inbox: synced, default OFF (opt-in; only an explicit true enables).
     document.getElementById('appSettingsApprovalsInbox').checked = settings.approvalsInboxEnabled === true;
+    // Custom Model Endpoint Profiles: synced, default OFF. The toggle governs both
+    // the Run-menu picker's generated entries and this settings panel's visibility;
+    // the endpoint list itself is server state, loaded on demand below.
+    document.getElementById('appSettingsCustomModelEndpoints').checked = settings.customModelEndpointsEnabled === true;
+    // Assigning .checked above does not fire onchange, so the body's visibility
+    // (and its lazy load) needs an explicit sync on every open, not just a save.
+    this.applyCustomModelEndpointsVisibility();
+    // CLI management (docs/cli-enable-disable-plan.md): synced, default OFF.
+    document.getElementById('appSettingsCliManagement').checked = settings.cliManagementEnabled === true;
+    // Same reasoning as applyCustomModelEndpointsVisibility above: assigning
+    // .checked fires no onchange, so the list's visibility (and lazy load)
+    // needs an explicit sync on every open, not just a save.
+    this.applyCliManagementVisibility();
     // Read My Mind: synced, default OFF (opt-in; capture + prediction cost real tokens).
     document.getElementById('appSettingsReadMyMind').checked = settings.readMyMindEnabled === true;
     document.getElementById('appSettingsUltracodeFloatingWindows').checked =
       settings.ultracodeFloatingWindows ?? defaults.ultracodeFloatingWindows ?? false;
     document.getElementById('appSettingsShowMultiMonitorButton').checked = settings.showMultiMonitorButton ?? defaults.showMultiMonitorButton ?? false;
+    document.getElementById('appSettingsShowSplitButton').checked = settings.showSplitButton ?? defaults.showSplitButton ?? false;
     document.getElementById('appSettingsShowPlanUsageLimits').checked = this.planUsageChipEnabled(settings);
     document.getElementById('appSettingsShowRedrawButton').checked = settings.showRedrawButton ?? defaults.showRedrawButton ?? false;
     // Phone overview home screen: only meaningful under 600px, so the row is
@@ -408,6 +430,8 @@ Object.assign(CodemanApp.prototype, {
     // header), so the row is hidden elsewhere rather than offering a toggle that
     // changes nothing. Default ON — only an explicit false turns it off.
     document.getElementById('appSettingsLineageLines').checked = settings.sessionLineageLines ?? defaults.sessionLineageLines ?? true;
+    // Auto-name sessions: synced, default OFF (opt-in; only an explicit true enables).
+    document.getElementById('appSettingsAutoNameSessions').checked = settings.autoNameSessions === true;
     const lineageItem = document.getElementById('appSettingsLineageLinesItem');
     if (lineageItem) lineageItem.style.display = MobileDetection.getDeviceType() === 'desktop' ? '' : 'none';
     document.getElementById('appSettingsMobileOverview').checked = settings.mobileOverviewEnabled ?? defaults.mobileOverviewEnabled ?? false;
@@ -436,6 +460,8 @@ Object.assign(CodemanApp.prototype, {
     // overwrites the system clipboard on a gesture the user may have meant only as
     // a way to read, so it is opt-in rather than a default anyone has to discover.
     document.getElementById('appSettingsAutoCopySelection').checked = settings.autoCopySelection === true;
+    // Default ON, so an absent key reads as enabled rather than as off.
+    document.getElementById('appSettingsCopyStripMargin').checked = settings.copyStripMargin !== false;
     document.getElementById('appSettingsTerminalFont').value = settings.terminalFontFamily || '';
     this.populateTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight'), settings.terminalFontWeight);
     this.populateTerminalFontWeight(
@@ -507,6 +533,9 @@ Object.assign(CodemanApp.prototype, {
     document.getElementById('appSettingsNiceValue').value = niceSettings.niceValue ?? 10;
     // Model configuration (loaded from server)
     this.loadModelConfigForSettings();
+    // Custom Model Endpoint Profiles' own load is gated on the toggle above (see
+    // applyCustomModelEndpointsVisibility) — unlike model config, this GET is
+    // pointless work with the feature off, so it is not fired unconditionally.
     // Notification settings
     const notifPrefs = this.notificationManager?.preferences || {};
     document.getElementById('appSettingsNotifEnabled').checked = notifPrefs.enabled ?? true;
@@ -958,7 +987,7 @@ Object.assign(CodemanApp.prototype, {
       desc.textContent = inert
         ? 'The selected model has no 1M variant.'
         : base
-          ? 'Available for Fable 5.1, Fable 5, Opus and Opus 4.6.'
+          ? 'Available for Fable 5.1, Fable 5, Opus 5.5, Opus and Opus 4.6.'
           : 'With no model pinned, this starts new sessions on Opus with a 1M window.';
     }
   },
@@ -1284,29 +1313,53 @@ Object.assign(CodemanApp.prototype, {
     return flags[tool] !== false;
   },
 
+  /** Render the registry's enabled, available CLIs as welcome-screen actions. */
+  renderWelcomeCliActions() {
+    const container = document.getElementById('welcomeCliActions');
+    if (!container) return;
+    const catalog = Array.isArray(window.__codemanCliCatalog) ? window.__codemanCliCatalog : [];
+    container.replaceChildren();
+    for (const cli of catalog) {
+      if (!cli.enabled || !this.isCliAvailable(cli.id)) continue;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `welcome-btn welcome-btn-cli welcome-btn-${cli.id}`;
+      btn.dataset.mode = cli.id;
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('width', '20');
+      icon.setAttribute('height', '20');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('fill', 'none');
+      icon.setAttribute('stroke', 'currentColor');
+      icon.setAttribute('stroke-width', '2');
+      icon.setAttribute('aria-hidden', 'true');
+      const play = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      play.setAttribute('points', '5 3 19 12 5 21 5 3');
+      icon.appendChild(play);
+      btn.appendChild(icon);
+      // Same "Run <label>" text the static buttons had ("Run Claude Code", "Run Shell"),
+      // left translatable on purpose: i18n.js carries these strings, and a custom CLI's
+      // label simply has no dictionary entry, so it renders as typed.
+      btn.append(`Run ${cli.kind === 'shell' ? 'Shell' : cli.label}`);
+      btn.onclick = () => {
+        this.setRunMode(cli.id);
+        void this.run();
+      };
+      container.appendChild(btn);
+    }
+  },
+
   /**
-   * #200: show a welcome-screen button only where the thing it launches exists.
-   * The markup ships them hidden, so an old cached page can never flash a button
-   * for a tool this server does not have.
+   * #200: show a welcome-screen action only where the thing it launches exists.
+   * The registry catalog is injected with the initial document and is updated in
+   * place after a Settings toggle, so the page never offers a disabled CLI.
    */
   applyWelcomeCliVisibility() {
-    const buttons = [
-      ['welcomeClaudeBtn', 'claude'],
-      ['welcomeOpencodeBtn', 'opencode'],
-      ['welcomeAntigravityBtn', 'antigravity'],
-      ['welcomeOmpBtn', 'omp'],
-      ['welcomeGeminiBtn', 'gemini'],
-      ['welcomePiBtn', 'pi'],
-      ['welcomeGrokBtn', 'grok'],
-      ['welcomeDeepSeekBtn', 'deepseek'],
-      // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
-      // without cloudflared can only ever produce "cloudflared not found".
-      ['welcomeTunnelBtn', 'cloudflared'],
-    ];
-    for (const [id, tool] of buttons) {
-      const btn = document.getElementById(id);
-      if (btn) btn.style.display = this.isCliAvailable(tool) ? 'flex' : 'none';
-    }
+    this.renderWelcomeCliActions();
+    // Not a run mode, same reasoning: offering a Cloudflare Tunnel on a box
+    // without cloudflared can only ever produce "cloudflared not found".
+    const tunnel = document.getElementById('welcomeTunnelBtn');
+    if (tunnel) tunnel.style.display = this.isCliAvailable('cloudflared') ? 'flex' : 'none';
   },
 
   async loadTunnelStatus() {
@@ -2104,13 +2157,17 @@ Object.assign(CodemanApp.prototype, {
       showSubagents: document.getElementById('appSettingsShowSubagents').checked,
       showUltracodeAgents: document.getElementById('appSettingsShowUltracodeAgents').checked,
       approvalsInboxEnabled: document.getElementById('appSettingsApprovalsInbox').checked,
+      customModelEndpointsEnabled: document.getElementById('appSettingsCustomModelEndpoints').checked,
+      cliManagementEnabled: document.getElementById('appSettingsCliManagement').checked,
       readMyMindEnabled: document.getElementById('appSettingsReadMyMind').checked,
       ultracodeFloatingWindows: document.getElementById('appSettingsUltracodeFloatingWindows').checked,
       showMultiMonitorButton: document.getElementById('appSettingsShowMultiMonitorButton').checked,
+      showSplitButton: document.getElementById('appSettingsShowSplitButton').checked,
       showPlanUsageLimits: document.getElementById('appSettingsShowPlanUsageLimits').checked,
       showRedrawButton: document.getElementById('appSettingsShowRedrawButton').checked,
       mobileOverviewEnabled: document.getElementById('appSettingsMobileOverview').checked,
       sessionLineageLines: document.getElementById('appSettingsLineageLines').checked,
+      autoNameSessions: document.getElementById('appSettingsAutoNameSessions').checked,
       showSessionButton: document.getElementById('appSettingsShowSessionButton').checked,
       showAwayDigestButton: document.getElementById('appSettingsShowAwayDigestButton').checked,
       showCronButton: document.getElementById('appSettingsShowCronButton').checked,
@@ -2121,6 +2178,7 @@ Object.assign(CodemanApp.prototype, {
       tunnelEnabled: document.getElementById('appSettingsTunnelEnabled').checked,
       localEchoEnabled: document.getElementById('appSettingsLocalEcho').checked,
       autoCopySelection: document.getElementById('appSettingsAutoCopySelection').checked,
+      copyStripMargin: document.getElementById('appSettingsCopyStripMargin').checked,
       terminalFontFamily: document.getElementById('appSettingsTerminalFont').value.trim(),
       terminalFontWeight: this.readTerminalFontWeight(document.getElementById('appSettingsTerminalFontWeight')),
       terminalFontWeightBold: this.readTerminalFontWeight(
@@ -2336,6 +2394,10 @@ Object.assign(CodemanApp.prototype, {
       showPlanUsageLimits: _pul,
       showAttachmentsButton: _ahb,
       showFileViewerButton: _fvb,
+      // Desktop-only header button, per-device, and absent from
+      // SettingsUpdateSchema (.strict()) — sending it 400s the whole PUT
+      // (moving it into displayKeys alone is not the strip; this is).
+      showSplitButton: _ssp,
       webglRendererEnabled: _wgl,
       terminalWheelLocalScrollback: _twls,
       // Copy-on-select. Per-device (clipboard access differs by device and by
@@ -2343,6 +2405,10 @@ Object.assign(CodemanApp.prototype, {
       // and absent from SettingsUpdateSchema (.strict()), so sending it would
       // 400 the whole settings PUT.
       autoCopySelection: _acs,
+      // What the clipboard gets is a property of what this device is looking
+      // at, and the key is absent from SettingsUpdateSchema (.strict()), so
+      // sending it would 400 the whole settings PUT.
+      copyStripMargin: _csm,
       // Per-device by nature (the font must exist on the device) and absent
       // from SettingsUpdateSchema (.strict()) — sending it would 400 the PUT.
       terminalFontFamily: _tff,
@@ -2484,6 +2550,485 @@ Object.assign(CodemanApp.prototype, {
     }
   },
 
+  // ═══════════════════════════════════════════════════════════════
+  // Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md)
+  //
+  // CRUD against /api/model-endpoints, rendered into the Models settings section.
+  // Deliberately its own load/save pair rather than folded into openAppSettings/
+  // saveAppSettings: these are server-side infra records (like remote/docker
+  // hosts), not a settings-payload field, so the app-settings-structure guard's
+  // by-id contract does not apply to them — only the `customModelEndpointsEnabled`
+  // toggle itself goes through that path.
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Toggles the endpoint-management body's visibility to match the setting and,
+   * turning it on, lazily loads the endpoint list. Assigning `.checked` (as the
+   * settings load path does) fires no `change` event, so this must be called
+   * explicitly on open as well as wired to the checkbox's own onchange — a
+   * gate that only worked one of those two ways would show a stale "off"
+   * body right after opening, or a stale "on" one right after saving it off.
+   * With the feature off the body is a list of controls that do nothing, so it
+   * is hidden entirely rather than shown disabled.
+   */
+  applyCustomModelEndpointsVisibility() {
+    const enabled = document.getElementById('appSettingsCustomModelEndpoints').checked;
+    const body = document.getElementById('customModelEndpointsBody');
+    if (body) body.style.display = enabled ? '' : 'none';
+    if (enabled) this.loadCustomModelEndpointsForSettings();
+    else this.closeCustomModelHostEditor();
+    this._applyCustomModelAdminGate();
+  },
+
+  /**
+   * Endpoint writes are admin-only in multi-user mode (custom-model-routes.ts),
+   * and GET already answers a non-admin with an empty list, which hides every
+   * per-row Edit/Discover/Delete button on its own. The "+ Add endpoint" button
+   * has no row to hide behind, so it needs its own gate — otherwise a non-admin
+   * can open the form, fill it in, and get a 403 toast on Save. Wired to the
+   * `codeman:me` event (admin-ui.js) as well as called from
+   * applyCustomModelEndpointsVisibility(), because `window.__codemanUser`'s
+   * real role can resolve AFTER settings have already been opened once.
+   */
+  _applyCustomModelAdminGate() {
+    const addBtn = document.getElementById('customModelHostAddBtn');
+    if (!addBtn) return;
+    const me = window.__codemanUser || {};
+    const blocked = me.multiUser && me.role !== 'admin';
+    addBtn.style.display = blocked ? 'none' : '';
+  },
+
+  async loadCustomModelEndpointsForSettings() {
+    // GET /api/model-endpoints wraps its body in the { success, data } envelope
+    // like every other /api route (server.ts's preSerialization hook applies to
+    // arrays too) — _apiJson() unwraps it. A raw fetch().json() here would
+    // silently see the envelope object instead of the array and this panel
+    // would read as "No endpoints yet" forever, even with endpoints saved.
+    const hosts = await this._apiJson('/api/model-endpoints');
+    this._customModelHosts = Array.isArray(hosts) ? hosts : [];
+    this.renderCustomModelHostsList();
+  },
+
+  renderCustomModelHostsList() {
+    const list = document.getElementById('customModelHostsList');
+    if (!list) return;
+    const hosts = this._customModelHosts || [];
+    if (hosts.length === 0) {
+      list.innerHTML = '<p class="set-group-hint">No endpoints yet. Add one below to point a harness at a local or cloud OpenAI-compatible server.</p>';
+      return;
+    }
+    list.innerHTML = hosts
+      .map((h) => {
+        const modelCount = (h.models || []).length;
+        const modelSummary = modelCount === 0
+          ? 'No models discovered yet'
+          : `${modelCount} model${modelCount === 1 ? '' : 's'}${h.defaultModelId ? ` · default: ${escapeHtml(h.defaultModelId)}` : ' · no default set'}`;
+        // escapeHtml(JSON.stringify(h.id)) — not JSON.stringify(h.id) alone —
+        // because JSON.stringify's own double quotes would otherwise terminate
+        // this double-quoted attribute at the first one, and everything after
+        // parses as raw tag content rather than the rest of the quoted string.
+        // Same idiom as deleteCase's onclick in session-ui.js. h.id is
+        // regex-constrained server-side (safe either way) but the pattern must
+        // match everywhere it is used, including where the argument is not.
+        const idArg = escapeHtml(JSON.stringify(h.id));
+        return `
+          <div class="set-row" data-endpoint-id="${escapeHtml(h.id)}">
+            <div class="set-row-text">
+              <span class="set-row-label">${escapeHtml(h.label)}</span>
+              <span class="set-row-desc">${escapeHtml(h.baseUrl)} — ${modelSummary}</span>
+            </div>
+            <div class="set-row-actions">
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.discoverCustomModelHostModels(${idArg})">Discover</button>
+              <button type="button" class="btn-toolbar btn-sm" onclick="app.openCustomModelHostEditor(${idArg})">Edit</button>
+              <button type="button" class="btn-toolbar btn-danger btn-sm" onclick="app.deleteCustomModelHost(${idArg})">Delete</button>
+            </div>
+          </div>`;
+      })
+      .join('');
+  },
+
+  /** Opens the inline add/edit form. Pass no id to add a new endpoint. */
+  openCustomModelHostEditor(hostId) {
+    const host = hostId ? (this._customModelHosts || []).find((h) => h.id === hostId) : null;
+    this._editingCustomModelHostId = host ? host.id : null;
+    document.getElementById('customModelHostEditorTitle').textContent = host ? `Edit ${host.label}` : 'Add endpoint';
+    document.getElementById('customModelHostId').value = host?.id || '';
+    document.getElementById('customModelHostId').disabled = !!host; // id is immutable once created
+    document.getElementById('customModelHostLabel').value = host?.label || '';
+    document.getElementById('customModelHostBaseUrl').value = host?.baseUrl || '';
+    document.getElementById('customModelHostApiKey').value = ''; // the server never returns the real value (apiKeySet is a bool)
+    document.getElementById('customModelHostApiKey').placeholder = host?.apiKeySet ? '•••••••• (unchanged if left blank)' : '';
+    document.getElementById('customModelHostAuthStyle').value = host?.authStyle || 'bearer';
+    this._populateCustomModelDefaultSelect(host);
+    document.getElementById('customModelHostEditor').style.display = '';
+  },
+
+  closeCustomModelHostEditor() {
+    document.getElementById('customModelHostEditor').style.display = 'none';
+    this._editingCustomModelHostId = null;
+  },
+
+  _populateCustomModelDefaultSelect(host) {
+    const select = document.getElementById('customModelHostDefaultModel');
+    const models = host?.models || [];
+    select.innerHTML =
+      '<option value="">No default (picker uses the first discovered model)</option>' +
+      models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+    select.value = host?.defaultModelId || '';
+    select.disabled = models.length === 0;
+  },
+
+  async saveCustomModelHostFromEditor() {
+    const id = document.getElementById('customModelHostId').value.trim();
+    const label = document.getElementById('customModelHostLabel').value.trim();
+    const baseUrl = document.getElementById('customModelHostBaseUrl').value.trim();
+    const apiKeyInput = document.getElementById('customModelHostApiKey').value;
+    const authStyle = document.getElementById('customModelHostAuthStyle').value;
+    const defaultModelId = document.getElementById('customModelHostDefaultModel').value || undefined;
+    if (!id || !label || !baseUrl) {
+      this.showToast('Id, label and base URL are all required', 'warning');
+      return;
+    }
+    const editing = this._editingCustomModelHostId;
+    // PUT (server-side) treats an absent apiKey as "keep the stored one" — the
+    // browser never holds the real value to resend deliberately unchanged (see
+    // openCustomModelHostEditor and custom-model-routes.ts's applyStoredApiKey),
+    // so a blank field here means omitting the key entirely, not resending
+    // something we do not have. models/lastDiscoveredAt DO still need
+    // re-sending: PUT replaces the whole record, and this cached copy still
+    // carries both (only apiKey is redacted from what GET hands back).
+    const existing = editing ? (this._customModelHosts || []).find((h) => h.id === editing) : null;
+    const body = {
+      id,
+      label,
+      baseUrl,
+      authStyle,
+      defaultModelId,
+      apiKey: apiKeyInput || undefined,
+      models: existing?.models,
+      lastDiscoveredAt: existing?.lastDiscoveredAt,
+    };
+    try {
+      const res = await fetch(editing ? `/api/model-endpoints/${encodeURIComponent(editing)}` : '/api/model-endpoints', {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        this.showToast(data.error || 'Failed to save endpoint', 'error');
+        return;
+      }
+      this.showToast(editing ? 'Endpoint updated' : 'Endpoint added', 'success');
+      this.closeCustomModelHostEditor();
+      await this.loadCustomModelEndpointsForSettings();
+    } catch (err) {
+      this.showToast(`Failed to save endpoint: ${err.message}`, 'error');
+    }
+  },
+
+  async discoverCustomModelHostModels(hostId) {
+    this.showToast('Discovering models…', 'info');
+    try {
+      const res = await fetch(`/api/model-endpoints/${encodeURIComponent(hostId)}/discover-models`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) {
+        this.showToast(data.error || 'Discovery failed', 'error');
+        return;
+      }
+      this.showToast(`Found ${data.data.models.length} model${data.data.models.length === 1 ? '' : 's'}`, 'success');
+      await this.loadCustomModelEndpointsForSettings();
+    } catch (err) {
+      this.showToast(`Discovery failed: ${err.message}`, 'error');
+    }
+  },
+
+  async deleteCustomModelHost(hostId) {
+    const host = (this._customModelHosts || []).find((h) => h.id === hostId);
+    if (!confirm(`Delete endpoint "${host?.label || hostId}"? Any session currently pointed at it keeps running until cleared.`)) return;
+    try {
+      await fetch(`/api/model-endpoints/${encodeURIComponent(hostId)}`, { method: 'DELETE' });
+      await this.loadCustomModelEndpointsForSettings();
+    } catch (err) {
+      this.showToast(`Failed to delete endpoint: ${err.message}`, 'error');
+    }
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // CLI management (docs/cli-enable-disable-plan.md)
+  //
+  // CRUD against /api/clis, rendered into the Agents & CLIs settings section.
+  // Same load/save-pair-outside-openAppSettings reasoning as the Custom Model
+  // Endpoints block above: these are server-side registry records, not a
+  // settings-payload field — only the `cliManagementEnabled` toggle itself
+  // goes through openAppSettings/saveAppSettings.
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Same two-caller shape as applyCustomModelEndpointsVisibility (assigning
+   * .checked fires no change event, so this needs both an explicit call on
+   * open AND the checkbox's own onchange) and the same reasoning for hiding
+   * the whole list rather than showing it disabled: with the flag off the
+   * rows would be controls that only 403.
+   */
+  applyCliManagementVisibility() {
+    const enabled = document.getElementById('appSettingsCliManagement').checked;
+    const group = document.getElementById('cliListGroup');
+    if (group) group.style.display = enabled ? '' : 'none';
+    if (enabled) this.loadCliListForSettings();
+    else this.closeCliCustomForm();
+    this._applyCliManagementAdminGate();
+  },
+
+  /**
+   * Decision 5 (docs/cli-enable-disable-plan.md): hidden entirely for a
+   * non-admin in multi-user mode, not shown-empty. GET /api/clis already
+   * answers a non-admin with [], which empties the row list on its own; the
+   * "Add a custom CLI" row has no list row to hide behind, so it needs its
+   * own gate the same way the Custom Model Endpoints "+ Add" button does.
+   */
+  _applyCliManagementAdminGate() {
+    const group = document.getElementById('cliListGroup');
+    if (!group) return;
+    const me = window.__codemanUser || {};
+    const blocked = me.multiUser && me.role !== 'admin';
+    const featureOn = document.getElementById('appSettingsCliManagement')?.checked ?? false;
+    group.style.display = blocked || !featureOn ? 'none' : '';
+    const addRow = document.getElementById('cliCustomAddToggle');
+    if (addRow) addRow.style.display = blocked ? 'none' : '';
+  },
+
+  async loadCliListForSettings() {
+    // GET /api/clis wraps its body in the { success, data } envelope like every
+    // other /api route — _apiJson() unwraps it, same reasoning as the Custom
+    // Model Endpoints list load above.
+    const clis = await this._apiJson('/api/clis');
+    this._cliList = Array.isArray(clis) ? clis : [];
+    this._syncCliLaunchCatalog();
+    this.renderCliList();
+  },
+
+  /** Keep the launch surfaces in sync with Settings mutations without a reload. */
+  _syncCliLaunchCatalog() {
+    if (!Array.isArray(this._cliList) || this._cliList.length === 0) return;
+    window.__codemanCliCatalog = this._cliList.map((cli) => ({
+      id: cli.id,
+      label: cli.label,
+      shortBadge: cli.shortBadge,
+      order: cli.order,
+      kind: cli.kind,
+      enabled: cli.enabled,
+      available: cli.kind === 'shell' || (cli.enabled && cli.installed),
+    }));
+    window.__codemanCliAvailable = {
+      ...(window.__codemanCliAvailable || {}),
+      ...Object.fromEntries(this._cliList.map((cli) => [cli.id, cli.kind === 'shell' || (cli.enabled && cli.installed)])),
+    };
+    if (!window.__codemanCliCatalog.some((cli) => cli.id === this.runMode && cli.enabled)) {
+      this.setRunMode?.('claude');
+    }
+    this.applyWelcomeCliVisibility?.();
+    this.renderRegistryRunOptions?.();
+    this.renderMobileOverview?.();
+    const menu = document.getElementById('runModeMenu');
+    if (menu) this._refreshRunModeAvailability?.(menu);
+  },
+
+  renderCliList() {
+    const list = document.getElementById('cliListRows');
+    if (!list) return;
+    const clis = [...(this._cliList || [])].sort((a, b) => {
+      // Installed CLIs first, alphabetically; then not-installed, alphabetically.
+      if (a.installed !== b.installed) return a.installed ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+    if (clis.length === 0) {
+      list.innerHTML = '<p class="set-group-hint">No CLIs found.</p>';
+      return;
+    }
+    // Mirrors cli-registry-routes.ts's own isUndisableable(): a kind 'shell' entry
+    // is the one the backend refuses to ever disable (keyed on kind, never an id).
+    // Revised 2026-09-23: rather
+    // than render a permanently-greyed switch for it (which read as "broken"
+    // next to every other row's working toggle), shell gets NO switch at all —
+    // a plain "Always available" label, so there is nothing to click that
+    // could look like it should work but doesn't.
+    list.innerHTML = clis
+      .map((c) => {
+        const idArg = escapeHtml(JSON.stringify(c.id));
+        const untoggleable = c.kind === 'shell';
+        const installBtn =
+          c.stock && !c.installed
+            ? `<button type="button" class="btn-toolbar btn-sm" onclick="app.installCliEntry(${idArg})" id="cliInstallBtn-${escapeHtml(c.id)}">Install</button>`
+            : '';
+        const customActions = c.stock
+          ? ''
+          : `<button type="button" class="btn-toolbar btn-sm" onclick="app.openCliCustomForm(${idArg})">Edit</button>
+             <button type="button" class="btn-toolbar btn-danger btn-sm" onclick="app.deleteCliCustom(${idArg})">Delete</button>`;
+        const toggle = untoggleable
+          ? '<span class="set-row-desc">Always available</span>'
+          : `<label class="switch switch-sm">
+              <input type="checkbox" ${c.enabled ? 'checked' : ''} onchange="app.toggleCliEnabled(${idArg}, this)">
+              <span class="slider"></span>
+            </label>`;
+        return `
+          <div class="set-row" data-cli-id="${escapeHtml(c.id)}">
+            <div class="set-row-text">
+              <span class="set-row-label">${escapeHtml(c.label)} <span class="set-scope">${escapeHtml(c.shortBadge)}</span></span>
+              <span class="set-row-desc">${c.installed ? 'Installed' : 'Not installed'}${c.stock ? '' : ' · custom'}</span>
+            </div>
+            <div class="set-row-actions">
+              ${installBtn}
+              ${customActions}
+              ${toggle}
+            </div>
+          </div>`;
+      })
+      .join('');
+  },
+
+  /**
+   * ⚠️ A successful toggle must patch `window.__codemanCliAvailable` and refresh
+   * every surface that reads it, or the change is invisible everywhere except
+   * this settings row until the next full page reload — `window.__codemanCliAvailable`
+   * is injected ONCE at initial page render (server.ts) and nothing else refetches
+   * it. Same pattern `installDeepSeekProfile()` already uses for the same reason.
+   */
+  async toggleCliEnabled(id, checkbox) {
+    const next = checkbox.checked;
+    const res = await this._api(`/api/clis/${encodeURIComponent(id)}`, { method: 'PUT', body: { enabled: next } });
+    if (!res || !res.ok) {
+      checkbox.checked = !next; // revert on failure — the row must not lie about server state
+      let detail = '';
+      try {
+        detail = (await res?.json())?.error || '';
+      } catch {
+        /* no body to read */
+      }
+      this.showToast(`Failed to ${next ? 'enable' : 'disable'} "${id}"${detail ? `: ${detail}` : ''}`, 'error');
+      return;
+    }
+    await this.loadCliListForSettings();
+  },
+
+  async installCliEntry(id) {
+    // Installing runs a command on the server, so it never happens on a single click:
+    // the confirm names the exact command POST /api/clis/:id/install would run (the
+    // #343 review's "auto-install may end up behind an explicit confirm").
+    const entry = (this._cliList || []).find((c) => c.id === id);
+    const label = entry?.label || id;
+    const command = entry?.installCommand;
+    const prompt = command
+      ? `Install ${label}? This runs the following on the Codeman server:\n\n${command}`
+      : `Install ${label}? This runs its official install command on the Codeman server.`;
+    if (!confirm(prompt)) return;
+    const btn = document.getElementById(`cliInstallBtn-${id}`);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Installing…';
+    }
+    try {
+      const res = await this._api(`/api/clis/${encodeURIComponent(id)}/install`, { method: 'POST' });
+      if (!res || !res.ok) {
+        let detail = '';
+        try {
+          detail = (await res?.json())?.error || '';
+        } catch {
+          /* no body to read */
+        }
+        this.showToast(`Installing "${id}" failed${detail ? `: ${detail}` : ''}`, 'error');
+        return;
+      }
+      this.showToast(`Installed "${id}"`, 'success');
+    } finally {
+      await this.loadCliListForSettings();
+    }
+  },
+
+  /**
+   * Pass no id to create a new entry; pass an existing CUSTOM id to edit one.
+   * ⚠️ GET /api/clis deliberately excludes discovery/launch (Phase 2's own
+   * scope), so an edit cannot be pre-filled with the entry's existing binary
+   * or argv — those two fields start blank and must be re-entered, since the
+   * update endpoint (PUT /api/clis/custom/:id) replaces the whole launch
+   * spec rather than patching it. id/label/badge DO come from the list row.
+   */
+  openCliCustomForm(editId) {
+    const form = document.getElementById('cliCustomForm');
+    const errorEl = document.getElementById('cliCustomFormError');
+    if (!form) return;
+    const existing = editId ? (this._cliList || []).find((c) => c.id === editId) : null;
+    this._editingCliCustomId = existing ? existing.id : null;
+    document.getElementById('cliCustomId').value = existing ? existing.id : '';
+    document.getElementById('cliCustomId').disabled = !!existing; // id is immutable once created
+    document.getElementById('cliCustomLabel').value = existing ? existing.label : '';
+    document.getElementById('cliCustomBadge').value = existing ? existing.shortBadge : '';
+    document.getElementById('cliCustomBinary').value = '';
+    document.getElementById('cliCustomArgv').value = '';
+    document.getElementById('cliCustomSubmit').textContent = existing ? 'Save' : 'Create';
+    if (errorEl) errorEl.style.display = 'none';
+    form.style.display = '';
+  },
+
+  closeCliCustomForm() {
+    const form = document.getElementById('cliCustomForm');
+    if (form) form.style.display = 'none';
+    this._editingCliCustomId = null;
+  },
+
+  /** Wired to #cliCustomForm's onsubmit; `event` is the submit event. */
+  async submitCliCustomForm(event) {
+    event.preventDefault();
+    const errorEl = document.getElementById('cliCustomFormError');
+    const showError = (msg) => {
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.style.display = '';
+      }
+    };
+    const id = document.getElementById('cliCustomId').value.trim();
+    const label = document.getElementById('cliCustomLabel').value.trim();
+    const shortBadge = document.getElementById('cliCustomBadge').value.trim();
+    const binaries = document.getElementById('cliCustomBinary').value.trim().split(/\s+/).filter(Boolean);
+    const argv = document.getElementById('cliCustomArgv').value.trim().split(/\s+/).filter(Boolean);
+    if (!id || !label || !shortBadge || binaries.length === 0 || argv.length === 0) {
+      showError('All fields are required.');
+      return;
+    }
+    const editing = this._editingCliCustomId;
+    const path = editing ? `/api/clis/custom/${encodeURIComponent(editing)}` : '/api/clis';
+    const method = editing ? 'PUT' : 'POST';
+    const res = await this._api(path, { method, body: { id, label, shortBadge, binaries, argv } });
+    if (!res || !res.ok) {
+      let detail = 'Request failed';
+      try {
+        detail = (await res?.json())?.error || detail;
+      } catch {
+        /* no body to read */
+      }
+      showError(detail);
+      return;
+    }
+    this.closeCliCustomForm();
+    await this.loadCliListForSettings();
+  },
+
+  async deleteCliCustom(id) {
+    const entry = (this._cliList || []).find((c) => c.id === id);
+    if (!confirm(`Delete custom CLI "${entry?.label || id}"? This cannot be undone.`)) return;
+    const res = await this._api(`/api/clis/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res || !res.ok) {
+      let detail = '';
+      try {
+        detail = (await res?.json())?.error || '';
+      } catch {
+        /* no body to read */
+      }
+      this.showToast(`Failed to delete "${id}"${detail ? `: ${detail}` : ''}`, 'error');
+      return;
+    }
+    await this.loadCliListForSettings();
+  },
 
   // ═══════════════════════════════════════════════════════════════
   // Visibility Settings & Device-Specific Defaults
@@ -2525,6 +3070,7 @@ Object.assign(CodemanApp.prototype, {
         showUltracodeAgents: false,
         ultracodeFloatingWindows: false,
         showMultiMonitorButton: false,
+        showSplitButton: false,
         // Desktop defaults this ON (see planUsageChipEnabled); handhelds keep it
         // OFF so the phone header stays minimal and the mobile-header-buttons
         // policy guard keeps passing.
@@ -2730,6 +3276,13 @@ Object.assign(CodemanApp.prototype, {
       multiMonitorBtn.classList.toggle('btn-multimonitor--hidden', !showMultiMonitorButton);
     }
 
+    // Split button — hidden by default, and hard-gated to desktop widths
+    // regardless of the setting (window.CodemanSplitPane.SPLIT_PANE_MIN_WIDTH,
+    // matching HOME_SESSIONS_MIN_WIDTH's JS-check + media-query-backstop
+    // pattern — the CSS in styles.css is the backstop, this is the check).
+    const showSplitButton = settings.showSplitButton ?? defaults.showSplitButton ?? false;
+    this._applySplitButtonVisibility?.(showSplitButton);
+
     // Ultracode/Workflow agents launcher — hidden by default; reveal when enabled.
     // Marker class only (base is display:inline-flex !important) so it's auto-excluded
     // from the mobile-header-buttons-policy guard.
@@ -2866,7 +3419,7 @@ Object.assign(CodemanApp.prototype, {
     const changed = orientationChanged || previousDetail !== detail || previousSort !== sort;
     if (orientationChanged) {
       this.updateTabOverflowMode?.();
-      if (!settleRailWidth) this.fitAddon?.fit();
+      if (!settleRailWidth) this.syncTerminalGeometry?.();
     }
     // applyTabWrapSettings() is the ONE owner of tabs-show-folder and is
     // rail-aware, so it has to run AFTER the two attributes above — the
@@ -3141,11 +3694,12 @@ Object.assign(CodemanApp.prototype, {
           'terminalFontFamily', 'terminalFontWeight', 'terminalFontWeightBold',
           'language',
           'terminalWheelLocalScrollback',
-          'autoCopySelection',
+          'autoCopySelection', 'copyStripMargin',
           'showSessionButton', 'showAwayDigestButton', 'showCronButton',
           'showTabDetachButton',
           'mobileOverviewEnabled',
           'sessionLineageLines',
+          'showSplitButton',
         ]);
         // The plan-usage chip is a PER-DEVICE display setting (desktop default ON,
         // handheld default OFF): desktop can show it while mobile stays hidden. Drop
@@ -3539,4 +4093,17 @@ Object.assign(CodemanApp.prototype, {
     }
     this.subagentPanelVisible = false;
   },
+});
+
+// window.__codemanUser's real role can resolve after settings have already been
+// opened once (admin-ui.js fetches /api/me asynchronously and dispatches this on
+// arrival), so the Custom Model Endpoints admin gate needs to be re-applied when
+// it does, not just when the modal opens. Optional chaining on addEventListener
+// itself: several frontend tests (run-mode-ui.test.ts) load this file into a vm
+// context with a minimal fake `document` that has no event-target methods at
+// all, and a module-level statement that throws there fails the whole file's
+// evaluation, not just this feature.
+document.addEventListener?.('codeman:me', () => {
+  window.app?._applyCustomModelAdminGate?.();
+  window.app?._applyCliManagementAdminGate?.();
 });

@@ -9,6 +9,9 @@
 **/.env
 **/.env.*
 !**/.env.example
+# Same shape: docker/docker-compose.override.yml is the documented home for
+# host-specific settings, so it must not ride COPY . . into the image either.
+**/docker-compose.override.*
 node_modules
 dist
 coverage

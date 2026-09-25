@@ -192,6 +192,7 @@
         </button>
         <button class="btn-icon-header btn-file-viewer" onclick="app.toggleFileBrowserButton()" title="File Viewer" aria-label="Open file viewer" aria-expanded="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
         <button class="btn-icon-header btn-multimonitor btn-multimonitor--hidden" onclick="app.launchMultiMonitor()" title="Open Codeman across all displays" aria-label="Open Codeman across all displays"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="9" rx="1.5"/><rect x="11" y="9" width="11" height="8" rx="1.5"/></svg></button>
+        <button class="btn-icon-header btn-split btn-split--hidden" onclick="app.openSplitPicker(event)" title="Split: open a second session beside this one" aria-label="Split: open a second session beside this one" aria-pressed="false"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg></button>
         <button class="btn-icon-header btn-ultracode-agents btn-ultracode-agents--hidden" onclick="app.toggleUltracodeAgentsPanel()" title="Ultracode / Workflow agents" aria-label="Open ultracode workflow agents"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.2 7.2 15.6 11M8.2 16.8 15.6 13"/></svg></button>
         <div class="header-plan-usage header-plan-usage--hidden" id="planUsageChip" title="Claude and Codex plan usage limits">—</div>
         <button class="btn-icon-header btn-notifications" onclick="app.toggleNotifications()" title="Notifications" aria-label="Toggle notifications" style="display:none;">
@@ -212,6 +213,36 @@
       <span class="offline-banner-text" id="offlineBannerText">No connection to the Codeman server</span>
       <span class="offline-banner-detail" id="offlineBannerDetail"></span>
       <button class="offline-banner-retry" id="offlineBannerRetry" onclick="app.retryConnection()">Retry now</button>
+    </div>
+
+    <!-- Remote-host unreachable: the machine SLEEPS, the local ssh pane stalls
+         silently (send-keys succeeds against it, so typed input would vanish) and
+         Codeman can wake it. Amber, not red: the session is fine, the host is
+         asleep. Without a configured wake target the action becomes "Configure
+         WoL" and opens the small config dialog. -->
+    <div class="offline-banner host-wake-banner" id="hostWakeBanner" role="status" hidden>
+      <span class="offline-banner-dot" aria-hidden="true"></span>
+      <span class="offline-banner-text" id="hostWakeBannerText">Remote host is unreachable</span>
+      <span class="offline-banner-detail" id="hostWakeBannerDetail"></span>
+      <button class="offline-banner-retry" id="hostWakeBannerAction" onclick="app.hostWakeAction()">Wake</button>
+    </div>
+
+    <!-- Reboot-restore offer: shown when the server found sessions a host reboot
+         killed and is asking whether to rebuild them. Populated by
+         reboot-restore-ui.js; nothing is created until the user clicks. -->
+    <div class="reboot-restore-banner" id="rebootRestoreBanner" role="status" hidden>
+      <span class="reboot-restore-banner-icon" aria-hidden="true">↺</span>
+      <span class="reboot-restore-banner-text" id="rebootRestoreBannerText"></span>
+      <span class="reboot-restore-banner-detail" id="rebootRestoreBannerDetail"></span>
+      <span class="reboot-restore-banner-note">Conversations return; terminal history does not.</span>
+      <button
+        class="reboot-restore-banner-accept"
+        id="rebootRestoreBannerAccept"
+        onclick="app.restoreRebootSessions()"
+      >
+        Restore
+      </button>
+      <button class="reboot-restore-banner-dismiss" onclick="app.dismissRebootRestore()">Dismiss</button>
     </div>
 
     <!-- Timer Banner (shown when timed run is active) -->
@@ -421,41 +452,10 @@
           <h1 class="welcome-title">Codeman</h1>
           <p class="welcome-desc">Manage AI Coding tools in persistent tmux sessions.</p>
           <div class="welcome-actions">
-            <button class="welcome-btn welcome-btn-claude" id="welcomeClaudeBtn" style="display: none;" onclick="app.setRunMode('claude'); app.runClaude()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run Claude Code
-            </button>
+            <div class="welcome-cli-actions" id="welcomeCliActions"></div>
             <button class="welcome-btn welcome-btn-tunnel" id="welcomeTunnelBtn" style="display: none;" onclick="app.toggleTunnelFromWelcome()">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
               Cloudflare Tunnel
-            </button>
-            <button class="welcome-btn welcome-btn-opencode" id="welcomeOpencodeBtn" style="display: none;" onclick="app.setRunMode('opencode'); app.runOpenCode()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run OpenCode
-            </button>
-            <button class="welcome-btn welcome-btn-antigravity" id="welcomeAntigravityBtn" style="display: none;" onclick="app.setRunMode('antigravity'); app.runAntigravity()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run Antigravity
-            </button>
-            <button class="welcome-btn welcome-btn-gemini" id="welcomeGeminiBtn" style="display: none;" onclick="app.setRunMode('gemini'); app.runGemini()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run Gemini
-            </button>
-            <button class="welcome-btn welcome-btn-pi" id="welcomePiBtn" style="display: none;" onclick="app.setRunMode('pi'); app.runPi()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run Pi
-            </button>
-            <button class="welcome-btn welcome-btn-grok" id="welcomeGrokBtn" style="display: none;" onclick="app.setRunMode('grok'); app.runGrok()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run Grok
-            </button>
-            <button class="welcome-btn welcome-btn-deepseek" id="welcomeDeepSeekBtn" style="display: none;" onclick="app.setRunMode('deepseek'); app.runDeepSeek()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run DeepSeek
-            </button>
-            <button class="welcome-btn welcome-btn-omp" id="welcomeOmpBtn" style="display: none;" onclick="app.setRunMode('omp'); app.runOmp()">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Run OMP
             </button>
           </div>
           <div class="welcome-qr" id="welcomeQr" onclick="app.toggleWelcomeQrSize()">
@@ -618,39 +618,21 @@
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <div class="run-mode-menu" id="runModeMenu">
-              <button class="run-mode-option" data-mode="claude" onclick="app.setRunMode('claude')">
-                <span class="run-mode-dot claude"></span>Claude Code
-              </button>
-              <button class="run-mode-option" data-mode="opencode" onclick="app.setRunMode('opencode')">
-                <span class="run-mode-dot opencode"></span>OpenCode
-              </button>
-              <button class="run-mode-option" data-mode="codex" onclick="app.setRunMode('codex')">
-                <span class="run-mode-dot codex"></span>Codex
-              </button>
-              <button class="run-mode-option" data-mode="gemini" onclick="app.setRunMode('gemini')">
-                <span class="run-mode-dot gemini"></span>Gemini
-              </button>
-              <button class="run-mode-option" data-mode="antigravity" onclick="app.setRunMode('antigravity')">
-                <span class="run-mode-dot antigravity"></span>Antigravity
-              </button>
-              <button class="run-mode-option" data-mode="pi" onclick="app.setRunMode('pi')">
-                <span class="run-mode-dot pi"></span>Pi
-              </button>
-              <button class="run-mode-option" data-mode="grok" onclick="app.setRunMode('grok')">
-                <span class="run-mode-dot grok"></span>Grok
-              </button>
-              <button class="run-mode-option" data-mode="deepseek" onclick="app.setRunMode('deepseek')">
-                <span class="run-mode-dot deepseek"></span>DeepSeek
-              </button>
+              <div class="run-mode-cli-options" id="runModeCliOptions"></div>
               <!-- Shown only when `dsh` is installed but no pane-capable profile is:
                    DeepSeek ships no terminal front door, so the fix is an install,
                    not a greyed-out entry the user cannot act on. -->
               <button class="run-mode-option run-mode-option-install" data-action="deepseek-install" id="runModeDeepSeekInstall" style="display: none;" onclick="app.installDeepSeekProfile()">
                 <span class="run-mode-dot deepseek"></span>DeepSeek — add a terminal profile…
               </button>
-              <button class="run-mode-option" data-mode="omp" onclick="app.setRunMode('omp')">
-                <span class="run-mode-dot omp"></span>OMP
-              </button>
+              <!-- Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): one
+                   generated entry per (harness, saved endpoint) pair, e.g. "Claude Code
+                   (llama.cpp)". Built entirely by _refreshCustomModelRunOptions() — hidden
+                   when the feature is off or no endpoint has a usable default model, never
+                   a fixed per-harness duplicate in this markup. -->
+              <div class="run-mode-sep" id="runModeCustomModelSep" style="display: none;"></div>
+              <div class="run-mode-header" id="runModeCustomModelHeader" style="display: none;">Custom Endpoints</div>
+              <div class="run-mode-custom-models" id="runModeCustomModels"></div>
               <div class="run-mode-sep"></div>
               <button class="run-mode-option" data-mode="shell" onclick="app.setRunMode('shell')">
                 <span class="run-mode-dot shell"></span>Terminal / Shell
@@ -899,6 +881,67 @@
           <button class="btn-danger" id="webviewDeleteBtn" onclick="app.deleteWebview()">Delete</button>
           <button class="btn-secondary" onclick="app.closeWebviewModal()">Cancel</button>
           <button class="btn-primary" onclick="app.saveWebview()">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Model Endpoint Profiles: "which model" picker (docs/custom-model-endpoints-plan.md).
+         Shown only when the chosen endpoint has more than one discovered model — see
+         selectCustomModelEntry() in session-ui.js, which skips straight to launch otherwise. -->
+    <div class="modal" id="customModelPickModal">
+      <div class="modal-backdrop" onclick="app.closeCustomModelPickModal()"></div>
+      <div class="modal-content modal-sm">
+        <div class="modal-header">
+          <h3 id="customModelPickTitle">Choose a model</h3>
+          <button class="modal-close" onclick="app.closeCustomModelPickModal()" aria-label="Close model picker">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="form-hint" id="customModelPickHint"></p>
+          <div id="customModelPickList" class="run-mode-custom-models"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Model Endpoint Profiles: llama-swap model-swap confirmation
+         (docs/custom-model-endpoints-plan.md) — replaces a native confirm()
+         popup, shown when switching would unload a model another live
+         session is actively using. See _confirmModelSwap() in session-ui.js. -->
+    <div class="modal" id="customModelSwapConfirmModal">
+      <div class="modal-backdrop" onclick="app._resolveModelSwapConfirm(false)"></div>
+      <div class="modal-content modal-sm">
+        <div class="modal-header">
+          <h3>Switch models?</h3>
+          <button class="modal-close" onclick="app._resolveModelSwapConfirm(false)" aria-label="Cancel">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="form-hint" id="customModelSwapConfirmMessage"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-toolbar" onclick="app._resolveModelSwapConfirm(false)">Cancel</button>
+          <button class="btn-toolbar btn-primary" onclick="app._resolveModelSwapConfirm(true)">Switch anyway</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Model Endpoint Profiles: context-window-too-small warning
+         (docs/custom-model-endpoints-plan.md) — shown before launching a CLI
+         whose own fixed system-prompt/tool-schema overhead exceeds the
+         model's real discovered context, which guarantees a first-message
+         failure regardless of CLAUDE_CODE_MAX_CONTEXT_TOKENS. See
+         _confirmContextWarning() in session-ui.js. -->
+    <div class="modal" id="customModelContextWarningModal">
+      <div class="modal-backdrop" onclick="app._resolveContextWarningConfirm(false)"></div>
+      <div class="modal-content modal-sm">
+        <div class="modal-header">
+          <h3>Context window too small</h3>
+          <button class="modal-close" onclick="app._resolveContextWarningConfirm(false)" aria-label="Cancel">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="form-hint" id="customModelContextWarningMessage" style="white-space: pre-wrap;"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-toolbar" onclick="app._resolveContextWarningConfirm(false)">Cancel</button>
+          <button class="btn-toolbar btn-primary" onclick="app._resolveContextWarningConfirm(true)">Launch anyway</button>
         </div>
       </div>
     </div>
@@ -1692,6 +1735,13 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsAutoCopySelection"><span class="slider"></span></label>
                   </div>
+                  <div class="set-row" data-search="copy indent margin gutter dedent trim leading whitespace paste">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Trim the pane margin on copy</span>
+                      <span class="set-row-desc">Drop the left margin a full-screen agent CLI paints down its own edge, so copied text pastes flush instead of indented. Each CLI declares its own width, and the strip is never wider than the indent every selected line shares, so nesting inside the selection is kept. Claude Code and Codex declare a margin today; a shell, and any CLI that declares none, is left alone.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsCopyStripMargin"><span class="slider"></span></label>
+                  </div>
                 </div>
               </div>
 
@@ -1826,6 +1876,7 @@
                     <label class="set-chip" data-preview="header" data-preview-order="9"><input type="checkbox" id="appSettingsShowAttachmentsButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>Attachments</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="10"><input type="checkbox" id="appSettingsShowFileViewerButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>File Viewer</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="11"><input type="checkbox" id="appSettingsShowMultiMonitorButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="13" height="9" rx="1.5"/><rect x="11" y="9" width="11" height="8" rx="1.5"/></svg><span>Multi-monitor</span></label>
+                    <label class="set-chip" data-preview="header" data-preview-order="11.5"><input type="checkbox" id="appSettingsShowSplitButton"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/></svg><span>Split</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="13" data-preview-text="42%"><input type="checkbox" id="appSettingsShowPlanUsageLimits"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4.5-5"/></svg><span>Plan Usage</span></label>
                     <label class="set-chip" data-preview="header" data-preview-order="14"><input type="checkbox" id="appSettingsShowLifecycleLog"><svg class="set-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg><span>Lifecycle Log</span></label>
                   </div>
@@ -2048,6 +2099,13 @@
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsLineageLines" checked><span class="slider"></span></label>
                   </div>
+                  <div class="set-row" id="appSettingsAutoNameSessionsItem" data-search="auto name session title first prompt tab rename">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Auto-name Sessions <span class="set-tag">synced</span></span>
+                      <span class="set-row-desc">Title a new tab after its first prompt, keeping the case prefix. Renamed tabs are never touched.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsAutoNameSessions"><span class="slider"></span></label>
+                  </div>
                   <div class="set-row" id="appSettingsMobileOverviewItem" data-search="overview home screen phone logo">
                     <div class="set-row-text">
                       <span class="set-row-label">Overview Home Screen <span class="set-tag">phone</span></span>
@@ -2080,6 +2138,8 @@
                     <option value="claude-fable-5-1[1m]" data-variant="1m" data-base="claude-fable-5-1">Fable 5.1 (1M context)</option>
                     <option value="claude-fable-5" data-meta="Most powerful" data-base="claude-fable-5" data-ctx="1">Fable 5</option>
                     <option value="claude-fable-5[1m]" data-variant="1m" data-base="claude-fable-5">Fable 5 (1M context)</option>
+                    <option value="claude-opus-5-5" data-meta="Latest Opus" data-base="claude-opus-5-5" data-ctx="1">Opus 5.5</option>
+                    <option value="claude-opus-5-5[1m]" data-variant="1m" data-base="claude-opus-5-5">Opus 5.5 (1M context)</option>
                     <option value="opus" data-meta="Most capable" data-base="opus" data-ctx="1">Opus</option>
                     <option value="opus[1m]" data-variant="1m" data-base="opus">Opus (1M context)</option>
                     <option value="claude-opus-4-6" data-meta="Previous generation" data-base="claude-opus-4-6" data-ctx="1">Opus 4.6</option>
@@ -2090,7 +2150,7 @@
                   <div class="set-row" id="appSettingsContextRow" data-search="1m context window opus long">
                     <div class="set-row-text">
                       <span class="set-row-label">1M context window</span>
-                      <span class="set-row-desc" id="appSettingsContextDesc">Available for Fable 5.1, Fable 5, Opus and Opus 4.6.</span>
+                      <span class="set-row-desc" id="appSettingsContextDesc">Available for Fable 5.1, Fable 5, Opus 5.5, Opus and Opus 4.6.</span>
                     </div>
                     <label class="switch switch-sm"><input type="checkbox" id="appSettingsOpusContext1m"><span class="slider"></span></label>
                   </div>
@@ -2132,6 +2192,7 @@
                       <option value="">Default (CLI default)</option>
                       <option value="claude-fable-5-1">Fable 5.1 (Latest)</option>
                       <option value="claude-fable-5">Fable 5 (Most powerful)</option>
+                      <option value="claude-opus-5-5">Opus 5.5 (Latest Opus)</option>
                       <option value="opus">Opus (Most capable)</option>
                       <option value="sonnet">Sonnet (Balanced)</option>
                       <option value="haiku">Haiku (Fast &amp; cheap)</option>
@@ -2147,6 +2208,7 @@
                         <option value="opus">Opus</option>
                         <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
+                        <option value="claude-opus-5-5">Opus 5.5</option>
                       </select>
                     </div>
                     <div class="set-mini">
@@ -2158,6 +2220,7 @@
                         <option value="opus">Opus</option>
                         <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
+                        <option value="claude-opus-5-5">Opus 5.5</option>
                       </select>
                     </div>
                     <div class="set-mini">
@@ -2169,6 +2232,7 @@
                         <option value="opus">Opus</option>
                         <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
+                        <option value="claude-opus-5-5">Opus 5.5</option>
                       </select>
                     </div>
                     <div class="set-mini">
@@ -2180,6 +2244,7 @@
                         <option value="opus">Opus</option>
                         <option value="claude-fable-5-1">Fable 5.1</option>
                         <option value="claude-fable-5">Fable 5</option>
+                        <option value="claude-opus-5-5">Opus 5.5</option>
                       </select>
                     </div>
                   </div>
@@ -2192,6 +2257,60 @@
                   </div>
                 </div>
               </div>
+
+              <div class="set-group" id="customModelEndpointsGroup">
+                <div class="set-group-head"><h4>Custom model endpoints</h4><span class="set-scope">synced</span></div>
+                <p class="set-group-hint">Point a harness at your own OpenAI-compatible server (llama.cpp, vLLM, DGX Spark, Azure AI Foundry, OpenRouter) instead of its native cloud backend. When on, the Run menu offers an extra entry per harness that supports it, per saved endpoint.</p>
+                <div class="set-group-body">
+                  <div class="set-row" data-search="custom model endpoint llama.cpp local llm run menu picker">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Enable custom model endpoints</span>
+                      <span class="set-row-desc">Adds a per-endpoint entry to the Run menu for every harness that can redirect to one.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsCustomModelEndpoints" onchange="app.applyCustomModelEndpointsVisibility()"><span class="slider"></span></label>
+                  </div>
+                  <!-- Gated on the toggle above (applyCustomModelEndpointsVisibility): with the
+                       feature off, a list of endpoints that do nothing is worse than nothing. -->
+                  <div id="customModelEndpointsBody" style="display:none">
+                    <div id="customModelHostsList" class="set-group-body" data-search="endpoints"></div>
+                    <button type="button" class="btn-toolbar btn-sm" id="customModelHostAddBtn" onclick="app.openCustomModelHostEditor()">+ Add endpoint</button>
+                    <div id="customModelHostEditor" class="set-inline-form" style="display:none">
+                      <h5 id="customModelHostEditorTitle">Add endpoint</h5>
+                      <div class="set-row has-field">
+                        <div class="set-row-text"><span class="set-row-label">Id</span><span class="set-row-desc">Short, stable — used in URLs, never shown to the CLI.</span></div>
+                        <input type="text" id="customModelHostId" class="set-input" placeholder="llama-cpp-local">
+                      </div>
+                      <div class="set-row has-field">
+                        <div class="set-row-text"><span class="set-row-label">Label</span></div>
+                        <input type="text" id="customModelHostLabel" class="set-input" placeholder="llama.cpp (local)">
+                      </div>
+                      <div class="set-row has-field">
+                        <div class="set-row-text"><span class="set-row-label">Base URL</span></div>
+                        <input type="text" id="customModelHostBaseUrl" class="set-input" placeholder="http://192.168.1.50:8080">
+                      </div>
+                      <div class="set-row has-field">
+                        <div class="set-row-text"><span class="set-row-label">API key</span><span class="set-row-desc">Optional. Left blank on edit keeps the existing key.</span></div>
+                        <input type="password" id="customModelHostApiKey" class="set-input" autocomplete="new-password">
+                      </div>
+                      <div class="set-row has-field">
+                        <div class="set-row-text"><span class="set-row-label">Auth header</span><span class="set-row-desc">Never send both — some servers hang indefinitely.</span></div>
+                        <select id="customModelHostAuthStyle" class="set-select">
+                          <option value="bearer">Authorization: Bearer (default)</option>
+                          <option value="api-key">api-key header (Azure)</option>
+                        </select>
+                      </div>
+                      <div class="set-row has-field">
+                        <div class="set-row-text"><span class="set-row-label">Default model</span><span class="set-row-desc">What the Run-menu picker applies for this endpoint. Discover models first.</span></div>
+                        <select id="customModelHostDefaultModel" class="set-select" disabled></select>
+                      </div>
+                      <div class="set-row-actions">
+                        <button type="button" class="btn-toolbar btn-sm" onclick="app.saveCustomModelHostFromEditor()">Save</button>
+                        <button type="button" class="btn-toolbar btn-sm" onclick="app.closeCustomModelHostEditor()">Cancel</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <!-- ══ Agents &amp; CLIs ═════════════════════════════════════════ -->
@@ -2201,6 +2320,64 @@
                 <h2>Agents &amp; CLIs</h2>
               </div>
               <p class="set-section-blurb">Launch flags for the CLIs Codeman spawns.</p>
+
+              <div class="set-group" id="cliManagementGroup">
+                <div class="set-group-head"><h4>CLI management</h4><span class="set-scope">synced</span></div>
+                <p class="set-group-hint">Enable/disable a CLI, install one that's missing, or add your own — without hand-editing ~/.codeman/clis.json.</p>
+                <div class="set-group-body">
+                  <div class="set-row" data-search="cli management enable disable install custom">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Enable CLI management</span>
+                      <span class="set-row-desc">Adds the list below and its write endpoints. Off by default: this changes machine configuration, not just what you see.</span>
+                    </div>
+                    <label class="switch switch-sm"><input type="checkbox" id="appSettingsCliManagement" onchange="app.applyCliManagementVisibility()"><span class="slider"></span></label>
+                  </div>
+                </div>
+              </div>
+
+              <div class="set-group" id="cliListGroup" style="display: none;">
+                <div class="set-group-head"><h4>Installed CLIs</h4></div>
+                <div class="set-group-body">
+                  <div id="cliListRows"></div>
+                  <div class="set-row" data-search="add custom cli">
+                    <div class="set-row-text">
+                      <span class="set-row-label">Add a custom CLI</span>
+                      <span class="set-row-desc">A launch command Codeman doesn't ship — id, label, badge, binary and its bare argv.</span>
+                    </div>
+                    <button type="button" class="btn btn-xs" id="cliCustomAddToggle" onclick="app.openCliCustomForm()">Add</button>
+                  </div>
+                  <form id="cliCustomForm" style="display: none;" onsubmit="app.submitCliCustomForm(event)">
+                    <div class="set-row has-field">
+                      <div class="set-row-text"><span class="set-row-label">Id</span></div>
+                      <input type="text" id="cliCustomId" class="set-input" placeholder="my-cli" maxlength="24">
+                    </div>
+                    <div class="set-row has-field">
+                      <div class="set-row-text"><span class="set-row-label">Label</span></div>
+                      <input type="text" id="cliCustomLabel" class="set-input" placeholder="My CLI" maxlength="60">
+                    </div>
+                    <div class="set-row has-field">
+                      <div class="set-row-text"><span class="set-row-label">Badge</span></div>
+                      <input type="text" id="cliCustomBadge" class="set-input" placeholder="MC" maxlength="6">
+                    </div>
+                    <div class="set-row has-field">
+                      <div class="set-row-text"><span class="set-row-label">Binary</span></div>
+                      <input type="text" id="cliCustomBinary" class="set-input" placeholder="my-cli">
+                    </div>
+                    <div class="set-row has-field">
+                      <div class="set-row-text">
+                        <span class="set-row-label">Launch argv</span>
+                        <span class="set-row-desc">Space-separated bare words, e.g. "my-cli --flag". No quoting or shell syntax.</span>
+                      </div>
+                      <input type="text" id="cliCustomArgv" class="set-input" placeholder="my-cli --flag">
+                    </div>
+                    <div class="set-row">
+                      <button type="submit" class="btn btn-xs" id="cliCustomSubmit">Create</button>
+                      <button type="button" class="btn btn-xs" id="cliCustomCancel" onclick="app.closeCliCustomForm()">Cancel</button>
+                    </div>
+                    <div id="cliCustomFormError" class="set-row-desc" style="color: var(--error, #e5484d); display: none;"></div>
+                  </form>
+                </div>
+              </div>
 
               <div class="set-group">
                 <div class="set-group-head"><h4>Claude</h4><span class="set-scope">synced</span></div>
@@ -2855,6 +3032,11 @@
               <span class="form-hint">Optional. Leave blank for the default port 22.</span>
             </div>
             <div class="form-row">
+              <label>Wake-on-LAN MAC</label>
+              <input type="text" id="remoteHostWakeMac" placeholder="04:d9:f5:80:c6:58" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <span class="form-hint">Optional. Comma-separated for several NICs. Codeman sends the magic packet itself so a sleeping host can be woken from the session banner.</span>
+            </div>
+            <div class="form-row">
               <label>Codex Command Override</label>
               <input type="text" id="remoteHostCodexCommand" placeholder="exec codx personal" autocomplete="off" autocapitalize="off" spellcheck="false">
               <span class="form-hint">Optional. Leave blank to use exec codex on the remote host.</span>
@@ -2862,6 +3044,11 @@
             <details class="advanced-options">
               <summary><svg class="set-adv-chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span>Advanced SSH</span></summary>
               <div class="advanced-options-content">
+                <div class="form-row">
+                  <label>Wake Command</label>
+                  <input type="text" id="remoteHostWakeCommand" placeholder="/home/user/bin/wake-this-host" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+                  <span class="form-hint">Optional override for the MAC above (takes precedence). A single executable path, run without a shell — use it when the host needs a router/other machine to send the packet.</span>
+                </div>
                 <div class="form-row">
                   <label>Identity File</label>
                   <input type="text" id="remoteHostIdentityFile" placeholder="~/.ssh/remote_ed25519" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -2906,6 +3093,13 @@
             <div class="form-row">
               <label class="checkbox-row"><input type="checkbox" id="dockerAdoptExisting"> Attach to an existing container</label>
               <span class="form-hint">On: Codeman only runs docker exec into a container you already built and run — it never creates, starts, stops or removes it. The CLIs must already be installed and logged in inside it.</span>
+            </div>
+            <div class="form-row docker-adopt-only" id="dockerAdoptCloneRow" hidden>
+              <label>Duplicate an Existing Case</label>
+              <select id="dockerAdoptCloneFrom" onchange="app.applyDockerCloneSource()">
+                <option value="">Start from scratch</option>
+              </select>
+              <span class="form-hint">Same container, another directory inside it. Picks up the container, host and workspace below &mdash; you only set a new name and container workdir. Adopted containers only: an owned container&#39;s lifecycle belongs to its one case.</span>
             </div>
             <div class="form-row docker-adopt-only">
               <label>Container Name</label>
@@ -2982,6 +3176,7 @@
               <h2>Manage</h2>
             </div>
             <p class="set-section-blurb">Reorder or remove cases, and pick up anything exported from a docker case.</p>
+            <input type="search" id="caseManageSearch" class="set-input" placeholder="Search cases by name or path" autocomplete="off" spellcheck="false" aria-label="Search cases" oninput="app.setCaseManageFilter(this.value)" style="margin-bottom: 8px;">
             <div class="case-manage-list" id="caseManageList">
               <!-- Populated by JS -->
             </div>
@@ -3011,7 +3206,12 @@
           <h3>Select Case</h3>
           <button class="modal-close" onclick="app.closeMobileCasePicker()" aria-label="Close case picker">&times;</button>
         </div>
+        <div class="mobile-case-picker-search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="search" id="mobileCaseSearch" placeholder="Search cases" aria-label="Search cases" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" oninput="app.filterMobileCases()" onkeydown="app.onMobileCaseSearchKey(event)">
+        </div>
         <div class="mobile-case-picker-body">
+          <div class="mobile-case-empty" id="mobileCaseEmpty" hidden>No matching cases</div>
           <div class="mobile-case-list" id="mobileCaseList">
             <!-- Cases populated by JS -->
           </div>
@@ -3450,6 +3650,36 @@
        text is set via value/textContent only: predictor output derives from
        observable (injectable) content, and the explicit click here is the
        security boundary (nothing is ever auto-sent). -->
+  <!-- Wake-on-LAN setup for a remote host whose session cannot be woken yet. Kept
+       deliberately small (host is fixed, only the wake fields are editable) so it can
+       be opened from the banner with one click. Persists via PUT /api/remote-hosts/:id. -->
+  <div class="modal" id="wakeConfigModal">
+    <div class="modal-backdrop" onclick="app.closeWakeConfigDialog()"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Wake-on-LAN &middot; <span id="wakeConfigHostLabel"></span></h3>
+        <button class="modal-close" onclick="app.closeWakeConfigDialog()" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label>MAC address(es)</label>
+          <input type="text" id="wakeConfigMac" placeholder="04:d9:f5:80:c6:58" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <span class="form-hint">Comma-separated for several NICs. Codeman sends the magic packet itself (UDP port 9, broadcast).</span>
+        </div>
+        <div class="form-row">
+          <label>Wake command (optional)</label>
+          <input type="text" id="wakeConfigCommand" placeholder="/home/user/bin/wake-this-host" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <span class="form-hint">Takes precedence over the MAC. A single executable path, run without a shell.</span>
+        </div>
+        <div class="form-hint" id="wakeConfigStatus"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-toolbar" onclick="app.closeWakeConfigDialog()">Cancel</button>
+        <button class="btn-toolbar btn-primary" id="wakeConfigSave" onclick="app.saveWakeConfig()">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal" id="readMyMindModal">
     <div class="modal-backdrop" onclick="app.closeReadMyMind()"></div>
     <div class="modal-content readmymind-modal">
@@ -3513,6 +3743,7 @@
   <script defer src="app.js"></script>
   <script defer src="tab-rail-resize.js"></script>
   <script defer src="terminal-ui.js"></script>
+  <script defer src="terminal-split.js"></script>
   <script defer src="respawn-ui.js"></script>
   <script defer src="ralph-panel.js"></script>
   <script defer src="orchestrator-panel.js"></script>
@@ -3522,8 +3753,10 @@
   <script defer src="readmymind-ui.js"></script>
   <script defer src="ultracode-panel.js"></script>
   <script defer src="approvals-ui.js"></script>
+  <script defer src="reboot-restore-ui.js"></script>
   <script defer src="admin-ui.js"></script>
   <script defer src="session-ui.js"></script>
+  <script defer src="host-wake-ui.js"></script>
   <script defer src="webview-tabs.js"></script>
   <script defer src="mobile-overview.js"></script>
   <script defer src="home-sessions.js"></script>

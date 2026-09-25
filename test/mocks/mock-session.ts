@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { vi } from 'vitest';
-import type { SessionStatus } from '../../src/types.js';
+import type { SessionAttachmentHistoryItem, SessionStatus, SessionRemote } from '../../src/types.js';
 
 /**
  * Enhanced mock session for testing RespawnController.
@@ -13,6 +13,18 @@ import type { SessionStatus } from '../../src/types.js';
 export class MockSession extends EventEmitter {
   id: string;
   workingDir: string = '/tmp/test-workdir';
+  /**
+   * Mirrors `Session.remote` — set to a `SessionRemote` to model a remote-SSH case,
+   * whose `workingDir` is an absolute path on ANOTHER host. File routes must read it
+   * over ssh instead of with local `fs` (#415).
+   */
+  remote?: SessionRemote;
+  /** Mirrors Session.attachmentHistory (the attachment panel's source of truth). */
+  attachmentHistory: SessionAttachmentHistoryItem[] = [];
+  /** Mirrors Session.getAttachmentHistoryForPersist(). */
+  getAttachmentHistoryForPersist(): SessionAttachmentHistoryItem[] {
+    return this.attachmentHistory;
+  }
   /**
    * The REAL union, deliberately. This used to be `'idle' | 'working'`, and
    * `'working'` is not a `SessionStatus` at all — so `signalForStatus()` fell to its
@@ -23,6 +35,12 @@ export class MockSession extends EventEmitter {
   /** `null` once the PTY is gone (or before it has ever started) — see `pid` in Session. */
   pid: number | null = 12345;
   isWorking: boolean = false;
+  /**
+   * Mirrors Session.watching — what the pane's footer says is still running in the
+   * background. An idle prompt from such a session opens acknowledged, so the routes
+   * need to be able to set it.
+   */
+  watching: string | null = null;
   private _activeChildProcesses: { pid: number; command: string }[] = [];
   ralphTracker: null = null;
   writeBuffer: string[] = [];
@@ -56,6 +74,9 @@ export class MockSession extends EventEmitter {
     this.lastSubmitAt = Date.now();
   }
 
+  /** Mirrors Session.trackUserInput (the send-key route feeds it around the write path). */
+  trackUserInput(_data: string): void {}
+
   private _muxName: string | null = null;
 
   constructor(id: string = 'mock-session-id') {
@@ -83,6 +104,14 @@ export class MockSession extends EventEmitter {
     this.writeBuffer.push(data);
     return true;
   }
+
+  /**
+   * Mirrors `Session.reattachRemote()` — the COD-108 transport re-establish that
+   * the wake-on-LAN flow calls once a sleeping host is back. Defaults to success;
+   * set `reattachRemote.mockResolvedValue(false)` to model a pane that could not
+   * be respawned.
+   */
+  reattachRemote = vi.fn(async (): Promise<boolean> => true);
 
   /** Exactly-once input dedup — mirrors Session.shouldApplyInput so route tests
    *  exercising the reliable-delivery path behave like production. */
@@ -317,6 +346,43 @@ export class MockSession extends EventEmitter {
   setColor = vi.fn((c: string) => {
     this.color = c;
   });
+
+  /** Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) */
+  customModel: { endpointId: string; modelId: string; label?: string } | undefined = undefined;
+  remote: unknown = undefined;
+  docker: unknown = undefined;
+  private _mockCustomModel:
+    | {
+        endpointId: string;
+        modelId: string;
+        label?: string;
+        envKeys: string[];
+        configDir?: string;
+        launchModel?: string;
+      }
+    | undefined;
+  setCustomModel = vi.fn(
+    (
+      next:
+        | {
+            endpointId: string;
+            modelId: string;
+            label?: string;
+            envKeys: string[];
+            configDir?: string;
+            launchModel?: string;
+          }
+        | undefined,
+      _envOverrides?: Record<string, string>
+    ): { removedEnvKeys: string[]; previousConfigDir: string | undefined } => {
+      const previous = this._mockCustomModel;
+      this._mockCustomModel = next;
+      this.customModel = next ? { endpointId: next.endpointId, modelId: next.modelId, label: next.label } : undefined;
+      return { removedEnvKeys: previous?.envKeys ?? [], previousConfigDir: previous?.configDir };
+    }
+  );
+  restartCli = vi.fn(async () => true);
+  getCustomModelForPersist = vi.fn(() => this._mockCustomModel);
 
   /** Stub for sendInput */
   sendInput = vi.fn();

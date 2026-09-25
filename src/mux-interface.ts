@@ -24,6 +24,7 @@ import type {
   OmpConfig,
   SessionRemote,
   SessionDocker,
+  PaneExit,
 } from './types.js';
 
 /**
@@ -56,6 +57,23 @@ export interface MuxSession {
   respawnConfig?: PersistedRespawnConfig;
   /** Whether Ralph / Todo tracking is enabled */
   ralphEnabled?: boolean;
+  /**
+   * This record was rebuilt from the tmux socket rather than from Codeman's own
+   * bookkeeping, so everything on it but the name and the pid is a guess. Its
+   * synthetic `restored-<fragment>` id cannot find the session's `state.json`
+   * entry either, which means a remote or docker session rediscovered this way
+   * arrives with no `remote`/`docker` metadata and looks local. Anything that
+   * would be WRONG about such a session rather than merely vague must fail
+   * closed on this flag.
+   *
+   * ⚠ It is PERMANENT, not merely true for the boot that rediscovered the
+   * session: `saveSessions()` serializes the whole record to
+   * `mux-sessions.json` and `loadSessions()` restores it, so a genuinely local
+   * session rediscovered once stays opted out of everything keyed on this for
+   * the life of that record. That is the safe direction to fail, and it costs
+   * only the guess Codeman is declining to make.
+   */
+  discovered?: boolean;
   /** Runtime provider that owns the underlying terminal. */
   runtimeBackend?: 'tmux' | 'herdr';
   /** Agent kind reported by Herdr; absent for an ordinary shell pane. */
@@ -88,6 +106,13 @@ export interface CreateSessionOptions {
   workingDir: string;
   mode: SessionMode;
   name?: string;
+  /**
+   * Name pinned on a claude spawn as `--name` (version-gated, sanitized, local only).
+   * Deliberately NOT `name`: `--name` owns the prompt-box label, the `/resume` picker
+   * entry and the terminal title, and a pinned title stops Claude generating its own,
+   * so only a user-chosen name belongs here (see `Session.cliPinnedName`).
+   */
+  cliName?: string;
   niceConfig?: NiceConfig;
   model?: string;
   claudeMode?: ClaudeMode;
@@ -121,8 +146,15 @@ export interface RespawnPaneOptions {
   sessionId: string;
   workingDir: string;
   mode: SessionMode;
-  /** Session display name; a respawned claude keeps its `--name` peer name (version-gated, local only). */
+  /** Session display name (tab name). */
   name?: string;
+  /**
+   * Name pinned on a respawned claude as `--name` (version-gated, sanitized, local only).
+   * Deliberately NOT `name`: `--name` owns the prompt-box label, the `/resume` picker
+   * entry and the terminal title, and a pinned title stops Claude generating its own,
+   * so only a user-chosen name belongs here (see `Session.cliPinnedName`).
+   */
+  cliName?: string;
   niceConfig?: NiceConfig;
   model?: string;
   claudeMode?: ClaudeMode;
@@ -139,6 +171,13 @@ export interface RespawnPaneOptions {
   resumeSessionId?: string;
   /** Extra env vars exported before launching the CLI (preserved across respawns). */
   envOverrides?: Record<string, string>;
+  /**
+   * Env vars to REMOVE from the tmux session (`setenv -u`) before `envOverrides` is
+   * applied. `setenv` persists at the tmux-session level and is inherited by
+   * `respawn-pane`, so a key that merely disappears from `envOverrides` stays set
+   * for the relaunched CLI; clearing a custom-model selection has to name it.
+   */
+  unsetEnvKeys?: string[];
   /** Claude CLI effort level (preserved across respawns, injected via `--settings`) */
   effort?: EffortLevel;
   /** Original tmux history-limit retained for config parity; respawn cannot resize the existing pane. */
@@ -168,6 +207,15 @@ export interface PaneCaptureOptions {
    * the 1MB execSync default (ENOBUFS).
    */
   maxCaptureBytes?: number;
+  /**
+   * Filled in by the implementation with the pane geometry the capture was
+   * really taken at, which is not always the geometry the caller last asked
+   * for: a resize and a capture can race, and a pane whose size a desktop
+   * viewport has claimed ignores a smaller client's resize outright. A
+   * visible-frame capture addresses every row absolutely, so a consumer
+   * rendering it needs the real height to know the frame fits.
+   */
+  capturedGeometry?: { cols: number; rows: number };
 }
 
 /**
@@ -180,6 +228,7 @@ export interface PaneCaptureOptions {
  * - `sessionKilled` (data: { sessionId: string }) - Session terminated
  * - `sessionDied` (data: { sessionId: string }) - Session died unexpectedly
  * - `statsUpdated` (sessions: MuxSessionWithStats[]) - Stats refreshed
+ * - `paneExitsUpdated` () - A pane read finished; ask `getPaneExit()` per session
  */
 export interface TerminalMultiplexer extends EventEmitter {
   /** Which backend this instance uses */
@@ -299,6 +348,32 @@ export interface TerminalMultiplexer extends EventEmitter {
 
   /** Check if the pane in a session is dead (command exited but remain-on-exit keeps it alive) */
   isPaneDead(muxName: string): boolean;
+
+  /**
+   * What the last pane read saw of this session's agent, or `undefined` for
+   * UNKNOWN (Ark0N/Codeman#446). Unlike `isPaneDead()` this costs nothing: it
+   * reads a map the batched watcher fills, so it answers no fresher than that
+   * watcher's interval and the three synchronous `isPaneDead()` callers still
+   * need their own probe. See {@link PaneExit}.
+   */
+  getPaneExit?(muxName: string): PaneExit | undefined;
+
+  /**
+   * How many authoritative pane reads have agreed on the exit `getPaneExit()`
+   * reports, or 0 when it reports none. The exited-agent sweep closes a session
+   * only once this reaches `CLEAN_EXIT_CONFIRMING_READS` (`pane-exit-sweep.ts`),
+   * and a multiplexer without this method never has a session closed by it.
+   */
+  getPaneExitReadCount?(muxName: string): number;
+
+  /** Forget a session's exit observation, e.g. once its pane has been respawned. */
+  clearPaneExit?(muxName: string): void;
+
+  /** Start polling every pane on the socket for an exited agent. */
+  startPaneExitWatcher?(intervalMs?: number): void;
+
+  /** Stop the pane-exit watcher. */
+  stopPaneExitWatcher?(): void;
 
   /** Respawn a dead pane with a fresh command. Returns the new PID or null on failure. */
   respawnPane(options: RespawnPaneOptions): Promise<number | null>;

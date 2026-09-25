@@ -40,6 +40,7 @@ interface AppLike {
   openWebview(id: string, options?: { path?: string }): Promise<void>;
   _apiJson(path: string, opts?: { method?: string; body?: unknown }): Promise<unknown>;
   _updateActiveWebviewTab(): void;
+  _installWebviewLostListener(): void;
   showToast?: (msg: string, kind: string) => void;
 }
 
@@ -313,5 +314,102 @@ describe('callers consult the hook first', () => {
     expect(pathHandler).toBeGreaterThan(-1);
     expect(urlHandler).toBeGreaterThan(pathHandler);
     expect(section.indexOf('openLinkThroughWebTabIfLoopback?.(urlLink.href)')).toBeGreaterThan(urlHandler);
+  });
+});
+
+/**
+ * Lost-frame recovery: the server's recovery page posts `{type, path}` to the
+ * parent; the tab that owns the frame remounts it inside the prefix at that path.
+ */
+describe('lost-frame recovery', () => {
+  const lost = (win: Window, source: unknown, path: unknown) =>
+    win.dispatchEvent(
+      new (win as unknown as { MessageEvent: typeof MessageEvent }).MessageEvent('message', {
+        data: { type: 'codeman:webview-lost', path },
+        source: source as Window,
+      })
+    );
+  const frameOf = (win: Window, id: string) =>
+    win.document.querySelector(`.webview-frame[data-webview-id="${id}"] iframe`) as HTMLIFrameElement;
+
+  it('remounts the frame that sent the message at the path it lost, inside the prefix', async () => {
+    const { win, app } = boot();
+    app._installWebviewLostListener();
+    await app.openWebview('dev');
+    const frame = frameOf(win, 'dev');
+    lost(win, frame.contentWindow, '/about?tab=2#top');
+    await vi.waitFor(() => expect(frameSrc(win, 'dev')).toBe('/webview/cap-dev/about?tab=2#top'));
+    expect(frameOf(win, 'dev')).toBe(frame);
+  });
+
+  it('recovers to the landing page for a bare reload', async () => {
+    const { win, app } = boot();
+    app._installWebviewLostListener();
+    await app.openWebview('dev');
+    await app.openUrlInWebTab('http://localhost:5173/deep');
+    expect(frameSrc(win, 'dev')).toBe('/webview/cap-dev/deep');
+    lost(win, frameOf(win, 'dev').contentWindow, '/');
+    await vi.waitFor(() => expect(frameSrc(win, 'dev')).toBe('/webview/cap-dev/'));
+  });
+
+  it('ignores a message that did not come from one of its frames, or is malformed', async () => {
+    const { win, app, calls } = boot();
+    app._installWebviewLostListener();
+    await app.openWebview('dev');
+    const before = calls.length;
+    lost(win, win, '/elsewhere');
+    lost(win, frameOf(win, 'dev').contentWindow, 42);
+    win.dispatchEvent(
+      new (win as unknown as { MessageEvent: typeof MessageEvent }).MessageEvent('message', {
+        data: 'codeman:webview-lost',
+        source: frameOf(win, 'dev').contentWindow as Window,
+      })
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.length).toBe(before);
+    expect(frameSrc(win, 'dev')).toBe('/webview/cap-dev/');
+  });
+
+  it('never lets the path jump the frame off the proxy, and bounds a reload loop', async () => {
+    const { win, app, calls } = boot();
+    app._installWebviewLostListener();
+    await app.openWebview('dev');
+    lost(win, frameOf(win, 'dev').contentWindow, '//evil.example/x');
+    await vi.waitFor(() => expect(calls.filter((c) => c.path.endsWith('/open')).length).toBe(2));
+    expect(frameSrc(win, 'dev')).toBe('/webview/cap-dev/');
+
+    const opensBefore = calls.filter((c) => c.path.endsWith('/open')).length;
+    for (let i = 0; i < 10; i += 1) lost(win, frameOf(win, 'dev').contentWindow, `/spin-${i}`);
+    await new Promise((r) => setTimeout(r, 50));
+    const opens = calls.filter((c) => c.path.endsWith('/open')).length - opensBefore;
+    expect(opens).toBeLessThanOrEqual(5);
+    expect(opens).toBeGreaterThan(0);
+  });
+
+  /**
+   * The proxied form above cannot leave the prefix whatever the path says. A
+   * DIRECT-mode tab is the reachable case: `POST /open` returns no embedUrl, so
+   * the recovered path is resolved with `new URL(path, src)` and becomes the
+   * frame's src. The WHATWG parser reads a backslash as `/` for http(s), and
+   * deletes ASCII tab and newline before parsing, so `/\host/x` and `/<tab>/host/x`
+   * both mean `//host/x` there: a page in such a tab could remount its own frame
+   * on a foreign origin. Not an escalation (the page can already navigate itself
+   * anywhere), but the handler promises "path only, never an origin".
+   */
+  it('keeps a direct-mode frame on its own origin whatever separator the path opens with', async () => {
+    const { win, app } = boot();
+    app._installWebviewLostListener();
+    await app.openWebview('direct');
+    expect(frameSrc(win, 'direct')).toBe('https://localhost:9443/');
+    const attempts = ['/\\evil.example/x', '\\\\evil.example/x', '/\t/evil.example/x', '/\n/evil.example/x'];
+    for (const path of attempts) {
+      lost(win, frameOf(win, 'direct').contentWindow, path);
+      await vi.waitFor(() => expect(frameSrc(win, 'direct')).toBe('https://localhost:9443/evil.example/x'));
+      // Reset for the next spelling so the assertion above cannot pass on a stale
+      // src; through openWebview rather than another lost message, which is
+      // capped at five per minute per frame.
+      await app.openWebview('direct', { path: '/' });
+      expect(frameSrc(win, 'direct')).toBe('https://localhost:9443/');
+    }
   });
 });

@@ -179,14 +179,23 @@
   // theme, so default behavior is unchanged. Shared at module scope and exported on the
   // global so both terminal-ui.js (main terminal) and panels-ui.js (teammate terminals,
   // a separate IIFE) can read the current skin's palette.
+  //
+  // ⚠️ The selection key is `selectionBackground`, xterm's name for it since v5 (#360).
+  // An ITheme is a plain object handed straight to xterm, so an unknown key is not an
+  // error, it is silently dropped: every palette here carried `selection`, so every skin
+  // drew xterm's built-in default instead, rgba(255,255,255,0.3). On the four light skins
+  // that is white at 30% over a near-white background, a delta of about 3/255 — the
+  // highlight was effectively invisible, which is what a long-press selection that
+  // "did nothing" actually looked like. A key only works here if xterm knows its name;
+  // test/skin-themes.test.ts pins the name AND that the blend stays visible.
   const CODEMAN_XTERM_THEMES = {
-    og: { background: '#0d0d0d', foreground: '#e0e0e0', cursor: '#e0e0e0', cursorAccent: '#0d0d0d', selection: 'rgba(255,255,255,0.3)', black: '#0d0d0d', red: '#ff6b6b', green: '#51cf66', yellow: '#ffd43b', blue: '#339af0', magenta: '#cc5de8', cyan: '#22b8cf', white: '#e0e0e0', brightBlack: '#495057', brightRed: '#ff8787', brightGreen: '#69db7c', brightYellow: '#ffe066', brightBlue: '#5c7cfa', brightMagenta: '#da77f2', brightCyan: '#66d9e8', brightWhite: '#ffffff' },
-    'daylight-green': { background: '#161b23', foreground: '#dfe6ef', cursor: '#2fd3aa', cursorAccent: '#161b23', selection: 'rgba(47,211,170,0.22)', black: '#161b23', red: '#ff8585', green: '#34d8a0', yellow: '#f0c25a', blue: '#5cc6e8', magenta: '#c79af2', cyan: '#2bcbbb', white: '#dfe6ef', brightBlack: '#5b6675', brightRed: '#ffa0a0', brightGreen: '#5fe6b8', brightYellow: '#ffd884', brightBlue: '#82d4ee', brightMagenta: '#d6b3f7', brightCyan: '#5ee0d4', brightWhite: '#f3f6fa' },
-    'daylight-blue': { background: '#161b23', foreground: '#dfe6ef', cursor: '#38b6f0', cursorAccent: '#161b23', selection: 'rgba(56,182,240,0.22)', black: '#161b23', red: '#ff8585', green: '#34d8a0', yellow: '#f0c25a', blue: '#5cc6e8', magenta: '#c79af2', cyan: '#2bcbbb', white: '#dfe6ef', brightBlack: '#5b6675', brightRed: '#ffa0a0', brightGreen: '#5fe6b8', brightYellow: '#ffd884', brightBlue: '#82d4ee', brightMagenta: '#d6b3f7', brightCyan: '#5ee0d4', brightWhite: '#f3f6fa' },
-    'paper-gray': { background: '#f6f8fa', foreground: '#1f2328', cursor: '#0969da', cursorAccent: '#ffffff', selection: 'rgba(9,105,218,0.2)', black: '#24292f', red: '#cf222e', green: '#1a7f37', yellow: '#9a6700', blue: '#0969da', magenta: '#8250df', cyan: '#1b7c83', white: '#59636e', brightBlack: '#6e7781', brightRed: '#a40e26', brightGreen: '#116329', brightYellow: '#7d4e00', brightBlue: '#0550ae', brightMagenta: '#6639ba', brightCyan: '#116b75', brightWhite: '#1f2328' },
-    'solarized-light': { background: '#fdf6e3', foreground: '#586e75', cursor: '#147ba3', cursorAccent: '#fdf6e3', selection: 'rgba(38,139,210,0.2)', black: '#eee8d5', red: '#dc322f', green: '#758600', yellow: '#9b7800', blue: '#147ba3', magenta: '#d33682', cyan: '#2a9189', white: '#073642', brightBlack: '#93a1a1', brightRed: '#cb4b16', brightGreen: '#657b83', brightYellow: '#586e75', brightBlue: '#268bd2', brightMagenta: '#6c71c4', brightCyan: '#2aa198', brightWhite: '#002b36' },
-    'catppuccin-latte': { background: '#eff1f5', foreground: '#4c4f69', cursor: '#1e66f5', cursorAccent: '#ffffff', selection: 'rgba(30,102,245,0.18)', black: '#5c5f77', red: '#d20f39', green: '#3b8f2b', yellow: '#a86605', blue: '#1e66f5', magenta: '#8839ef', cyan: '#177f86', white: '#6c6f85', brightBlack: '#7c7f93', brightRed: '#b50930', brightGreen: '#2f7622', brightYellow: '#8b5604', brightBlue: '#174fbf', brightMagenta: '#6f2bc5', brightCyan: '#116b71', brightWhite: '#4c4f69' },
-    'rose-pine-dawn': { background: '#faf4ed', foreground: '#575279', cursor: '#286983', cursorAccent: '#fffaf3', selection: 'rgba(40,105,131,0.2)', black: '#575279', red: '#b4637a', green: '#286983', yellow: '#96681f', blue: '#477f91', magenta: '#907aa9', cyan: '#3f7f8b', white: '#6e6a86', brightBlack: '#797593', brightRed: '#984d66', brightGreen: '#1f5266', brightYellow: '#7d5417', brightBlue: '#386b7c', brightMagenta: '#765f90', brightCyan: '#326b76', brightWhite: '#575279' },
+    og: { background: '#0d0d0d', foreground: '#e0e0e0', cursor: '#e0e0e0', cursorAccent: '#0d0d0d', selectionBackground: 'rgba(255,255,255,0.3)', black: '#0d0d0d', red: '#ff6b6b', green: '#51cf66', yellow: '#ffd43b', blue: '#339af0', magenta: '#cc5de8', cyan: '#22b8cf', white: '#e0e0e0', brightBlack: '#495057', brightRed: '#ff8787', brightGreen: '#69db7c', brightYellow: '#ffe066', brightBlue: '#5c7cfa', brightMagenta: '#da77f2', brightCyan: '#66d9e8', brightWhite: '#ffffff' },
+    'daylight-green': { background: '#161b23', foreground: '#dfe6ef', cursor: '#2fd3aa', cursorAccent: '#161b23', selectionBackground: 'rgba(47,211,170,0.22)', black: '#161b23', red: '#ff8585', green: '#34d8a0', yellow: '#f0c25a', blue: '#5cc6e8', magenta: '#c79af2', cyan: '#2bcbbb', white: '#dfe6ef', brightBlack: '#5b6675', brightRed: '#ffa0a0', brightGreen: '#5fe6b8', brightYellow: '#ffd884', brightBlue: '#82d4ee', brightMagenta: '#d6b3f7', brightCyan: '#5ee0d4', brightWhite: '#f3f6fa' },
+    'daylight-blue': { background: '#161b23', foreground: '#dfe6ef', cursor: '#38b6f0', cursorAccent: '#161b23', selectionBackground: 'rgba(56,182,240,0.22)', black: '#161b23', red: '#ff8585', green: '#34d8a0', yellow: '#f0c25a', blue: '#5cc6e8', magenta: '#c79af2', cyan: '#2bcbbb', white: '#dfe6ef', brightBlack: '#5b6675', brightRed: '#ffa0a0', brightGreen: '#5fe6b8', brightYellow: '#ffd884', brightBlue: '#82d4ee', brightMagenta: '#d6b3f7', brightCyan: '#5ee0d4', brightWhite: '#f3f6fa' },
+    'paper-gray': { background: '#f6f8fa', foreground: '#1f2328', cursor: '#0969da', cursorAccent: '#ffffff', selectionBackground: 'rgba(9,105,218,0.2)', black: '#24292f', red: '#cf222e', green: '#1a7f37', yellow: '#9a6700', blue: '#0969da', magenta: '#8250df', cyan: '#1b7c83', white: '#59636e', brightBlack: '#6e7781', brightRed: '#a40e26', brightGreen: '#116329', brightYellow: '#7d4e00', brightBlue: '#0550ae', brightMagenta: '#6639ba', brightCyan: '#116b75', brightWhite: '#1f2328' },
+    'solarized-light': { background: '#fdf6e3', foreground: '#586e75', cursor: '#147ba3', cursorAccent: '#fdf6e3', selectionBackground: 'rgba(38,139,210,0.2)', black: '#eee8d5', red: '#dc322f', green: '#758600', yellow: '#9b7800', blue: '#147ba3', magenta: '#d33682', cyan: '#2a9189', white: '#073642', brightBlack: '#93a1a1', brightRed: '#cb4b16', brightGreen: '#657b83', brightYellow: '#586e75', brightBlue: '#268bd2', brightMagenta: '#6c71c4', brightCyan: '#2aa198', brightWhite: '#002b36' },
+    'catppuccin-latte': { background: '#eff1f5', foreground: '#4c4f69', cursor: '#1e66f5', cursorAccent: '#ffffff', selectionBackground: 'rgba(30,102,245,0.18)', black: '#5c5f77', red: '#d20f39', green: '#3b8f2b', yellow: '#a86605', blue: '#1e66f5', magenta: '#8839ef', cyan: '#177f86', white: '#6c6f85', brightBlack: '#7c7f93', brightRed: '#b50930', brightGreen: '#2f7622', brightYellow: '#8b5604', brightBlue: '#174fbf', brightMagenta: '#6f2bc5', brightCyan: '#116b71', brightWhite: '#4c4f69' },
+    'rose-pine-dawn': { background: '#faf4ed', foreground: '#575279', cursor: '#286983', cursorAccent: '#fffaf3', selectionBackground: 'rgba(40,105,131,0.2)', black: '#575279', red: '#b4637a', green: '#286983', yellow: '#96681f', blue: '#477f91', magenta: '#907aa9', cyan: '#3f7f8b', white: '#6e6a86', brightBlack: '#797593', brightRed: '#984d66', brightGreen: '#1f5266', brightYellow: '#7d5417', brightBlue: '#386b7c', brightMagenta: '#765f90', brightCyan: '#326b76', brightWhite: '#575279' },
   };
   const CODEMAN_LIGHT_SKINS = new Set(['paper-gray', 'solarized-light', 'catppuccin-latte', 'rose-pine-dawn']);
   function currentSkin() {
@@ -299,6 +308,7 @@ Object.assign(CodemanApp.prototype, {
     const container = document.getElementById('terminalContainer');
     this.terminal.open(container);
     this._installMobileTapMouseGuard();
+    this._installShiftDragSelection();
     this._installTouchSelectionFocusGuard();
 
     // Let xterm's CompositionHelper own IME key events. In particular, a
@@ -354,11 +364,34 @@ Object.assign(CodemanApp.prototype, {
       // this handler before its own cancel()), so preventDefault is explicit:
       // without it the browser runs its native copy on top of ours.
       if (this.shouldCopyTerminalSelectionFromShortcut?.(ev)) {
-        const selection = this.terminal.hasSelection?.() ? this.terminal.getSelection() : '';
-        if (selection) {
+        // The CLEANED selection decides, not the raw one. A drag across the blank
+        // part of a row selects real padding spaces, which are truthy, so testing
+        // the raw text would spend this press on a copy of nothing and make the
+        // user press again to interrupt.
+        //
+        // ⚠️ The gate cleans, and the copy is handed the RAW selection, because
+        // copyTerminalSelection cleans again on its own. The margin strip is not
+        // idempotent: a second pass takes up to `margin` more columns off what
+        // the first pass left, so passing the cleaned string through dedented a
+        // Claude or Codex copy twice. Every other copy path already hands over
+        // the raw selection or reads it live.
+        const raw = this.terminal?.hasSelection?.() ? this.terminal.getSelection() : '';
+        const selection = this.cleanedTerminalSelection(raw);
+        if (selection.trim()) {
           ev.preventDefault();
-          void this.copyTerminalSelection(selection);
+          void this.copyTerminalSelection(raw);
           return false;
+        }
+        // Nothing worth copying. The clear is for feedback, not for the
+        // interrupt: the gate above tests the CLEANED selection, so a
+        // padding-only selection left set cleans to '' on every later press and
+        // falls through to the PTY anyway. What it buys is that a highlight
+        // which copies nothing does not linger with no explanation, which is
+        // also what the toast is for. Falls through exactly as an empty
+        // selection does, so this press still reaches the PTY as 0x03.
+        if (this.terminal?.hasSelection?.()) {
+          this.terminal.clearSelection?.();
+          this.showToast('Nothing to copy', 'warning');
         }
         if (ev.shiftKey) {
           ev.preventDefault();
@@ -519,6 +552,14 @@ Object.assign(CodemanApp.prototype, {
       this.terminal.onRender(() => this._syncMobileHelperTextareaToCursor());
     }
 
+    // Renderer liveness — see _startRenderLivenessWatchdog. Registered for every
+    // device, not just touch: the rAF-discard behaviour is worst on an iOS PWA
+    // but a stale handle wedges the debouncer identically anywhere it happens.
+    this.terminal.onRender(() => {
+      this._lastRenderAt = Date.now();
+    });
+    this._startRenderLivenessWatchdog();
+
     // CJK IME input — textarea in index.html, just wire up send
     this._cjkInput = null;
     if (typeof CjkInput !== 'undefined') {
@@ -555,12 +596,12 @@ Object.assign(CodemanApp.prototype, {
     if (isMobileSafari) {
       // Wait for layout, then fit multiple times to ensure proper sizing
       requestAnimationFrame(() => {
-        this.fitAddon.fit();
+        this.syncTerminalGeometry();
         // Double-check after another frame
-        requestAnimationFrame(() => this.fitAddon.fit());
+        requestAnimationFrame(() => this.syncTerminalGeometry());
       });
     } else {
-      this.fitAddon.fit();
+      this.syncTerminalGeometry();
     }
     // Whenever that first fit runs — on this line, or a frame or two later on
     // the mobile-Safari branch above — it measures whatever font the browser has
@@ -732,6 +773,32 @@ Object.assign(CodemanApp.prototype, {
       let longPressStartX = 0;
       let longPressStartY = 0;
       let touchStartY = 0;
+      let touchStartX = 0;
+      // 'x' | 'y' | null — locked on the first travel past the tap slop, so a
+      // diagonal drag cannot pan and scroll at the same time.
+      let panAxis = null;
+      /**
+       * Can this gesture pan sideways? Only while the terminal is wider than
+       * the box showing it (`.term-overflows-x`, set by
+       * `_syncTerminalOverflowAffordance`).
+       *
+       * ⚠️ This has to be done in JS. `touch-action: pan-x` alone does nothing
+       * for the sessions the affordance targets: `touchstart` calls
+       * preventDefault() for every 'content' tap — the normal case for a
+       * mouse-tracking TUI sitting at the bottom of its buffer — which cancels
+       * the browser's pan before it starts. Measured under touch emulation, a
+       * 140px horizontal swipe reached scrollLeft 141 without that
+       * preventDefault and 0 with it. It only ever worked for shell sessions,
+       * while scrolled up, or with a mouse.
+       */
+      const canPanHorizontally = () =>
+        // Both halves. The class is what makes the container a scroller at all
+        // (`overflow-x: auto`); without it `scrollLeft` silently stays 0, and a
+        // gesture locked to 'x' on that basis would do nothing AND suppress the
+        // vertical scroll it should have been. The measurement is the second
+        // half because sub-pixel cell widths can leave a stray pixel of
+        // scrollWidth on a terminal that fits perfectly well.
+        container.classList.contains('term-overflows-x') && container.scrollWidth - container.clientWidth > 1;
       let tapStartedWithTerminalFocus = false;
       let tapStartIntentCache = null;
       // px — ignore micro-drift to distinguish tap from scroll. Shared with the
@@ -751,6 +818,8 @@ Object.assign(CodemanApp.prototype, {
             touchLastX = ev.touches[0].clientX;
             touchLastY = ev.touches[0].clientY;
             touchStartY = touchLastY;
+            touchStartX = touchLastX;
+            panAxis = null;
             velocity = 0;
             pixelAccum = 0;
             isTouching = true;
@@ -819,8 +888,15 @@ Object.assign(CodemanApp.prototype, {
           }
           if (ev.touches.length === 1 && isTouching) {
             const touchY = ev.touches[0].clientY;
-            if (!didScroll && Math.abs(touchY - touchStartY) >= TAP_THRESHOLD) {
-              didScroll = true;
+            const touchX = ev.touches[0].clientX;
+            if (!didScroll) {
+              const travelY = Math.abs(touchY - touchStartY);
+              const travelX = Math.abs(touchX - touchStartX);
+              const sideways = canPanHorizontally() && travelX >= TAP_THRESHOLD;
+              if (travelY >= TAP_THRESHOLD || sideways) {
+                didScroll = true;
+                panAxis = sideways && travelX > travelY ? 'x' : 'y';
+              }
             }
             // Below the tap threshold, treat the gesture as a potential tap:
             // don't preventDefault (iOS needs click synthesis to show the
@@ -830,6 +906,15 @@ Object.assign(CodemanApp.prototype, {
             // fling, so a jittery tap would both position the cursor AND scroll.
             if (!didScroll) return;
             ev.preventDefault();
+            if (panAxis === 'x') {
+              // Pan the container, and touch nothing the vertical path owns —
+              // no pixelAccum, no velocity, so touchend cannot turn a sideways
+              // swipe into a momentum fling down the scrollback.
+              container.scrollLeft -= touchX - touchLastX;
+              touchLastX = touchX;
+              touchLastY = touchY;
+              return;
+            }
             const delta = touchLastY - touchY; // positive = scroll down
             pixelAccum += delta;
             velocity = delta * 1.2;
@@ -903,7 +988,25 @@ Object.assign(CodemanApp.prototype, {
       container.addEventListener('contextmenu', (ev) => {
         if (longPressTimer !== null || this._touchSelecting || this._touchSelectionActive) {
           ev.preventDefault();
+          return;
         }
+        // Right-click COPIES the selection, the mintty/PuTTY convention, because
+        // the browser's own menu structurally cannot offer it here: xterm paints
+        // glyphs into a canvas, so a terminal selection is not a DOM selection
+        // and the native "Copy" item has nothing to act on (it is absent or
+        // inert). This is the second half of the habit users bring from a native
+        // terminal running a mouse-tracking TUI — Shift+drag to select (see
+        // _installShiftDragSelection), right-click to copy — and without it that
+        // gesture dead-ends after the selection is made.
+        //
+        // With NOTHING selected the native menu is left alone: it still carries
+        // the browser-level items (reload, inspect) and suppressing it there
+        // would take them away to offer nothing in return.
+        if (!this.terminal?.hasSelection?.()) return;
+        const selection = this.terminal.getSelection();
+        if (!selection) return;
+        ev.preventDefault();
+        void this.copyTerminalSelection(selection);
       });
 
       container.addEventListener(
@@ -949,10 +1052,6 @@ Object.assign(CodemanApp.prototype, {
     this._resizeTimeout = null;
     this._lastResizeDims = null;
 
-    // Minimum terminal dimensions to prevent vertical text wrapping
-    const MIN_COLS = 40;
-    const MIN_ROWS = 10;
-
     const throttledResize = () => {
       if (this._tabRailResizeOwnsObserver) return;
       // Trailing-edge debounce: ALL resize work (fit + clear + SIGWINCH) happens
@@ -972,10 +1071,6 @@ Object.assign(CodemanApp.prototype, {
       }
       this._resizeTimeout = setTimeout(() => {
         this._resizeTimeout = null;
-        // Fit xterm.js to final container dimensions
-        if (this.fitAddon) {
-          this.fitAddon.fit();
-        }
         // Flush any stale flicker buffer before clearing viewport
         if (this.flickerFilterBuffer) {
           if (this.flickerFilterTimeout) {
@@ -984,32 +1079,47 @@ Object.assign(CodemanApp.prototype, {
           }
           this.flushFlickerBuffer();
         }
-        // Skip server resize while mobile keyboard is visible — sending SIGWINCH
-        // causes Ink to re-render at the new row count, garbling terminal output.
-        // Local fit() still runs so xterm knows the viewport size for scrolling.
+        // Hold the PTY's shape while the virtual keyboard is up: a SIGWINCH per
+        // step of the OS animation makes Ink re-render at a row count that is
+        // about to change again, and shifts the accessory toolbar mid-typing.
+        // KeyboardHandler's settle timer sends ONE resize once the animation
+        // stops (`_sendTerminalResize`), so the PTY is not left stale.
         const keyboardUp = typeof KeyboardHandler !== 'undefined' && KeyboardHandler.keyboardVisible;
         // Same yield as sendResize: never resize a PTY whose session is showing
         // in its own window. Dragging the dashboard's border must not reshape it.
         const detachedElsewhere = !this.isSoloWindow && this.detachedSessions?.has(this.activeSessionId);
-        if (this.activeSessionId && !keyboardUp && !detachedElsewhere) {
-          const dims = this.fitAddon.proposeDimensions();
-          // Enforce minimum dimensions to prevent layout issues
-          const cols = dims ? Math.max(dims.cols, MIN_COLS) : MIN_COLS;
-          const rows = dims ? Math.max(dims.rows, MIN_ROWS) : MIN_ROWS;
+        // ⚠️ Whether to fit is the SAME question as whether to send (issue #464).
+        // This block used to fit unconditionally and skip only the SIGWINCH,
+        // which is the one combination that cannot be right: it moves xterm to
+        // a shape the PTY is never told about, and Claude Code computes its
+        // repaints from the shape it was told. Withhold both, or neither —
+        // a reflow nothing is rendering for buys nothing and costs correctness.
+        const dims =
+          this.activeSessionId && !keyboardUp && !detachedElsewhere ? this._geometryForResizeRequest() : null;
+        // ⚠️ A null measurement is NOT a reason to report the floor. It used to
+        // fall back to a bare 40x10, which tells the PTY a shape nothing measured
+        // and xterm does not hold — the write-only guess this whole change exists
+        // to remove. An unmeasurable terminal has nothing to say; the next
+        // resize event says it.
+        if (dims) {
+          const { cols, rows } = dims;
           // Only send resize if dimensions actually changed
           if (!this._lastResizeDims || cols !== this._lastResizeDims.cols || rows !== this._lastResizeDims.rows) {
             // Clear viewport + scrollback ONLY when dimensions actually change.
-            // fitAddon.fit() reflows content: lines at old width may wrap to more rows,
-            // pushing overflow into scrollback. Ink's cursor-up count is based on the
-            // pre-reflow line count, so ghost renders accumulate in scrollback.
+            // syncTerminalGeometry() reflowed content: lines at old width may wrap to
+            // more rows, pushing overflow into scrollback. Ink's cursor-up count is
+            // based on the pre-reflow line count, so ghost renders accumulate there.
             // Fix: \x1b[3J (Erase Saved Lines) clears scrollback reflow debris,
             // then \x1b[H\x1b[2J clears the viewport for a clean Ink redraw.
             // IMPORTANT: Only clear when we're actually sending SIGWINCH (dims changed).
             // Clearing without a subsequent Ink redraw leaves the terminal blank.
             const activeResizeSession = this.activeSessionId ? this.sessions.get(this.activeSessionId) : null;
+            // Not while another device holds the width: the columns were not
+            // reflowed here, and a refused resize brings no redraw after it.
             if (
               activeResizeSession &&
               activeResizeSession.mode !== 'shell' &&
+              !this._paneWidthRefused &&
               activeResizeSession.runtimeBackend !== 'herdr' &&
               this.terminal &&
               this.isTerminalAtBottom()
@@ -1035,11 +1145,24 @@ Object.assign(CodemanApp.prototype, {
               }
             }
             if (!sentViaWs) {
+              // ⚠️ The reply carries the geometry that actually took, and this
+              // is the path where a declined resize is LEAST likely to be
+              // noticed: no socket means no `{"t":"zc"}` frame either, so
+              // discarding it here left the one transport that cannot hear the
+              // answer also not asking for it.
+              const resizedSessionId = this.activeSessionId;
               fetch(`/api/sessions/${this.activeSessionId}/resize`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ cols, rows, viewportType }),
-              }).catch(() => {});
+              })
+                .then(async (res) => {
+                  const applied = (await res.json())?.data ?? {};
+                  this._onPtyGeometryReport(resizedSessionId, applied.cols, applied.rows);
+                })
+                .catch(() => {
+                  /* a resize that never landed tells us nothing about the PTY */
+                });
             }
           }
         }
@@ -1051,6 +1174,12 @@ Object.assign(CodemanApp.prototype, {
         if (this._localEchoOverlay?.hasPending) {
           this._localEchoOverlay.rerender();
         }
+        // Pane B (split view) has its own container and its own fit()/resize
+        // frame — this observer only ever measured Pane A's container, so
+        // without this call Pane B never learned about a window resize, an
+        // Alt+B sidebar toggle, or a tab-rail drag, and its PTY silently
+        // stayed at whatever size it was last dragged to.
+        this._splitPane?.fit();
       }, 300); // Trailing-edge: only fire after 300ms of no resize events
     };
 
@@ -1887,24 +2016,22 @@ Object.assign(CodemanApp.prototype, {
     this.terminal?.select?.(index % cols, Math.floor(index / cols), length);
   },
 
-  /** Long-press fired: select the word under the finger and arm drag-to-extend. */
+  /** Long-press fired: swallow the platform gesture, then select a word if one exists. */
   _beginTouchSelection(clientX, clientY) {
+    // Reaching the 350ms threshold makes this a long press even when the finger
+    // landed on blank space. Arm every guard before looking for a word so Chrome
+    // cannot focus xterm's hidden textarea, and leave _touchSelecting set so the
+    // touchend branch preventDefaults the compatibility mouse sequence.
+    this._blurMobileTerminalInput();
+    this._suppressTrustedTapMouseEvents();
+    this._armTouchSelectionFocusGuard();
+    this._touchSelecting = true;
     const cell = this._touchSelectionCellAt(clientX, clientY);
     if (!cell) return false;
     const word = this._touchSelectionWordAt(cell);
     if (!word) return false;
-    // The keyboard must not sit on top of the thing being selected, and the
-    // composer would eat the selection on its next keystroke anyway.
-    this._blurMobileTerminalInput();
     this._touchSelectionAnchor = word;
-    this._touchSelecting = true;
     this._touchSelectionActive = true;
-    // From here until the gesture ends, no trusted mouse event may reach xterm —
-    // see _endTouchSelectionGesture for why — and the terminal input may not take
-    // focus. Both are re-armed as the gesture continues, since their windows are
-    // short and a press can be held for much longer.
-    this._suppressTrustedTapMouseEvents();
-    this._armTouchSelectionFocusGuard();
     this._applyTouchSelection(word.index, word.length);
     // Android answers; iOS ignores it silently. Both are fine.
     try {
@@ -3133,6 +3260,38 @@ Object.assign(CodemanApp.prototype, {
     return buffer.viewportY >= buffer.baseY - 2;
   },
 
+  /**
+   * Re-take the sticky-scroll baseline from where the viewport now sits.
+   *
+   * `batchTerminalWrite` samples `_wasAtBottomBeforeWrite` before it queues
+   * data, and `flushPendingWrites` scrolls to the bottom off that sample. A
+   * buffer load that replays its queue samples at the worst possible moment:
+   * `_finishBufferLoad` runs inside `chunkedTerminalWrite`, before its promise
+   * resolves, with the terminal freshly reset and rewritten, so the sample is
+   * always true. A caller that then restores the reader's position would have
+   * that restore undone by the next flush.
+   *
+   * `_onSessionNeedsRefresh` and `_maybeRefetchFullHistory` restore a position
+   * and both call this, so their baseline describes the position they chose.
+   *
+   * The other two load paths do not call it, for different reasons.
+   * `_onSessionClearTerminal` resets and rewrites with no scroll afterwards,
+   * so the sampled true is already the truth there. `selectSession` does NOT
+   * end at the bottom, whatever its `scrollToBottom()` after the write
+   * suggests: it ends at `scrollToLastNonEmptyLine()`, which targets
+   * `lastNonEmptyLine - rows + 2` and therefore parks ABOVE `baseY` whenever
+   * the replayed frame keeps trailing blank rows, which a full capture does on
+   * purpose. Its baseline is a stale true. What decides whether that matters
+   * is the sticky snap in `flushPendingWrites`, and since de864e7d that snap
+   * fires only when the flush found the viewport already at the bottom
+   * (`preserveViewportY === null`), which a parked selectSession viewport is
+   * not. Do not read the absent call here as a claim that selectSession lands
+   * at the bottom.
+   */
+  _syncStickyScrollBaseline() {
+    this._wasAtBottomBeforeWrite = this.isTerminalAtBottom();
+  },
+
   // Record manual scroll gestures so sticky-scroll can give an upward scroll a
   // short grace window (see _hasRecentUserScrollUp). A downward scroll that
   // lands back at the bottom clears the suppression immediately.
@@ -3264,12 +3423,116 @@ Object.assign(CodemanApp.prototype, {
     return performance.now() - this._lastUserScrollUpAt < window.CodemanTerminalInput.USER_SCROLL_STICKY_SUPPRESS_MS;
   },
 
+  /**
+   * Watchdog for a frozen renderer.
+   *
+   * iOS DISCARDS scheduled requestAnimationFrame callbacks when a PWA goes to
+   * the background — not deferred, never delivered. xterm's RenderDebouncer
+   * only clears its `_animationFrame` handle from INSIDE that callback, so once
+   * one is dropped the handle stays permanently non-undefined and every later
+   * `refresh()` returns on its first line. Parsing is decoupled from rendering,
+   * so bytes keep filling the buffer correctly and nothing throws: the terminal
+   * is simply frozen until the page is reloaded.
+   *
+   * Codeman is more exposed than an app that mounts a terminal per session —
+   * there is exactly ONE xterm instance for the whole page load, so a single
+   * backgrounding can wedge it for the rest of the session.
+   *
+   * The heal is what `_innerRefresh` would have done: cancel the stale handle,
+   * clear the field, and request a full repaint (which schedules a fresh rAF).
+   * Cancelling a genuinely pending handle is harmless — the full repaint that
+   * follows covers whatever it was going to draw.
+   *
+   * Discipline for reaching into xterm privates, and it is not optional: every
+   * access is optional-chained and the whole body is wrapped, so a shape change
+   * upstream degrades to a no-op. A self-heal that can break the terminal it is
+   * healing is worse than no self-heal.
+   *
+   * ⚠️ The field path (`_core._renderService._renderDebouncer._animationFrame`)
+   * is validated against xterm 6.x and CANNOT be covered by the CI gate:
+   * `_renderService` is only constructed by `Terminal.open()`, which needs a
+   * real DOM, and the gate runs in node. `test/xterm-private-api.test.ts` pins
+   * the RESOLVED lockfile version instead, so ANY bump fails there — not only a
+   * major — and sends someone to re-check this by hand; the declared `^6.0.0`
+   * range was the wrong assertion in both directions, since 6.4.0 could rename a
+   * private field while resolving inside it. `test/terminal-resilience.test.ts`
+   * covers the decision half. If the path ever goes stale the watchdog silently
+   * stops healing — that is the failure mode to watch for, and why the version
+   * guard exists at all.
+   */
+  _startRenderLivenessWatchdog() {
+    this._stopRenderLivenessWatchdog();
+    this._lastRenderAt = Date.now();
+    this._lastTerminalWriteAt = 0;
+    this._renderLivenessTimer = setInterval(() => {
+      try {
+        if (typeof CodemanRenderLiveness === 'undefined') return;
+        const kick = CodemanRenderLiveness.shouldKickRenderer({
+          wroteAt: this._lastTerminalWriteAt || 0,
+          renderedAt: this._lastRenderAt || 0,
+          now: Date.now(),
+          // A hidden terminal legitimately stops rendering (xterm pauses it),
+          // so only a VISIBLE one that owes us a frame counts as frozen.
+          visible: document.visibilityState === 'visible' && !!this.terminal?.element?.isConnected,
+        });
+        if (!kick) return;
+        const kicked = this._kickRenderer();
+        _crashDiag.log(`RENDER STALL: kick=${kicked}`);
+        // Treat the kick as the render for accounting purposes either way, so a
+        // terminal we cannot heal logs once per stall rather than every tick.
+        this._lastRenderAt = Date.now();
+      } catch {
+        /* a watchdog must never throw into the interval */
+      }
+    }, RENDER_LIVENESS_POLL_MS);
+  },
+
+  _stopRenderLivenessWatchdog() {
+    if (this._renderLivenessTimer) {
+      clearInterval(this._renderLivenessTimer);
+      this._renderLivenessTimer = null;
+    }
+  },
+
+  /**
+   * Do what xterm's dropped `_innerRefresh` would have done. Never throws.
+   * @returns {boolean} true if a stale handle was found and cleared.
+   */
+  _kickRenderer() {
+    try {
+      const renderService = this.terminal?._core?._renderService;
+      const debouncer = renderService?._renderDebouncer;
+      if (!debouncer || typeof renderService.refreshRows !== 'function') return false;
+      const handle = debouncer._animationFrame;
+      if (handle === undefined) return false; // not wedged — nothing to clear
+      try {
+        cancelAnimationFrame(handle);
+      } catch {
+        /* a stale handle may no longer be cancellable; clearing it is the point */
+      }
+      debouncer._animationFrame = undefined;
+      renderService.refreshRows(0, Math.max(0, (this.terminal.rows || 1) - 1));
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
   batchTerminalWrite(data) {
+    // Feed the renderer watchdog. Recorded before the buffer-load early return
+    // below: a write that is queued rather than written still means the pipeline
+    // owes us a frame once it drains.
+    this._lastTerminalWriteAt = Date.now();
+
     // If a buffer load (chunkedTerminalWrite) is in progress, queue live events
     // to prevent interleaving historical buffer data with live SSE data.
     // This is critical: interleaving causes cursor position chaos with Ink redraws.
     if (this._isLoadingBuffer) {
-      if (this._loadBufferQueue) this._loadBufferQueue.push(data);
+      // Each entry records when it arrived. A flush of a tmux-capture load
+      // replays only what arrived after the capture; without the timestamp it
+      // would have to replay the whole queue, duplicating the events the
+      // capture already contains. See _finishBufferLoad's `since`.
+      if (this._loadBufferQueue) this._loadBufferQueue.push({ at: performance.now(), data });
       return;
     }
 
@@ -3518,6 +3781,29 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Re-assert a history anchor captured before a terminal write (#358).
+   *
+   * Called from xterm's write callback, never synchronously after write():
+   * xterm parses on its own schedule, so the buffer only carries the redraw's
+   * effect once that callback fires. A null anchor means the user was following
+   * live output and nothing needs restoring.
+   */
+  _restoreTerminalViewport(preserveViewportY, sessionId) {
+    if (preserveViewportY === null || preserveViewportY === undefined) return;
+    // The anchor is a row index into the buffer it was captured from. Now that
+    // this runs a parse later instead of synchronously, a session switch can land
+    // in between: selectSession() resets the terminal and chunk-loads the new
+    // session's scrollback, and scrolling THAT buffer to a row that meant
+    // something in the previous one is not a restore, it is a jump to an
+    // arbitrary place. Both checks cover one half of that window.
+    if (sessionId !== undefined && sessionId !== this.activeSessionId) return;
+    if (this._isLoadingBuffer) return;
+    if (typeof this.terminal?.scrollToLine !== 'function') return;
+    if (this.terminal.buffer?.active?.viewportY === preserveViewportY) return;
+    this.terminal.scrollToLine(preserveViewportY);
+  },
+
+  /**
    * Flush pending writes to terminal, processing DEC 2026 sync markers.
    * Strips markers and writes content atomically within a single frame.
    */
@@ -3552,6 +3838,8 @@ Object.assign(CodemanApp.prototype, {
     // scroll-to-bottom below, where it protects against a mid-flush race.
     const preserveViewportY =
       this.terminal.buffer?.active && !this.isTerminalAtBottom() ? this.terminal.buffer.active.viewportY : null;
+    // Which buffer the anchor belongs to, checked again when the write parses.
+    const flushSessionId = this.activeSessionId;
 
     const writeChunk = joined.slice(0, MAX_FRAME_BYTES);
     if (_joinedLen > MAX_FRAME_BYTES) {
@@ -3566,19 +3854,22 @@ Object.assign(CodemanApp.prototype, {
       this.terminal.write(writeChunk, () => {
         this._terminalWriteInFlight = false;
         this._terminalWriteInFlightBytes = 0;
+        // Restore INSIDE the callback (#358). xterm parses asynchronously, so
+        // the moment write() returns the buffer has not moved yet: the old
+        // restore ran here, found viewportY still equal to the anchor, and did
+        // nothing at all — then the parse landed and a cursor-addressed Codex
+        // redraw dragged the viewport to the live bottom with nothing left to
+        // pull it back. The callback is xterm's own "this chunk is parsed"
+        // signal, which is the earliest point the anchor can actually be
+        // reasserted. (The synchronous version passed its regression test only
+        // because the test's write mock moved the viewport synchronously.)
+        this._restoreTerminalViewport(preserveViewportY, flushSessionId);
         this._scheduleTerminalWriteFlush();
       });
     } catch (err) {
       this._terminalWriteInFlight = false;
       this._terminalWriteInFlightBytes = 0;
       throw err;
-    }
-    if (
-      preserveViewportY !== null &&
-      this.terminal.buffer?.active?.viewportY !== preserveViewportY &&
-      typeof this.terminal.scrollToLine === 'function'
-    ) {
-      this.terminal.scrollToLine(preserveViewportY);
     }
     const bytesThisFrame = deferred ? MAX_FRAME_BYTES : _joinedLen;
     const _dt = performance.now() - _t0;
@@ -3591,7 +3882,13 @@ Object.assign(CodemanApp.prototype, {
     // Give manual scroll-up gestures a short grace window so high-frequency
     // Codex status ticks do not snap the viewport back while the user is
     // trying to inspect earlier output.
-    if (this._wasAtBottomBeforeWrite && !this._hasRecentUserScrollUp()) {
+    //
+    // A live anchor wins outright. The two flags are captured at different
+    // moments (_wasAtBottomBeforeWrite at the frame's first batchTerminalWrite,
+    // the anchor at flush time), so a scroll-up in between leaves both set; now
+    // that the anchor is reasserted after the parse, running both would jump to
+    // the bottom and then back one frame later instead of simply staying put.
+    if (preserveViewportY === null && this._wasAtBottomBeforeWrite && !this._hasRecentUserScrollUp()) {
       this.terminal.scrollToBottom();
     }
 
@@ -3749,9 +4046,14 @@ Object.assign(CodemanApp.prototype, {
    * and a tick-Worker so progress continues on occluded / idle-throttled tabs.
    * @param {string} buffer - The full terminal buffer to write
    * @param {number} chunkSize - Size of each chunk (default 32KB)
+   * @param {string} [loadOwner] - Load token to finish under
+   * @param {{ flushQueued?: boolean, since?: number }} [finishOpts] - Passed to
+   *   `_finishBufferLoad`. This method ends the load for every non-empty buffer,
+   *   so a caller that wants the queue replayed has to say so HERE; the call in
+   *   `selectSession` only runs when the write was skipped entirely.
    * @returns {Promise<{parsedAt: number, bufferLength: number, completed: boolean}>} Parse marker snapshot
    */
-  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner) {
+  chunkedTerminalWrite(buffer, chunkSize = TERMINAL_CHUNK_SIZE, loadOwner, finishOpts) {
     // Generation counter: if a newer chunkedTerminalWrite starts (tab switch),
     // older writes abort instead of continuing to push stale data into the terminal.
     const writeGen = ++this._chunkedWriteGen;
@@ -3764,7 +4066,7 @@ Object.assign(CodemanApp.prototype, {
         completed,
       });
       if (!buffer || buffer.length === 0) {
-        this._finishBufferLoad(bufferLoadOwner);
+        this._finishBufferLoad(bufferLoadOwner, finishOpts);
         resolve(parseSnapshot());
         return;
       }
@@ -3778,7 +4080,7 @@ Object.assign(CodemanApp.prototype, {
         this.terminal.write(cleanBuffer, () => resolve(parseSnapshot()));
         // The write is now ordered in xterm's queue. Release live output before
         // parsing completes; subsequent writes stay behind it without being lost.
-        this._finishBufferLoad(bufferLoadOwner);
+        this._finishBufferLoad(bufferLoadOwner, finishOpts);
         return;
       }
 
@@ -3809,7 +4111,7 @@ Object.assign(CodemanApp.prototype, {
             );
             resolve(result);
           });
-          this._finishBufferLoad(bufferLoadOwner);
+          this._finishBufferLoad(bufferLoadOwner, finishOpts);
           return;
         }
 
@@ -3824,14 +4126,48 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
+   * Open a buffer load: live terminal events are queued from here until
+   * `_finishBufferLoad` decides what to do with them. Returns the load token the
+   * finish call must present; a stale token makes that call a no-op.
+   *
+   * @param {string} [owner] Reuse an existing token to re-enter the same load
+   *   (see below); omit it to start a new one.
+   * @returns {string} The load token.
+   */
+  _beginBufferLoad(owner) {
+    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
+    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
+    // `selectSession` opens the load before its fetch, and `chunkedTerminalWrite`
+    // opens it again under the SAME owner when it starts writing. Resetting the
+    // queue on that second call would throw away everything that arrived during
+    // the fetch, which on the capture path is output no buffer holds. Re-entering
+    // one load keeps its queue; a genuinely new load still starts empty.
+    const reentering = this._bufferLoadOwner === loadOwner && Array.isArray(this._loadBufferQueue);
+    this._bufferLoadOwner = loadOwner;
+    this._isLoadingBuffer = true;
+    if (!reentering) this._loadBufferQueue = [];
+    return loadOwner;
+  },
+
+  /**
    * Complete a buffer load: unblock live SSE writes.
    * Called when chunkedTerminalWrite finishes (or is skipped for empty buffers).
    *
    * By default queued SSE events are DISCARDED, not flushed. For an established
-   * session the loaded buffer from the API is the source of truth up to the
-   * response timestamp; SSE events queued during the fetch+write overlap already
-   * appear in that buffer, so flushing them writes duplicate data (especially Ink
-   * cursor-up redraws), corrupting the terminal display.
+   * session whose buffer came from the server's accumulated byte history, that
+   * history is the source of truth up to the response timestamp; SSE events
+   * queued during the fetch+write overlap already appear in it, so flushing
+   * them writes duplicate data (especially Ink cursor-up redraws), corrupting
+   * the terminal display.
+   *
+   * A tmux PANE CAPTURE is the exception, and the reason `since` exists. A
+   * capture is a point-in-time frame taken part-way through the fetch, so it is
+   * the source of truth only up to CAPTURE time — not up to the response. Every
+   * event that arrives between the capture and the end of the chunked write is
+   * queued and, under a plain discard, lost outright: nothing re-fetches, and
+   * the CLI's next partial redraw lands on a frame the terminal never received.
+   * The caller passes the response's own arrival time as `since` so exactly
+   * that tail is replayed and the pre-capture events stay dropped.
    *
    * COD-144: a brand-new session is the exception. Its terminal fetch can resolve
    * BEFORE the PTY emits its first prompt, so the fetched buffer is empty and the
@@ -3845,17 +4181,10 @@ Object.assign(CodemanApp.prototype, {
    * After unblocking, new SSE/WS events deliver subsequent output normally.
    *
    * @param {string} [owner] Load token from `_beginBufferLoad`; a stale owner is a no-op.
-   * @param {{ flushQueued?: boolean }} [opts] When `flushQueued` is true, replay any queued events.
+   * @param {{ flushQueued?: boolean, since?: number }} [opts] When `flushQueued`
+   *   is true, replay queued events whose arrival timestamp is at or after
+   *   `since` (default 0, meaning the whole queue).
    */
-  _beginBufferLoad(owner) {
-    if (this._bufferLoadSeq === undefined) this._bufferLoadSeq = 0;
-    const loadOwner = owner === undefined ? `buffer-${++this._bufferLoadSeq}` : owner;
-    this._bufferLoadOwner = loadOwner;
-    this._isLoadingBuffer = true;
-    this._loadBufferQueue = [];
-    return loadOwner;
-  },
-
   _finishBufferLoad(owner, opts) {
     if (owner !== undefined && this._bufferLoadOwner !== owner) {
       return false;
@@ -3866,9 +4195,13 @@ Object.assign(CodemanApp.prototype, {
     this._bufferLoadOwner = null;
     // COD-144: replay (rather than discard) queued live events when the load
     // painted nothing — the queued prompt is the only content a new session has.
+    // A tmux-capture load replays too, but only the tail: `since` cuts the queue
+    // at the moment the capture stopped being able to contain what arrived.
     if (opts?.flushQueued && queued && queued.length) {
-      for (const data of queued) {
-        this.batchTerminalWrite(data);
+      const since = typeof opts.since === 'number' ? opts.since : 0;
+      for (const entry of queued) {
+        if (entry.at < since) continue;
+        this.batchTerminalWrite(entry.data);
       }
     }
     return true;
@@ -3922,8 +4255,9 @@ Object.assign(CodemanApp.prototype, {
       this._localEchoOverlay.suppressBufferDetection();
       this._flushedOffsets?.delete(this.activeSessionId);
       this._flushedTexts?.delete(this.activeSessionId);
-      if (flushed.count > 0) {
-        this.sendInput('\x7f'.repeat(flushed.count)).catch(() => {});
+      const flushedLength = Array.from(flushed.text || '').length;
+      if (flushedLength > 0) {
+        this.sendInput('\x7f'.repeat(flushedLength)).catch(() => {});
       }
     } else {
       // In non-local-echo mode the TUI already owns the editable buffer. Ctrl+U
@@ -4009,12 +4343,125 @@ Object.assign(CodemanApp.prototype, {
     return !ev.altKey && (ev.key || '').toLowerCase() === 'c';
   },
 
+  /**
+   * xterm's current selection, cleaned for the clipboard. The transform itself
+   * is CodemanCopySelection.clean in constants.js, beside decideAutoCopy; this
+   * is the half that needs the live terminal.
+   *
+   * `text` is for the callers that already read the selection to decide whether
+   * to copy at all (the Ctrl+C gate and the right-click handler), so the read is
+   * not repeated.
+   *
+   * ⚠️ **Pass the RAW selection, never an already-cleaned one.** The trailing
+   * trim alone is a fixed point, because a CR is consumed by the parser as a
+   * cursor move and never stored in a cell, so the only \r the selection can
+   * carry is the Windows line join. The MARGIN strip is not: it takes the
+   * narrower of the declared width and the run every line shares, so a second
+   * pass over an already-stripped block takes up to `margin` columns more. A
+   * caller that cleans to decide whether to copy must still hand the raw text
+   * to copyTerminalSelection, which cleans once on its own.
+   *
+   * A COLUMN selection comes back untouched. Alt+drag makes one (xterm's
+   * shouldColumnSelect keys on altKey alone, and Codeman sets neither of the
+   * terminals it creates with the one option that would disable it), and a
+   * rectangle's whole point is that its rows line up, which trimming each row
+   * to its own last glyph would destroy. xterm exposes the mode nowhere public,
+   * so this reads the private field the way this file already reads
+   * terminal._core for cell dimensions, and falls back to cleaning normally if
+   * a future xterm renames it. SelectionMode.COLUMN is 3.
+   */
+  cleanedTerminalSelection(text) {
+    const raw = text ?? (this.terminal?.hasSelection?.() ? this.terminal.getSelection() : '');
+    if (!raw) return '';
+    if (this.terminal?._core?._selectionService?._activeSelectionMode === 3) return raw;
+    const clean = window.CodemanCopySelection?.clean;
+    if (!clean) return raw;
+    const range = this._normalisedSelectionRange();
+    return clean(raw, {
+      margin: this._cliGutterColumns(),
+      firstLinePartial: !!range && range.start.x > 0,
+    });
+  },
+
+  /**
+   * xterm's selection range with its two ends in reading order.
+   *
+   * `getSelectionPosition()` reports `start` and `end` as the two ends of the
+   * drag, and on xterm 6.0 it already hands back the earlier one first: it
+   * reads `_selectionService.selectionStart`, whose getter returns the model's
+   * `finalSelectionStart`, and that swaps the pair for a reversed selection.
+   * A real upward mouse drag through chromium confirms it. The ordering here
+   * is a guard rather than a fix. One layer down the same model exposes the
+   * UNNORMALISED fields under the same two names, and a reversed pair would
+   * make the row window below run backwards and collapse, which would report
+   * no margin at all for every upward drag in a deep buffer.
+   *
+   * `terminal` names which xterm to read, defaulting to the primary pane's.
+   * Pane B of a split owns a second terminal and passes it, because this file's
+   * `this` is always the primary pane.
+   */
+  _normalisedSelectionRange(terminal) {
+    const range = (terminal ?? this.terminal)?.getSelectionPosition?.();
+    if (!range?.start || !range?.end) return null;
+    const { start, end } = range;
+    const reversed = end.y < start.y || (end.y === start.y && end.x < start.x);
+    return reversed ? { start: end, end: start } : { start, end };
+  },
+
+  /**
+   * How many columns to take off a copy from one session's pane: the transcript
+   * gutter its CLI declares, or 0 when it declares none. `sessionId` defaults to
+   * the active session, and Pane B of a split passes its own, so both panes of a
+   * split strip the width their own CLI declares rather than Pane A's.
+   *
+   * ⚠️ Read from `window.__codemanTranscriptGutter`, the map the server derives
+   * from the `transcriptGutter` CAPABILITY at render time — never an id literal
+   * here, which is the registry's standing rule and is also what lets a CLI that
+   * declares a gutter later work with no change to this file.
+   *
+   * ⚠️ DECLARED rather than measured off the buffer, and two measured versions
+   * are why. Asking whether the pane painted spaces across the unused part of
+   * each row separates a TUI from a shell perfectly where it fires and never
+   * over-stripped, but it is a function of pane WIDTH, since that padding exists
+   * only while a rendered line stops short of the CLI's own layout width and
+   * Claude Code's prose wraps to fill it: the share of padded rows on one live
+   * transcript ran 44%, 6%, 6%, 7% and 87% at 123, 160, 198, 235 and 298
+   * columns, so the strip did nothing at any ordinary window size. Taking the
+   * narrowest indent on the rows around the selection instead fires at every
+   * width and over-strips on about 1% of them, because a file listing inside the
+   * transcript can be the narrowest thing on screen. A declared width does
+   * neither, and it reads no buffer rows at all on a path that runs on every
+   * Ctrl+C.
+   *
+   * A missing map means no session gets a strip, the same direction an
+   * unmeasured CLI takes by declaring nothing.
+   */
+  _cliGutterColumns(sessionId) {
+    if (!this._copyStripMarginEnabled()) return 0;
+    const byMode = window.__codemanTranscriptGutter;
+    if (!byMode || typeof byMode !== 'object') return 0;
+    const mode = this.sessions?.get(sessionId ?? this.activeSessionId)?.mode;
+    const columns = mode ? byMode[mode] : 0;
+    return Number.isInteger(columns) && columns > 0 ? columns : 0;
+  },
+
   // Copy the current terminal selection. Goes through _copyText (Clipboard API,
   // then a hidden-textarea + execCommand fallback) because install.sh's LAN
   // option serves plain HTTP, where navigator.clipboard is undefined.
   async copyTerminalSelection(text) {
-    const selection = text ?? (this.terminal.hasSelection?.() ? this.terminal.getSelection() : '');
-    if (!selection) return false;
+    const selection = this.cleanedTerminalSelection(text);
+    // trim(), not emptiness: a multi-row drag across padding cleans to newlines
+    // alone, which are truthy, and a bare newline pasted into a chat composer
+    // or a shell submits the line. decideAutoCopy applies the same rule.
+    if (!selection.trim()) {
+      // Clearing is feedback, not protection. The Ctrl+C gate tests the CLEANED
+      // selection, so a padding-only selection left set can no longer swallow a
+      // later interrupt; it cleans to '' and the press reaches the PTY. What the
+      // clear avoids is a highlight that sits there having copied nothing.
+      this.terminal?.clearSelection?.();
+      this.showToast('Nothing to copy', 'warning');
+      return false;
+    }
     const ok = await this._copyText(selection);
     if (ok) {
       // Clearing is what makes a second Ctrl+C an interrupt (and xterm already
@@ -4028,6 +4475,26 @@ Object.assign(CodemanApp.prototype, {
     // is the CJK-aware focus router, not xterm's raw focus().
     this.terminal.focus();
     return ok;
+  },
+
+  /**
+   * Whether this device wants the pane's left margin off the clipboard
+   * (`copyStripMargin`, per-device, default ON).
+   *
+   * Read here rather than mirrored into a field, for the same reason
+   * `_autoCopySelectionEnabled` is: there is then no apply-path a future
+   * settings save can forget to call, and the toggle takes effect on the next
+   * selection instead of the next reload. ⚠️ The test is `!== false`, not
+   * `=== true`: this one defaults ON, and the desktop branch of
+   * getDefaultSettings returns {} and leans on the read sites for defaults, so
+   * a device that has never opened App Settings has no stored value at all.
+   */
+  _copyStripMarginEnabled() {
+    try {
+      return this.loadAppSettingsFromStorage?.()?.copyStripMargin !== false;
+    } catch {
+      return true;
+    }
   },
 
   /**
@@ -4063,9 +4530,15 @@ Object.assign(CodemanApp.prototype, {
   async _flushAutoCopySelection() {
     const decide = window.CodemanAutoCopy?.decide;
     if (!decide || !this.terminal) return;
-    const text = this.terminal.hasSelection?.() ? this.terminal.getSelection() : '';
+    // The toggle is read FIRST because Auto Copy is off by default: reading and
+    // cleaning a selection that can run to the 50 000-row scrollback ceiling
+    // costs real time on a phone, and every mouseup would pay it for nothing.
+    // Cleaning before decide() then means its dedupe and size cap both measure
+    // the text that actually reaches the clipboard, not the padded rows behind.
+    const enabled = this._autoCopySelectionEnabled();
+    const text = enabled ? this.cleanedTerminalSelection() : '';
     const verdict = decide({
-      enabled: this._autoCopySelectionEnabled(),
+      enabled,
       text,
       lastCopied: this._autoCopyLastText,
       pending: !!this._autoCopyPending,
@@ -4846,6 +5319,51 @@ Object.assign(CodemanApp.prototype, {
     this._sendSyntheticSgrTap(ev.clientX, ev.clientY);
   },
 
+  /**
+   * Make Shift+drag START a selection instead of trying to extend one.
+   *
+   * In a native terminal running a mouse-tracking TUI (claude, codex), Shift is
+   * the "let me select text" modifier: it bypasses the app's mouse reporting so
+   * the emulator selects locally. Users bring that habit here, and here it did
+   * NOTHING — Shift+drag selected no text at all (measured).
+   *
+   * The reason is that the habit and xterm's Shift mean different things once
+   * the DECSETs are stripped. xterm reads Shift as "force selection" ONLY while
+   * the app actually has mouse tracking on; the server strips those DECSETs for
+   * claude/codex/gemini (isAltScreenStripMode), so xterm's mouseTrackingMode is
+   * permanently `none`, that branch is unreachable, and Shift instead falls into
+   * `_onIncrementalClick` — EXTEND an existing selection. Extending is a no-op
+   * when `selectionStart` is null, so the drag never anchors and no selection is
+   * ever built (this is why nothing gets cleared: there was nothing to clear).
+   *
+   * So plant the anchor xterm is missing. Runs in the CAPTURE phase on the
+   * `.xterm` root, an ancestor of the `.xterm-screen` element SelectionService
+   * binds to, so it lands before xterm's own mousedown; xterm's incremental
+   * handler then extends from our anchor and the drag behaves like a plain one.
+   * A Shift+drag with a selection ALREADY up is left alone — that is a genuine
+   * extend gesture and xterm already does it right.
+   */
+  _installShiftDragSelection() {
+    const el = this.terminal?.element;
+    if (!el || el._codemanShiftDragInstalled) return;
+    el._codemanShiftDragInstalled = true;
+    el.addEventListener(
+      'mousedown',
+      (ev) => {
+        if (!ev.isTrusted || ev.button !== 0 || !ev.shiftKey) return;
+        if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+        if (this.terminal?.hasSelection?.()) return;
+        const pos = this._clientPointToCell(ev.clientX, ev.clientY);
+        if (!pos) return;
+        // _clientPointToCell is 1-based and viewport-relative; select() takes a
+        // 0-based column and an ABSOLUTE buffer row.
+        const viewportY = this.terminal.buffer?.active?.viewportY ?? 0;
+        this.terminal.select(pos.col - 1, pos.row - 1 + viewportY, 0);
+      },
+      true
+    );
+  },
+
   _installMobileTapMouseGuard() {
     const el = this.terminal?.element;
     if (!el || el._codemanTapMouseGuardInstalled) return;
@@ -4879,11 +5397,15 @@ Object.assign(CodemanApp.prototype, {
   setFontSize(size) {
     this.terminal.options.fontSize = size;
     document.getElementById('fontSizeDisplay').textContent = size;
-    this.fitAddon.fit();
+    this._refitAfterCellSizeChange();
     localStorage.setItem('codeman-font-size', size);
     // Update overlay font cache and re-render at new cell dimensions
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontSize = size;
+      this._splitPane.fitAddon?.fit();
+    }
   },
 
   /**
@@ -4904,11 +5426,15 @@ Object.assign(CodemanApp.prototype, {
     // without needing a tab switch. The fit below still runs, so the terminal
     // is never left unfitted if the wait is slow.
     this._terminalFontReady = this._awaitTerminalFont().then(() => {
-      if (this.terminal?.options?.fontFamily === resolved) this.fitAddon?.fit();
+      if (this.terminal?.options?.fontFamily === resolved) this._refitAfterCellSizeChange();
     });
-    this.fitAddon?.fit();
+    this._refitAfterCellSizeChange();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontFamily = resolved;
+      this._splitPane.fitAddon?.fit();
+    }
   },
 
   /**
@@ -4945,9 +5471,9 @@ Object.assign(CodemanApp.prototype, {
     // rasterized yet. Re-arm the wait and fit again once it settles; the fit
     // below still runs, so the terminal is never left unfitted.
     this._terminalFontReady = this._awaitTerminalFont().then(() => {
-      if (this.terminal?.options?.fontWeight === fontWeight) this.fitAddon?.fit();
+      if (this.terminal?.options?.fontWeight === fontWeight) this._refitAfterCellSizeChange();
     });
-    this.fitAddon?.fit();
+    this._refitAfterCellSizeChange();
     this._localEchoOverlay?.refreshFont();
     this._predictiveEcho?.refreshFont();
     for (const [, entry] of this.teammateTerminals || []) {
@@ -4959,6 +5485,11 @@ Object.assign(CodemanApp.prototype, {
       } catch {
         /* pane not laid out yet — its own resize observer refits it */
       }
+    }
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.fontWeight = fontWeight;
+      this._splitPane.terminal.options.fontWeightBold = fontWeightBold;
+      this._splitPane.fitAddon?.fit();
     }
   },
 
@@ -5033,19 +5564,126 @@ Object.assign(CodemanApp.prototype, {
   },
 
   /**
-   * Get terminal dimensions with minimum enforcement.
-   * Prevents extremely narrow terminals that cause vertical text wrapping.
+   * The geometry this terminal would report right now, floors applied.
+   * Reads only — `syncTerminalGeometry()` is what makes it true of xterm.
    * @returns {{cols: number, rows: number}|null}
    */
   getTerminalDimensions() {
-    const MIN_COLS = 40;
-    const MIN_ROWS = 10;
-    const dims = this.fitAddon?.proposeDimensions();
+    // Never throws. `proposeDimensions()` reads a rendered element and throws
+    // on a terminal that has been disposed or detached mid-resize, which is an
+    // ordinary outcome on a tab switch — and this is called from the settle
+    // timer and the resize observer, where an exception takes the rest of the
+    // callback (the padding fit, the scroll restore, the SIGWINCH) with it.
+    try {
+      return window.CodemanTerminalGeometry.clampTerminalDimensions(this.fitAddon?.proposeDimensions());
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * Fit xterm to its container and return the geometry that was APPLIED.
+   *
+   * ⚠️ THE ONLY function that may change the terminal's size, and the only
+   * source of the numbers sent to the server. `fitAddon.fit()` on its own is
+   * not enough and the gap is issue #464: fit() resizes xterm to
+   * `proposeDimensions()` RAW, while every server-facing path reported those
+   * dimensions floored at 40x10. Whenever the floor bit — a phone with the
+   * keyboard up routinely proposes under ten rows — the PTY was told one shape
+   * and xterm held another, and Claude Code then computed every repaint for a
+   * screen that did not exist. See the note in constants.js for what that
+   * renders as, and why the floor is not negotiable at either end.
+   *
+   * Three call sites each used to do their own fit-then-clamp
+   * (`throttledResize`, `sendResize`, KeyboardHandler's one-shot), which is
+   * three chances to disagree; two of them also re-read `proposeDimensions()`
+   * after the fit, so a container that moved in between — `_shrinkPaddingToFit`
+   * runs exactly there — changed the answer without touching xterm.
+   *
+   * The second resize only happens when the floor actually bites, so the
+   * ordinary path still reflows once, as before.
+   *
+   * @returns {{cols: number, rows: number}|null} null when the terminal cannot be measured
+   */
+  syncTerminalGeometry() {
+    if (!this.fitAddon || !this.terminal) return null;
+    try {
+      this.fitAddon.fit();
+    } catch {
+      /* a disposed or unattached terminal cannot be fitted; fall through to the read */
+    }
+    const dims = this.getTerminalDimensions();
     if (!dims) return null;
-    return {
-      cols: Math.max(dims.cols, MIN_COLS),
-      rows: Math.max(dims.rows, MIN_ROWS),
-    };
+    if (!this._resizeTerminalTo(dims)) return null;
+    // The floor can leave this terminal wider than the box that shows it, and
+    // that clips columns with no gesture to reach them (issue #464, item 4).
+    this._scheduleOverflowAffordanceSync();
+    return dims;
+  },
+
+  /**
+   * The geometry to ASK the server for, applied locally only as far as the PTY
+   * can follow it.
+   *
+   * Ordinarily that is all of it: `syncTerminalGeometry()`. While another
+   * device holds the width (`_paneWidthRefused`, set by `_onPtyGeometryReport`)
+   * it is not. Fitting then re-wraps xterm to the container's columns, the
+   * request is refused, the report puts the PTY's columns back, and the whole
+   * buffer re-wraps twice per ask, with the viewport pointing at a different
+   * part of the scrollback in between. The mobile retry asks every 30 seconds,
+   * so that happened on a timer for as long as the refusal lasted. So the
+   * columns stay at the PTY's (the #464 invariant: the browser never draws at
+   * a width the PTY does not have), the rows follow the container (they are
+   * never adopted, see reconcilePtyGeometry), and the container's columns go
+   * out as the request. An accepted request is adopted by the report.
+   *
+   * @returns {{cols: number, rows: number}|null} the geometry to request
+   */
+  _geometryForResizeRequest() {
+    if (!this._paneWidthRefused) return this.syncTerminalGeometry();
+    const wanted = this.getTerminalDimensions();
+    if (!wanted || !this.terminal) return null;
+    if (!this._resizeTerminalTo({ cols: this.terminal.cols, rows: wanted.rows })) return null;
+    this._scheduleOverflowAffordanceSync();
+    return wanted;
+  },
+
+  /**
+   * Re-measure after something changed the CELL size, and tell the server.
+   *
+   * ⚠️ A font change is a geometry change. Bigger glyphs mean fewer columns in
+   * the same box, and the PTY is drawing for a column count nobody updated:
+   * `setFontSize`, `setFontFamily` and `setFontWeight` all refitted the terminal
+   * and sent NOTHING, so raising the font on a phone could drop the browser
+   * below the columns the CLI was still wrapping at until some unrelated resize
+   * event happened along. That is issue #464 reached through the font menu.
+   *
+   * With no session there is no PTY to tell, and a session detached into its own
+   * window is not this terminal's to resize — `sendResize` makes that call, and
+   * fits as its first synchronous step, so this never fits twice.
+   */
+  _refitAfterCellSizeChange() {
+    if (this.activeSessionId) {
+      this.sendResize(this.activeSessionId)?.catch?.(() => {});
+      return;
+    }
+    this.syncTerminalGeometry();
+  },
+
+  /**
+   * Make xterm exactly `dims`. Idempotent, and never throws at a caller — a
+   * terminal disposed mid-resize is an ordinary outcome on a tab switch.
+   * @returns {{cols: number, rows: number}|null} the applied geometry
+   */
+  _resizeTerminalTo(dims) {
+    if (!this.terminal || !dims) return null;
+    if (this.terminal.cols === dims.cols && this.terminal.rows === dims.rows) return dims;
+    try {
+      this.terminal.resize(dims.cols, dims.rows);
+      return dims;
+    } catch {
+      return null;
+    }
   },
 
   /**
@@ -5055,21 +5693,26 @@ Object.assign(CodemanApp.prototype, {
    * @returns {Promise<boolean>} Whether dimensions changed from the last send
    */
   async sendResize(sessionId, options = {}) {
-    // Fit terminal to container before reading dimensions — ensures local
-    // terminal size matches what we report to the server PTY.
-    if (this.fitAddon) this.fitAddon.fit();
     // One PTY cannot hold two sizes. A detached session is owned by its own
     // window, and the dashboard's terminal is narrower than that window because
     // the session rail takes width the popup does not have — so both sizing it
     // makes the CLI draw frames that fit neither, which garbles the popup. The
     // dashboard yields; the solo window sizes what it alone displays.
     // (_maybeRefetchFullHistory already stands aside for the same reason.)
-    // ⚠️ AFTER the fit, never before: the local reflow keeps the dashboard's own
-    // xterm right, and only the SERVER write is the dashboard's to withhold —
-    // the mobile-keyboard guard below draws exactly this line. tab-rail-resize
-    // performs its one settle-time refit through this call and has no fallback.
+    // ⚠️ BEFORE the fit, never after. This used to fit first and withhold only
+    // the server write, on the reasoning that the local reflow keeps the
+    // dashboard's own xterm right. It does not: it leaves this xterm at a shape
+    // the PTY was never told about, which is the #464 divergence exactly — and
+    // the popup that DOES own the PTY is drawing for its own width, so the
+    // dashboard's reflow is to a size nothing is rendering for. Withholding the
+    // resize means withholding all of it. tab-rail-resize performs its one
+    // settle-time refit through this call and has no fallback, which is correct:
+    // a pane it does not own is not its to refit either.
     if (!this.isSoloWindow && this.detachedSessions?.has(sessionId)) return false;
-    const dims = this.getTerminalDimensions();
+    // Fit, floor, and apply in one step so the numbers below are the numbers
+    // xterm is actually holding (or, while another device holds the width,
+    // the numbers this container would hold if the PTY followed).
+    const dims = this._geometryForResizeRequest();
     if (!dims) return false;
     // Did the dimensions actually change since the last resize we sent? Callers
     // use this to skip work (e.g. the post-resize TUI-redraw settle) when no
@@ -5102,12 +5745,148 @@ Object.assign(CodemanApp.prototype, {
     }
     const body = { ...dims, viewportType };
     if (options.force) body.force = true;
-    await fetch(`/api/sessions/${sessionId}/resize`, {
+    const res = await fetch(`/api/sessions/${sessionId}/resize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    // Same report the WS path gets as a {"t":"zc"} frame. An older server
+    // answers `{}`, which reconciles to a no-op rather than throwing.
+    try {
+      const applied = (await res.json())?.data ?? {};
+      this._onPtyGeometryReport(sessionId, applied.cols, applied.rows);
+    } catch {
+      /* a body that is not JSON tells us nothing about the PTY; keep our own geometry */
+    }
     return changed;
+  },
+
+  /**
+   * Adopt the geometry the server says the PTY actually has.
+   *
+   * ⚠️ The server is the authority and this client is not always obeyed.
+   * `Session.resize` declines a small-viewport request outright while a desktop
+   * connection holds an active sizing claim, and says nothing — resize was
+   * write-only until #464. A terminal that keeps its own shape after such a
+   * refusal does not render "too narrow", it renders GARBLED: Claude Code wraps
+   * its frame at the width it was told and walks the cursor up that many rows,
+   * so a mismatch makes its erase count come out short and each repaint paints
+   * over rows it never cleared. Measured against a real xterm — a PTY believing
+   * 120 columns against a 62-column terminal draws every wrapped line twice.
+   *
+   * Adopting can leave the pane wider than the viewport, and the container is
+   * `overflow: hidden`, so `.term-overflows-x` grants horizontal reach for exactly
+   * as long as the mismatch lasts. Correct-and-reachable beats correct-and-
+   * clipped beats garbled; nothing here is worth trapping content behind.
+   *
+   * Self-resolving: `_startMobileResizeRetry` re-sends this device's dimensions
+   * on a timer, so the pane comes back to this screen once the desktop goes
+   * idle, and the next report clears the class and the notice with it.
+   */
+  _onPtyGeometryReport(sessionId, cols, rows) {
+    if (!this.terminal || sessionId !== this.activeSessionId) return;
+    const local = { cols: this.terminal.cols, rows: this.terminal.rows };
+    const { adopt } = window.CodemanTerminalGeometry.reconcilePtyGeometry(local, { cols, rows });
+    // Columns only, and the local row count is kept — see reconcilePtyGeometry
+    // for why adopting rows put the CLI's input line below the container with
+    // nothing able to scroll to it.
+    if (adopt && this._resizeTerminalTo({ cols, rows: local.rows })) {
+      // The numbers we would report next are now the PTY's, not the container's:
+      // without this the dedupe in throttledResize/sendResize compares against a
+      // request that was refused and suppresses the retry that recovers the pane.
+      this._lastResizeDims = { cols, rows: local.rows };
+    }
+    // Is the PTY at a width this container did not ask for? Compared against
+    // what we WOULD request, not against what the terminal currently holds:
+    // once adopted those two are equal, so the second question answers itself
+    // false and the condition would look resolved while it is still true.
+    // The floor widens this terminal too, and that is the reader's own font
+    // setting rather than another device — hence the comparison, not `>`.
+    const wanted = this.getTerminalDimensions();
+    this._paneWidthRefused = !!wanted && Number.isFinite(cols) && cols !== wanted.cols;
+    this._scheduleOverflowAffordanceSync();
+  },
+
+  /**
+   * Measure on the NEXT frame, coalesced.
+   *
+   * `terminal.resize()` updates the buffer synchronously but the screen element
+   * takes its new width with the render, so measuring in the same tick reads
+   * the size the terminal just left. Coalesced because a settling container
+   * fires several resizes and only the last one's measurement is the truth.
+   */
+  _scheduleOverflowAffordanceSync() {
+    if (typeof requestAnimationFrame !== 'function') {
+      this._syncTerminalOverflowAffordance();
+      return;
+    }
+    if (this._overflowAffordanceFrame) return;
+    this._overflowAffordanceFrame = requestAnimationFrame(() => {
+      this._overflowAffordanceFrame = null;
+      this._syncTerminalOverflowAffordance();
+    });
+  },
+
+  /**
+   * Let the reader reach a pane wider than the box that shows it.
+   *
+   * ⚠️ Keyed on what actually does not FIT, not on a PTY mismatch. Two
+   * different causes put the terminal wider than its container and both leave
+   * columns unreachable behind `.terminal-container`'s clip:
+   *
+   *  - another device holds the sizing claim, so this terminal adopts a width
+   *    it did not ask for; and
+   *  - the 40-column floor. On a 360px phone, font 18 applies 40 columns and
+   *    paints 433px, and font 24 paints 578px — 218px, 38% of the pane, with no
+   *    gesture that could reach it. `increaseFontSize` goes to 24 and applies
+   *    immediately, so that is two taps away, and the PTY agrees with the
+   *    terminal throughout: a mismatch test would never fire.
+   *
+   * Measured rather than derived from cell arithmetic, because the cell width
+   * is fractional and the container's padding is not ours to assume. One pixel
+   * of slack keeps sub-pixel rounding from flapping the class.
+   */
+  _syncTerminalOverflowAffordance() {
+    // ⚠️ Nothing in here may throw. It runs off every geometry change, which is
+    // the resize path, and the affordance is cosmetic: a terminal that cannot
+    // be measured — disposed mid-resize, or a harness with no real DOM — must
+    // lose the scroll affordance, never the resize.
+    let container = null;
+    let overflows = false;
+    try {
+      container = document.getElementById('terminalContainer');
+      const screen = container?.querySelector('.xterm-screen');
+      if (container && screen) {
+        overflows = screen.getBoundingClientRect().width - container.clientWidth > 1;
+      }
+    } catch {
+      /* unmeasurable; fall through with the affordance off */
+    }
+    container?.classList.toggle('term-overflows-x', overflows);
+    // The notice tells the reader to scroll sideways, so it is only true advice
+    // once there is something to scroll. A wide PTY on a screen wide enough to
+    // show it needs no explanation and gets none.
+    if (!overflows || !this._paneWidthRefused) {
+      this._paneOwnedElsewhere = false;
+      return;
+    }
+    this._notePaneOwnedElsewhere();
+  },
+
+  /**
+   * Say, once, that this pane's width belongs to another device.
+   *
+   * Once per transition, not per report: reports arrive on every resize, and a
+   * toast that repeats is noise about a situation already on screen. Silent
+   * when it resolves — the pane simply reflows back to this screen.
+   */
+  _notePaneOwnedElsewhere() {
+    if (this._paneOwnedElsewhere) return;
+    this._paneOwnedElsewhere = true;
+    // 53 characters: measured at one line on a 430px phone. The longer
+    // wording wrapped to two, which is a lot of the terminal to cover for a
+    // notice about a condition that resolves itself.
+    this.showToast('Another device is setting the width — scroll sideways', 'info');
   },
 
   /**
@@ -5179,6 +5958,13 @@ Object.assign(CodemanApp.prototype, {
           } catch {}
         }
       }
+    }
+    if (this._splitPane?.terminal) {
+      this._splitPane.terminal.options.minimumContrastRatio = minimumContrastRatio;
+      this._splitPane.terminal.options.theme = { ...theme };
+      try {
+        this._splitPane.terminal.refresh(0, this._splitPane.terminal.rows - 1);
+      } catch {}
     }
   },
 });

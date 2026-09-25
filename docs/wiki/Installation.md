@@ -9,7 +9,7 @@ Getting Codeman onto a machine, verifying it works, updating it, and removing it
 | **macOS or Linux** | Windows works through WSL2. See [Windows](#windows-wsl) below.                                                                        |
 | **Node.js 22+**  | The installer offers to install it if missing.                                                                                          |
 | **tmux**         | Not optional. Sessions live inside tmux, which is what makes them survive a server restart, a dropped connection, or a closed laptop.    |
-| **An agent CLI** | At least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex/cli), [Antigravity](https://antigravity.google), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Pi](https://pi.dev). Plain shell sessions need none. See [Agent CLIs](Agent-CLIs). |
+| **An agent CLI** | At least one of [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://opencode.ai), [Codex](https://developers.openai.com/codex/cli), [Antigravity](https://antigravity.google), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Pi](https://pi.dev), [Grok Build](https://github.com/xai-org/grok-build), [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), [OMP](https://github.com/can1357/oh-my-pi). Plain shell sessions need none. See [Agent CLIs](Agent-CLIs). |
 
 Codeman itself sends no telemetry and phones no home. The only network traffic is your
 browser to your server, and whatever the agent CLI you chose does on its own.
@@ -20,17 +20,26 @@ browser to your server, and whatever the agent CLI you chose does on its own.
 curl -fsSL https://getcodeman.com/install | bash
 ```
 
-This installs Node.js and tmux if they are missing, clones Codeman into `~/.codeman/app`,
-and builds it.
+This installs Node.js, tmux and a build toolchain if they are missing (node-pty ships no
+Linux prebuild, so it compiles from source), clones Codeman into `~/.codeman/app`, and
+builds it.
 
-What it asks you:
+It starts by printing what it found (git, Node, tmux, build tools, agent CLIs, Tailscale,
+an existing install), then asks everything it needs up front, then does the work
+unattended. You can leave while it builds. What it asks you:
 
-1. **Permission for every system change.** Package installs and agent CLI downloads are
-   prompted individually. Nothing is installed silently.
+1. **One consent for the missing packages.** Git, Node.js, tmux and (on Linux) the build
+   toolchain are installed after a single yes, and sudo asks for your password once for
+   the whole run. Nothing is installed silently. If no agent CLI is found, a menu offers
+   to install any of them (DeepSeek excepted: its npm package installs only a launcher
+   with no runnable profile), or you skip and install one yourself later.
 2. **How the dashboard should be reachable.** Three choices:
-   - **Tailscale** (recommended for phone access): keeps the loopback bind and walks you
-     through `tailscale serve`, including the tailnet HTTPS toggle, then verifies the result
-     end to end.
+   - **Tailscale** (recommended for phone access): keeps the loopback bind, installs
+     Tailscale if needed, logs in, enables the tailnet HTTPS toggle (it opens the admin
+     page for you and waits; Ctrl+C there skips Tailscale for this run), then configures `tailscale serve` after the build and
+     verifies the result end to end. If another app already owns `:443` on your node,
+     you choose between a sub-path (`https://<machine>.<tailnet>.ts.net/codeman`, the
+     default), a second port, replacing the other mapping, or skipping.
    - **Your local network** (`0.0.0.0`): prompts for a password. Skipping the password takes
      an explicit confirmation and ends on a loud warning.
    - **This machine only** (`127.0.0.1`): the safest option, and the default for a bare
@@ -41,26 +50,54 @@ What it asks you:
    Tailscale. An existing loopback install defaults to keeping loopback, or to Tailscale when
    a serve mapping for Codeman is already there. A bare Enter never pulls in new software,
    and a non-interactive run always keeps the safe loopback default.
-3. **What to do when it finishes.** Run in this terminal, install as a background service
-   that starts on boot, or do nothing yet.
+3. **What to call this machine on your tailnet** (Tailscale route only). By default the URL
+   uses the machine's existing name. Answer yes to rename it `codeman-<hostname>`; the
+   default is no, because the tailnet name is also what SSH and everything else on that
+   machine are reached by.
+4. **Whether to run Codeman in the background.** Enter installs a systemd user service or a
+   macOS LaunchAgent that starts on boot; answering no offers to start it in this terminal
+   instead, or not at all.
+
+It ends on a screen with the URL (your tailnet, your network, or this machine), a QR code to
+scan with your phone, and the two commands you need to manage the service.
 
 Re-running the same one-liner **updates an existing install in place**. Local changes in
 `~/.codeman/app` are stashed rather than discarded, a running service is restarted and
 verified, and your existing network binding is preserved. An interrupted first install
 resumes instead of restarting.
 
-Two other entry points exist:
+Other entry points:
 
 ```bash
+install.sh status       # print the URLs, the QR code and the manage commands again
 install.sh update       # update only
-install.sh uninstall    # remove
+install.sh uninstall    # remove (offers to undo a rename it performed)
 install.sh tailscale    # retrofit Tailscale access onto an existing install
+install.sh name [<n>]   # rename this machine on your tailnet (default codeman-<hostname>)
+install.sh cloudflared  # install cloudflared for the in-app Cloudflare tunnel
 ```
+
+**Flags** answer the questions from the command line and pipe through `bash -s --`:
+
+```bash
+curl -fsSL https://getcodeman.com/install | bash -s -- --tailscale --service
+curl -fsSL https://getcodeman.com/install | bash -s -- --lan --password 'x' --service
+curl -fsSL https://getcodeman.com/install | bash -s -- --local --run
+```
+
+`--tailscale` / `--lan` / `--local` answer the access question, `--name <n>` / `--no-rename`
+the name, `--service` / `--run` / `--no-start` the last one. `--yes` takes every default
+(it still waits on a Tailscale login URL, and a network bind still asks for a password).
+`--port <n>` moves Codeman off 3000; the service file and the serve mapping follow it. On an
+existing install, `--port` and `--password` re-run the setup so the service file picks them up,
+and a re-run with `--lan` or `--tailscale` keeps the password the service already has.
 
 **Automation and CI**: with no terminal attached, any step that would change the system
 aborts with instructions instead of running silently. Set `CODEMAN_NONINTERACTIVE=1` to
 approve those steps. `CODEMAN_TAILSCALE=1` preselects the Tailscale answer, and never
-installs Tailscale itself non-interactively.
+installs Tailscale itself non-interactively; a non-interactive run never renames the
+machine and never starts a service. Everything the unattended steps print goes to
+`~/.codeman/install.log`, and the last lines of it are shown when a step fails.
 
 ## Route B: npm
 
@@ -101,6 +138,21 @@ at server start, so markup changes need a restart.
 
 See [Contributing](Contributing) for the rest of the development loop.
 
+## Route D: Docker Compose
+
+Codeman itself can run in a container and spawn Docker cases as sibling containers through
+the host's Docker socket. Copy `docker/.env.example` to `docker/.env`, set
+`CODEMAN_PASSWORD`, then:
+
+```bash
+bash docker/Start-Codeman.sh
+```
+
+Run the script again after updating rather than a plain `docker compose up`, so the rebuilt
+image, the refreshed volumes and the entrypoint arrive together. The full guide, including
+storage and networking options, is
+[`docker/README.md`](https://github.com/Ark0N/Codeman/blob/master/docker/README.md).
+
 ## Installing an agent CLI
 
 Codeman drives CLIs, it does not bundle them. Install at least one:
@@ -113,6 +165,9 @@ Codeman drives CLIs, it does not bundle them. Install at least one:
 | **Antigravity** | See [antigravity.google](https://antigravity.google)               | Google's successor to the consumer Gemini CLI.                             |
 | **Gemini CLI**  | See [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli) | Enterprise only since Google's June 2026 consumer cutover.  |
 | **Pi**          | See [pi.dev](https://pi.dev)                                       | No permission prompts and no sandbox by design. Read [Agent CLIs](Agent-CLIs) before using it on a repo you care about. |
+| **Grok Build**  | `curl -fsSL https://x.ai/cli/install.sh \| bash`                   | xAI. Lands in `~/.grok/bin`; `grok login --device-auth` for headless hosts.  |
+| **DeepSeek Harness** | `npm i -g @deepseek-ai/dsh pnpm`, then a terminal profile      | The npm package is only a launcher. Codeman's Run menu installs the community terminal profile for you. See [Agent CLIs](Agent-CLIs). |
+| **OMP**         | `curl -fsSL https://omp.sh/install \| sh`                          | Oh My Pi. Run it once by hand to finish its own onboarding.                |
 
 Log each CLI in once, by hand, before pointing Codeman at it. Codeman never collects or
 stores your CLI credentials.
@@ -161,6 +216,7 @@ Full detail, including logs and the self-updater, is in
 | Installer     | Re-run the one-liner, or **App Settings → System → Updates** in the UI. |
 | npm           | `npm update -g aicodeman`                                          |
 | git clone     | `git pull && npm install && npm run build`, then restart.          |
+| Docker Compose | Re-run `Start-Codeman.sh`. The in-app updater works too, and refuses a release that changes the container definition until you re-run the script. |
 
 The in-app updater covers git-clone installs supervised by systemd or launchd. It restarts
 the process that is running it, so the actual work happens in a detached script and the

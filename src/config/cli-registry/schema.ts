@@ -261,6 +261,19 @@ const echoSchema = z
   })
   .strict();
 
+/**
+ * `capabilities.customModelInjection.launchModel`: the `model` launch-param value that
+ * selects the injected provider, with `{modelId}` standing for the chosen id. Bounded to
+ * the characters the `model`/`model-pi` token patterns accept plus the placeholder braces,
+ * so a template can never smuggle a token the argv engine would have to quote.
+ */
+const launchModelTemplate = z
+  .string()
+  .min(1)
+  .max(120)
+  .regex(/^[a-zA-Z0-9._\-/:{}]+$/)
+  .optional();
+
 const capabilitiesSchema = z
   .object({
     external: z.boolean(),
@@ -281,6 +294,23 @@ const capabilitiesSchema = z
     effort: z.boolean(),
     agentSkillInjection: z.boolean(),
     statusLineTelemetry: z.boolean(),
+    // How many columns this CLI indents its transcript body by, so a copy can take
+    // that much off the clipboard. Bounded, because it is the whole strip: a copy
+    // never removes more than this, nor more than every selected line shares.
+    //
+    // ⚠ DECLARED, not measured off the pane, and two measured attempts are why.
+    // Asking whether the pane painted spaces across the unused part of each row
+    // separates a TUI from a shell perfectly where it fires and never
+    // over-stripped, but it is a function of pane WIDTH: that padding exists
+    // only while a rendered line stops short of the CLI's own layout width, and
+    // Claude Code's prose wraps to fill it — the share of padded rows on one
+    // live transcript ran 44%, 6%, 6%, 7% and 87% at 123, 160, 198, 235 and 298
+    // columns, so the strip did nothing at any ordinary size. Taking the
+    // narrowest indent on screen instead fires everywhere and over-strips, since
+    // a file listing inside the transcript can be the narrowest thing on it.
+    // A declared width cannot do either. Absent means no strip, so a CLI whose
+    // transcript layout nobody has measured is never touched.
+    transcriptGutter: z.number().int().min(1).max(8).optional(),
     workDetect: z
       .object({
         promptGlyph: z.string().min(1).max(8),
@@ -295,8 +325,29 @@ const capabilitiesSchema = z
             (src) => compileVersionRegex(src) !== null,
             'workingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
           ),
+        // Same guard, same reasons: this one runs over the foot of a pane capture every
+        // time a session settles, and ~/.codeman/clis.json can set it.
+        watchingLine: z
+          .string()
+          .min(1)
+          .refine(
+            (src) => compileVersionRegex(src) !== null,
+            'watchingLine must be a regex compileVersionRegex() accepts: at most 200 characters, no nested quantifiers'
+          )
+          .optional(),
+        // Bounded hard: this is how far up the screen a config file may push the search,
+        // and every row it adds is one more row the agent itself may be able to write.
+        watchingLines: z.number().int().min(1).max(8).optional(),
       })
       .strict()
+      // A window with nothing to search is a typo, not a configuration. Refused at LOAD
+      // time for the same reason `privilegedParams[].param` is checked against the params
+      // the entry declares: the failure is otherwise silent and looks like a feature that
+      // simply never fires.
+      .refine(
+        (v) => v.watchingLines === undefined || v.watchingLine !== undefined,
+        'watchingLines has nothing to bound without a watchingLine'
+      )
       .optional(),
     model: z
       .object({ source: z.enum(['flag', 'claude-settings-file', 'none']), param: z.string().optional() })
@@ -317,6 +368,66 @@ const capabilitiesSchema = z
     privilegedEnvKeys: z.array(envName).max(8),
     gates: z.record(z.string(), z.object({ minVersion: z.string().max(20), failClosed: z.boolean() }).strict()),
     maxFrameBytes: z.number().int().positive().optional(),
+    customModelInjection: z.discriminatedUnion('kind', [
+      z
+        .object({
+          kind: z.literal('env'),
+          baseUrlVar: envName,
+          apiKeyVar: envName,
+          // Empty is valid: deepseek's model routing is a profile-composition concern, not
+          // an env var, so it declares baseUrl/apiKey injection with no model var at all.
+          modelVars: z.array(envName).max(8),
+          launchModel: launchModelTemplate,
+          // Optional: the env var to carry a discovered per-model context-window size
+          // (claude's CLAUDE_CODE_MAX_CONTEXT_TOKENS), and/or the env var that isolates
+          // this session's config/credential directory from the user's real one (claude's
+          // CLAUDE_CONFIG_DIR) so an injected API key never collides with a stored OAuth
+          // session. See the customModelInjection doc comment in cli-registry/types.ts.
+          contextLengthVar: envName.optional(),
+          configDirVar: envName.optional(),
+          // Relative path, WITHIN the isolated configDirVar directory, of a trust-dialog
+          // seed file the CLI itself owns the shape of — claude's `.claude.json`
+          // `customApiKeyResponses.approved` list, the same field an interactive "Detected
+          // a custom API key — use it?" prompt writes to on a real terminal. Only makes
+          // sense alongside configDirVar (an isolated, otherwise-empty directory has none
+          // of a real profile's prior approvals), and only implemented for the
+          // 'claude-api-key-responses' shape today — see custom-model-injection-apply.ts.
+          apiKeyTrustFile: z
+            .object({ relPath: z.string().min(1).max(80), shape: z.literal('claude-api-key-responses') })
+            .strict()
+            .optional(),
+          // An isolated config directory replays the CLI's whole first-run sequence (theme
+          // picker, security notes, per-project trust dialog, bypass-permissions warning)
+          // on every launch, same root cause as apiKeyTrustFile above — this reuses that
+          // same file to pre-seed the state a real, already-onboarded profile carries. See
+          // the customModelInjection doc comment in cli-registry/types.ts.
+          skipFirstRunPrompts: z.boolean().optional(),
+          // DeepSeek-only, confirmed by reading its own bundled SDK source: it concatenates
+          // "/chat/completions" onto baseUrlVar's value with no "/v1" of its own, while
+          // llama-swap/llama.cpp only serves the "/v1/..." path — claude/gemini must NOT
+          // get this. See the customModelInjection doc comment in cli-registry/types.ts.
+          appendV1Suffix: z.boolean().optional(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal('configContentEnv'),
+          envVar: envName,
+          template: z.literal('opencode-json'),
+          launchModel: launchModelTemplate,
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal('configDir'),
+          dirEnvVar: envName,
+          fileName: z.string().min(1).max(80),
+          template: z.enum(['codex-toml', 'pi-models-json', 'omp-models-yml', 'grok-toml']),
+          launchModel: launchModelTemplate,
+        })
+        .strict(),
+      z.object({ kind: z.literal('unsupported') }).strict(),
+    ]),
   })
   .strict();
 

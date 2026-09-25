@@ -67,6 +67,14 @@ On Linux, if you want the service running while you are not logged in:
 loginctl enable-linger $USER
 ```
 
+On macOS, a LaunchAgent starts when you log in, not at boot. A headless Mac (no GUI login)
+needs a system LaunchDaemon instead, written by hand as root. The installer recognises an
+existing `/Library/LaunchDaemons/com.codeman.web.plist` and leaves it alone rather than
+installing a LaunchAgent next to it, since the two would fight over the port; remove the
+daemon first if you want to switch. The same login caveat applies to the App Store and
+standalone Tailscale apps, so on a headless Mac the Tailscale URL only comes back after a
+reboot if the open-source `tailscaled` is used.
+
 ### Writing the unit by hand
 
 **Linux (systemd user unit):**
@@ -139,6 +147,7 @@ log stream --predicate 'process == "node"'   # macOS, noisy
 | Installer     | Re-run the one-liner, or **App Settings → System → Updates**.             |
 | npm           | `npm update -g aicodeman`                                                 |
 | git clone     | `git pull && npm install && npm run build`, then restart.                 |
+| Docker Compose | Re-run `Start-Codeman.sh`, or the in-app updater, which restarts the container in place. |
 
 ### The in-app updater
 
@@ -169,6 +178,18 @@ Service unit names are instance-scoped too, so a beta instance can be installed 
 service without colliding with the main one. `CODEMAN_DATA_DIR` and `CODEMAN_TMUX_SOCKET`
 exist for the rare case where they need to differ, but setting only one of them recreates
 exactly the problem you were avoiding.
+
+## Running Codeman itself in Docker
+
+The Compose deployment in `docker/` runs the server in a container and spawns Docker cases
+as sibling containers through the mounted host socket. Start it with
+`bash docker/Start-Codeman.sh` rather than a bare `docker compose up`: the script pre-creates
+the bind-mounted directories with the right owner, honours a `docker-compose.override.yml`,
+and refreshes the build volumes when the checkout moved under them. The in-app updater
+applies code only and restarts by letting the container exit, so it refuses a release that
+changes the Dockerfile, the compose file, or adds a new `.env` key, until you re-run the
+script. Guide:
+[`docker/README.md`](https://github.com/Ark0N/Codeman/blob/master/docker/README.md).
 
 ## The tunnel as a service
 

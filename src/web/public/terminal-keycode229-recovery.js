@@ -66,6 +66,38 @@
     let composing = false;
     const pending = [];
 
+    /**
+     * Resolve every candidate still pending, right now, instead of waiting for
+     * its zero-delay timer.
+     *
+     * Android soft keyboards commit the last character and send the Enter key
+     * in ONE InputConnection transaction: the `input` event and the Enter
+     * keydown are both processed before any timer runs. Left on its timer the
+     * candidate lost BOTH ways — xterm emits '\r' synchronously from the Enter
+     * keydown (so the local-echo composer submitted the prompt without the
+     * character), and that '\r' bumps `canonicalCount`, so the candidate then
+     * read "xterm spoke for this keystroke" and stood down, dropping the
+     * character outright. That is the "every message loses its last character"
+     * report from phones.
+     *
+     * Draining at the next keydown is correct on both counts: the counter still
+     * holds the value it had while this candidate's keystroke was current, and
+     * the byte reaches the composer ahead of whatever the new key emits.
+     */
+    function flushPending() {
+      for (const candidate of pending.splice(0)) {
+        if (candidate.timer !== null) {
+          try {
+            clearTimer(candidate.timer);
+          } catch {
+            // A broken timer host must not break input handling.
+          }
+          candidate.timer = null;
+        }
+        resolveCandidate(candidate);
+      }
+    }
+
     function cancelPending() {
       for (const candidate of pending.splice(0)) {
         candidate.active = false;
@@ -111,6 +143,11 @@
      */
     function handleKeyEvent(event) {
       if (destroyed || event?.type !== 'keydown') return;
+      // Settle the PREVIOUS keystroke before this one can move the counter or
+      // reach the PTY — see flushPending(). This runs from xterm's custom key
+      // handler, i.e. before xterm processes the key, so a recovered character
+      // is always ordered ahead of the bytes this keydown produces.
+      flushPending();
       keydownSnapshot = canonicalCount;
     }
 

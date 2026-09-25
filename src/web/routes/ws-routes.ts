@@ -22,6 +22,9 @@
  *     {"t":"c"}           — clear terminal
  *     {"t":"r"}           — needs refresh (reload buffer)
  *     {"t":"ia","seq":N}  — input ACK (echoes the seq of an applied/deduped input frame)
+ *     {"t":"zc","c":N,"r":N} — resize confirm: the geometry the PTY now holds, which
+ *                          is NOT always the one requested (see Session.resize
+ *                          arbitration). Clients adopt it — issue #464.
  *   Client -> Server:
  *     {"t":"i","d":"...","seq":N,"cid":"..."} — input (keystroke or paste). seq+cid are
  *                          optional reliable-delivery tags: the server applies each
@@ -211,7 +214,16 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
         try {
           const msg = JSON.parse(String(raw));
           if (msg.t === 'i' && typeof msg.d === 'string') {
-            if (msg.d.length > MAX_INPUT_LENGTH) return;
+            if (msg.d.length > MAX_INPUT_LENGTH) {
+              // Refused for good, so say so: a silent return left the frame
+              // unACKed and the client redelivered it every few seconds forever
+              // (issue #484). A client that predates `err` reads this as a plain
+              // ACK and drops the frame, which is also the right outcome.
+              if (Number.isInteger(msg.seq) && socket.readyState === 1) {
+                socket.send(`{"t":"ia","seq":${msg.seq as number},"err":"too_large","max":${MAX_INPUT_LENGTH}}`);
+              }
+              return;
+            }
             // Reliable delivery: when the frame carries a clientId + seq, apply it
             // exactly once (skip a duplicate redelivery) but ACK it regardless so
             // the client can drop it from its durable queue. Frames without seq
@@ -224,15 +236,39 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
               // Typed input from a claim-holding desktop keeps the claim "hot"
               // and re-asserts the desktop layout after a mobile override.
               if (holdsDesktopClaim) session.noteDesktopActivity();
-              delivered = session.write(msg.d);
+              // Browser keystrokes are the user's own, so they may name the tab.
+              delivered = session.write(msg.d, { fromUser: true });
               // A session whose PTY is gone swallows the write. ACKing anyway told
               // the client to drop the frame from its durable queue and left the seq
               // burnt, so the retry that reliable delivery exists for was rejected as
               // a duplicate: the input was lost for good.
               if (!delivered && cid && seq !== null) session.forgetInputSeq(cid, seq);
             }
-            if (delivered && seq !== null && socket.readyState === 1) {
-              socket.send(`{"t":"ia","seq":${seq}}`);
+            if (seq !== null && socket.readyState === 1) {
+              if (apply) {
+                if (delivered) socket.send(`{"t":"ia","seq":${seq}}`);
+              } else {
+                // REJECTED as a duplicate. ACK it — the client must still drop it
+                // from its durable queue — but say so, and hand back our watermark.
+                //
+                // A plain ACK here is indistinguishable from "applied", which is
+                // what made a client with a rolled-back counter unrecoverable: its
+                // seqs persist to localStorage on a DEBOUNCED write, so a tab killed
+                // between a send and that write comes back with a counter BELOW this
+                // watermark, every later keystroke lands at or under it, and each one
+                // is dropped-but-ACKed. The UI stays clean, nothing is delivered, and
+                // a reload restores the same stale counter. `last` is what lets the
+                // client lift itself out.
+                // ⚠️ Defensive: the session arrives through a structural port, and an
+                // implementation without this method must not take the whole input
+                // path down with it — a throw here aborts the message handler and the
+                // frame is never ACKed at all, which strands it in the client's queue.
+                const watermark =
+                  typeof (session as { lastInputSeq?: (c: string) => number }).lastInputSeq === 'function'
+                    ? (session as { lastInputSeq: (c: string) => number }).lastInputSeq(cid as string)
+                    : seq;
+                socket.send(`{"t":"ia","seq":${seq},"dup":true,"last":${watermark}}`);
+              }
             }
           } else if (
             msg.t === 'z' &&
@@ -260,6 +296,10 @@ export function registerWsRoutes(app: FastifyInstance, ctx: SessionPort, getHost
               if (transportRetained) session.resize(msg.c, msg.r, { viewportType, force });
             } else {
               session.resize(msg.c, msg.r, { viewportType, force });
+            }
+            const applied = session.ptyGeometry;
+            if (applied && socket.readyState === 1) {
+              socket.send(`{"t":"zc","c":${applied.cols},"r":${applied.rows}}`);
             }
           }
         } catch {

@@ -19,6 +19,8 @@ import {
 } from '../config/terminal-history.js';
 import { MAX_EDITABLE_BYTES } from '../config/file-editing.js';
 import { MIN_MATCH_LENGTH, MAX_MATCH_LENGTH } from '../config/agent-wait.js';
+import { MAX_WAKE_MACS } from '../config/remote-wake-limits.js';
+import { MAX_INPUT_LENGTH } from '../config/terminal-limits.js';
 import { enabledCliIds, enabledClis } from '../config/cli-registry/registry.js';
 import type { SessionMode } from '../types.js';
 
@@ -737,6 +739,36 @@ export const RemoteHostSchema = z.object({
     .max(32)
     .optional(),
   commands: RemoteCommandOverridesSchema,
+  // Wake-on-LAN: a single executable path (no arguments, no shell) run to power a
+  // SLEEPING host back on, e.g. `/home/joe/bin/whuff`. Executed via spawn without
+  // a shell, so there is no shell layer to escape; the regexes are belt-and-braces
+  // (and the no-whitespace rule rejects an argument list before it can fail as a
+  // confusing ENOENT at wake time). See docs/remote-sessions.md §Wake-on-LAN.
+  wakeCommand: z
+    .string()
+    .min(1)
+    .max(4096)
+    .regex(/^\S+$/, 'Wake command must be a single executable path (no arguments)')
+    .regex(NO_SHELL_META, 'Invalid characters in wake command')
+    .optional(),
+  // Wake-on-LAN MAC address(es), comma-separated. Structural: only hex pairs with
+  // `:`/`-` separators, so nothing here can be a shell token even by accident (the
+  // value never reaches a shell — Codeman builds the magic packet itself).
+  wakeMac: z
+    .string()
+    .min(11)
+    .max(128)
+    .regex(
+      /^[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5}(\s*,\s*[0-9a-fA-F]{2}([:-][0-9a-fA-F]{2}){5})*$/,
+      'Wake MAC must be one or more MAC addresses, comma-separated'
+    )
+    // ⚠ The character cap admits seven MACs while parseMacList takes at most
+    // MAX_WAKE_MACS, all-or-nothing. Without this the extra ones validated, persisted,
+    // and then resolved to NO wake target, so the host read as unconfigured.
+    .refine((value) => value.split(',').length <= MAX_WAKE_MACS, {
+      message: `Wake MAC accepts at most ${MAX_WAKE_MACS} comma-separated addresses`,
+    })
+    .optional(),
 });
 
 export const RemoteCaseLinkSchema = z.object({
@@ -1033,6 +1065,27 @@ export const QuickStartSchema = z.object({
    * because it takes an existing `workingDir` and so never creates a directory to label.
    */
   agentOrigin: z.string().max(64).optional(),
+  /**
+   * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): launches directly
+   * on this saved endpoint/model instead of the mode's native backend, computed server-side
+   * from the admin-configured endpoint store the same way `POST /api/sessions/:id/custom-
+   * model` does — never trusting raw env values from the client. One-shot, launch-time
+   * equivalent of that route: no restart, so no visible relaunch (that route's restart-in-
+   * place is still what an ALREADY-RUNNING session uses to switch later). Rejected for
+   * remote/docker cases, same reasoning as `envOverrides` above. The three confirmation
+   * flags mirror that route's fields; see `SessionCustomModelSchema` for why there are
+   * two specific ones rather than the single legacy `confirmed`.
+   */
+  customModel: z
+    .object({
+      endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+      modelId: z.string().min(1).max(200),
+      confirmed: z.boolean().optional(),
+      confirmedContext: z.boolean().optional(),
+      confirmedSwap: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
 });
 
 // ========== Hook Events ==========
@@ -1161,6 +1214,20 @@ const NotificationEventSchema = z
   })
   .optional();
 
+/**
+ * Body of `POST /api/reboot-restore/restore`.
+ *
+ * `sessionIds` restores a subset, and omitting it restores everything the caller
+ * can see. The ids are session ids from `GET /api/reboot-restore`, and an id the
+ * caller does not own is ignored rather than refused, matching how the session
+ * list scopes rather than 403s.
+ */
+export const RebootRestoreRequestSchema = z
+  .object({
+    sessionIds: z.array(z.string().max(128)).max(200).optional(),
+  })
+  .strict();
+
 export const SettingsUpdateSchema = z
   .object({
     // User-facing product branding. This changes browser/UI copy only; package,
@@ -1231,12 +1298,35 @@ export const SettingsUpdateSchema = z
      */
     approvalsInboxEnabled: z.boolean().optional(),
     /**
+     * Auto-name sessions: a placeholder tab (`w3-case`) takes its first real
+     * prompt as a title (`w3-case: fix the login redirect`). Synced, default
+     * OFF: the prompt lands in mux-sessions.json, every session:updated
+     * broadcast and /api/search, which is the user's choice to make.
+     */
+    autoNameSessions: z.boolean().optional(),
+    /**
      * Read My Mind (docs/readmymind-plan.md): capture the user's submitted
      * prompts into per-case intent profiles. SYNCED, default OFF (opt-in:
      * captured prompts are sensitive). OFF stops capture immediately; already
      * stored profiles stay until DELETE /api/sessions/:id/intent.
      */
     readMyMindEnabled: z.boolean().optional(),
+    /**
+     * Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md): the toolbar picker that lets a
+     * session point at a user-configured custom OpenAI-compatible endpoint (local or
+     * cloud) instead of its native cloud backend. SYNCED, default OFF — endpoint entry,
+     * discovery, and the extra toolbar surface are all opt-in.
+     */
+    customModelEndpointsEnabled: z.boolean().optional(),
+    /**
+     * CLI management (docs/cli-enable-disable-plan.md): the Settings UI section that
+     * lets an admin enable/disable a stock CLI, trigger its install, and add/edit/
+     * remove custom CLI entries — all previously hand-edit-only via ~/.codeman/clis.json.
+     * SYNCED, default OFF: this is a machine-configuration surface (like Custom Model
+     * Endpoints), not a display preference, and enabling it is what makes the write
+     * endpoints (PUT/POST/DELETE /api/clis...) answer instead of refusing outright.
+     */
+    cliManagementEnabled: z.boolean().optional(),
     /**
      * Read My Mind predictor model override. Empty/absent = the AI-checker
      * default (opus: prediction quality is the product and it runs only on an
@@ -1411,7 +1501,10 @@ export const SettingsUpdateSchema = z
  * Schema for POST /api/sessions/:id/input with length limit
  */
 export const SessionInputWithLimitSchema = z.object({
-  input: z.string().max(100000), // 100KB max input
+  // One limit for both transports (issue #484): the route's own length check and
+  // ws-routes.ts read the same constant, so a schema cap above it only hid which
+  // check refused the input.
+  input: z.string().max(MAX_INPUT_LENGTH),
   useMux: z.boolean().optional(),
   // Reliable-delivery dedup (optional; absent for curl/legacy clients). The web
   // client tags each input with a stable clientId + a monotonic per-session seq
@@ -1889,3 +1982,89 @@ export const WebviewUpdateSchema = WebviewBaseSchema.partial();
 
 /** POST /api/webviews/probe: reachability + framing check for the editor's Test button. */
 export const WebviewProbeSchema = z.object({ url: webviewUrlSchema });
+
+// Custom Model Endpoint Profiles (docs/custom-model-endpoints-plan.md) — a
+// user-configured custom OpenAI-compatible endpoint, local (llama.cpp) or cloud
+// (Azure AI Foundry, etc.). Lives below `webviewUrlSchema` because `baseUrl` IS that
+// schema: http(s) only, a real hostname, no embedded credentials, and the link-local /
+// cloud-metadata refusal, the same bar a saved dashboard URL has to clear.
+export const CustomModelHostSchema = z.object({
+  id: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+  label: z.string().min(1).max(100),
+  baseUrl: webviewUrlSchema,
+  apiKey: z.string().max(4096).optional(),
+  // No 'both': live-tested against a real server, sending both auth header
+  // conventions on one request reliably HANGS it — see custom-model-hosts.ts.
+  authStyle: z.enum(['bearer', 'api-key']).optional(),
+  models: z.array(z.string().max(200)).max(200).optional(),
+  lastDiscoveredAt: z.string().max(64).optional(),
+  // The Run-menu picker's per-endpoint default; validated against `models` at the
+  // route layer (schema-level cross-field checks can't see the array narrowed the
+  // same way a `.refine()` closure could, and the route already re-reads the stored
+  // host to apply it, so the check belongs there once, not duplicated into a refine
+  // that would run on every unrelated field edit too).
+  defaultModelId: z.string().max(200).optional(),
+  // Server-populated by discovery (custom-model-routes.ts); accepted here only so a client
+  // round-tripping the GET response back through PUT (edit-save) doesn't drop it.
+  modelContextLengths: z.record(z.string().max(200), z.number().int().positive().max(100_000_000)).optional(),
+  // Same reasoning as modelContextLengths above.
+  modelSizesGB: z.record(z.string().max(200), z.number().positive().max(100_000)).optional(),
+});
+
+/**
+ * A shell-safe bare word, mirroring `config/cli-registry/schema.ts`'s own `shellToken` —
+ * duplicated rather than imported, since the REAL safety boundary for anything built from
+ * this is `CliEntrySchema` itself, re-applied server-side once the full entry is assembled
+ * (`cli-registry-routes.ts`). This is a request-shape sanity check, not the security gate.
+ */
+const cliShellToken = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9._:@=+/,-]+$/, 'must be a plain word with no shell metacharacters');
+
+/** PUT /api/clis/:id (Phase 3) — enable/disable an existing entry, stock or custom; `enabled` is the ONLY thing this endpoint can flip. */
+export const CliEnableSchema = z.object({ enabled: z.boolean() });
+
+/**
+ * POST /api/clis + PUT /api/clis/custom/:id (Phase 5) — a deliberately MINIMAL custom-CLI
+ * shape (docs/cli-enable-disable-plan.md, Phase 6 checklist: "scope the FIRST version to the
+ * fields most stock entries actually use"), not the full `CliEntry`. `cli-registry-routes.ts`
+ * assembles the rest with safe, conservative capability defaults and re-validates the whole
+ * thing through `CliEntrySchema` before ever writing it — this schema exists to bound the
+ * REQUEST shape, not to BE the safety layer (Decision 3: typed-argv only, no raw shell text).
+ */
+export const CliCustomEntrySchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9-]{0,23}$/, 'id must be lowercase, start with a letter, at most 24 chars'),
+  label: z.string().min(1).max(60),
+  shortBadge: z.string().min(1).max(6),
+  enabled: z.boolean().optional(),
+  binaries: z.array(cliShellToken).min(1).max(4),
+  /** Bare argv tokens for the single launch variant — no flags-with-values, no params. */
+  argv: z.array(cliShellToken).min(1).max(16),
+});
+
+/** POST /api/sessions/:id/custom-model — apply or clear a session's custom-model selection. */
+export const CustomModelSelectionSchema = z.union([
+  z.object({
+    endpointId: z.string().regex(/^[a-zA-Z0-9_-]+$/, 'Invalid endpoint id'),
+    modelId: z.string().min(1).max(200),
+    /**
+     * Two DIFFERENT questions can block a launch, and answering one is not consent to
+     * the other: `confirmedContext` answers "this model's context window is below the
+     * floor for this CLI", which affects only the caller, while `confirmedSwap` answers
+     * "loading this will unload the model another session is using", which affects
+     * someone else. They were one flag until the context check (which runs first)
+     * silently spent the swap answer too, so a user clicking "launch anyway" past a
+     * too-small context evicted another session's model without ever being asked.
+     *
+     * `confirmed` is the original single flag and still means BOTH, because it shipped
+     * in the HTTP-API-only cut of this feature and an existing caller must keep working.
+     * New callers should send the specific one they actually asked about.
+     */
+    confirmed: z.boolean().optional(),
+    confirmedContext: z.boolean().optional(),
+    confirmedSwap: z.boolean().optional(),
+  }),
+  z.object({ clear: z.literal(true) }),
+]);

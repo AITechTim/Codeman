@@ -79,6 +79,7 @@ import {
   dockerContainerName,
   dockerDisplayPath,
   probeAdoptableContainer,
+  classifyAdoptContainerConflict,
   listDockerContainers,
   browseInContainer,
   dockerAdoptProbeModes,
@@ -126,6 +127,18 @@ const APP_VERSION = (() => {
  */
 const LOCAL_CLONE_ADMIN_ONLY =
   'Cloning from a local path is admin-only in multi-user mode. Use a repository URL instead.';
+
+/**
+ * Whether a clone or preflight must run with git's credential helpers cleared:
+ * a non-admin in multi-user mode. Every user's git runs as the one server
+ * account, so its helpers (the Docker image's opt-in `gh`/`az` ones, or any
+ * `gh auth setup-git`) would otherwise read a private repository with the
+ * signed-in admin's credentials, the same boundary the local-transport rule
+ * above guards. Admins and single-user mode keep the account's own helpers.
+ */
+export function cloneWithoutCredentialHelpers(req: FastifyRequest): boolean {
+  return isMultiUserMode() && !isAdmin(req);
+}
 
 /**
  * The one line of git's stderr worth appending to an error message.
@@ -327,6 +340,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           container,
           image: host.image,
           path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
           network: host.network ?? 'bridge',
           ...(dockerCase.availableModes ? { availableModes: dockerCase.availableModes } : {}),
           ...(dockerCase.owned === false ? { owned: false } : {}),
@@ -473,7 +487,9 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       if (!isGitAvailable()) {
         return { success: true, data: { parse: parsed, gitAvailable: false } };
       }
-      const remote = await probeGitRemote(parsed.repository);
+      const remote = await probeGitRemote(parsed.repository, undefined, {
+        withoutCredentialHelpers: cloneWithoutCredentialHelpers(req),
+      });
       return { success: true, data: { parse: parsed, remote, gitAvailable: true } };
     }
   );
@@ -489,8 +505,10 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
    * request died mid-clone still sees the case appear over SSE when git finishes.
    *
    * Deliberately NOT admin-gated in multi-user mode: unlike `/api/cases/link`,
-   * this writes only inside the caller's own `resolveCasesDir`. The one exception
-   * is a `local`-transport source, which would read through that boundary.
+   * this writes only inside the caller's own `resolveCasesDir`. Two things would
+   * otherwise read through that boundary: a `local`-transport source (refused for
+   * non-admins) and the server account's git credential helpers, which every user
+   * shares (cleared for non-admins, see `cloneWithoutCredentialHelpers`).
    *
    * Repository contents win over scaffolding: an existing CLAUDE.md is left
    * alone, and hooks are MERGED into whatever `.claude/settings.local.json` the
@@ -560,6 +578,7 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       const clone = await cloneRepository({
         repository: parsed.repository,
         destination: casePath,
+        withoutCredentialHelpers: cloneWithoutCredentialHelpers(req),
         ...(ref ? { ref } : {}),
         ...(shallow ? { shallow: true } : {}),
       });
@@ -906,12 +925,35 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
       ) {
         return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, 'Case already exists');
       }
-      // Two cases must never share one adopted container: session close kills the
-      // in-container tmux by session id, but a shared adoption would let one case's
-      // teardown and another's launch race over the same tmux server.
+      // One container may back SEVERAL adopted cases, each pointing at a different
+      // directory inside it. What still blocks it, and why, lives in
+      // classifyAdoptContainerConflict — note that none of it is about the shared
+      // in-container tmux server, which is safe precisely because sessions there
+      // are named per SESSION id (`codeman-dkr-<id8>`), never per case.
       const container = dockerCase.container;
-      if (dockerCases.some((item) => (item.container ?? dockerContainerName(item.name)) === container)) {
-        return createErrorResponse(ApiErrorCode.ALREADY_EXISTS, `Container "${container}" is already linked to a case`);
+      const conflict = classifyAdoptContainerConflict({
+        container,
+        containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
+        existing: dockerCases,
+        canAccess: (owner) => canAccessOwned(getAuthUser(req), owner),
+      });
+      if (conflict?.kind === 'owned-case') {
+        return createErrorResponse(
+          ApiErrorCode.ALREADY_EXISTS,
+          `Container "${container}" belongs to case "${conflict.caseName}", which Codeman created and whose lifecycle it manages. Adopt a container you started yourself, or open that case directly.`
+        );
+      }
+      if (conflict?.kind === 'other-owner') {
+        return createErrorResponse(
+          ApiErrorCode.FORBIDDEN,
+          `Container "${container}" is already adopted by another user.`
+        );
+      }
+      if (conflict?.kind === 'duplicate') {
+        return createErrorResponse(
+          ApiErrorCode.ALREADY_EXISTS,
+          `Case "${conflict.caseName}" already adopts "${container}" at that same directory. Point this one at another directory inside the container.`
+        );
       }
 
       if (!isWorkingDirAllowed(getAuthUser(req), dockerCase.hostWorkspacePath)) {
@@ -1583,7 +1625,9 @@ export function registerCaseRoutes(app: FastifyInstance, ctx: EventPort & Config
           container,
           image: host.image,
           path: dockerCase.hostWorkspacePath,
+          containerWorkdir: dockerCase.containerWorkdir ?? dockerCase.hostWorkspacePath,
           network: host.network ?? 'bridge',
+          ...(dockerCase.owned === false ? { owned: false } : {}),
         },
       };
     }

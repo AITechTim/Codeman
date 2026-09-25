@@ -333,9 +333,12 @@ Out of scope per the issue, and the current behavior already degrades correctly:
 - **Docker cases**: the workspace is a host directory bind-mounted at the same absolute path, so a host-side
   write is visible in the container immediately. Edit mode works and needs nothing special. Worth one line
   in the docs.
-- **Remote SSH cases**: `workingDir` is a path on the remote host. `validateSessionFilePath` realpaths it
-  locally, which fails, so the write returns 404 exactly like the read routes do today. Confirm the viewer
-  shows a clean empty/error state rather than an unexplained failure, and do not attempt an SFTP path.
+- **Remote SSH cases**: `workingDir` is a path on the remote host, and the READ routes now
+  resolve it over ssh (`src/remote-files.ts`, same `buildSshConnectionArgs` discipline as the
+  launch path — #415). What stays unsupported is the WRITE side: an `edit=1` / `PUT` answers
+  `400` "editing is not supported for files in a remote (SSH) case", `editable` is always
+  `false`, office previews and generated thumbnails answer `400`, and no remote file is ever
+  copied to the server's disk. Do not attempt an SFTP write path.
 
 ---
 
