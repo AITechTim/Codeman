@@ -47,7 +47,6 @@ import { dataPath, getDataDir, CODEMAN_INSTANCE } from '../config/instance.js';
 import { readRemoteHosts, rehydrateRemoteHostFields } from '../remote-hosts.js';
 import type { RemoteWakeRegistry } from '../remote-wake.js';
 import { normalizeBasePath, stripBasePath, joinBasePath } from '../config/base-path.js';
-import { getCli } from '../config/cli-registry/index.js';
 import { GLYPH, palette } from '../cli-style.js';
 import { getHookSecret } from '../config/hook-secret.js';
 import { EventEmitter } from 'node:events';
