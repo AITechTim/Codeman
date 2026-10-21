@@ -154,6 +154,7 @@ export function createMockRouteContext(options?: {
       updateRespawnConfig: vi.fn(),
       setHistoryLimit: vi.fn(async () => {}),
       startStatsCollection: vi.fn(),
+      requestStats: vi.fn(),
     },
     runSummaryTrackers: new Map(),
     activePlanOrchestrators: new Map(),

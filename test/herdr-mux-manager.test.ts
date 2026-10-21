@@ -846,6 +846,45 @@ describe('HerdrMuxManager', () => {
     expect(calls).toEqual([]);
   });
 
+  it('polls the roster always but per-pane process info only while stats are requested', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[][] = [];
+      const manager = new HerdrMuxManager({
+        mappingPath: join(mkdtempSync(join(tmpdir(), 'codeman-herdr-')), 'mappings.json'),
+        asyncRunner: vi.fn(async (args: string[]) => {
+          calls.push(args);
+          if (args[1] === 'process-info') return { cpu_percent: 5, memory_bytes: 1024 * 1024, child_count: 1 };
+          return { panes: [codexAgent], agents: [], workspaces: [] };
+        }),
+        syncRunner: vi.fn(() => ({ running: true, compatible: true })),
+      });
+      const published: { stats?: unknown }[][] = [];
+      manager.on('statsUpdated', (sessions) => published.push(sessions));
+      const processInfo = () => calls.filter((args) => args[1] === 'process-info').length;
+
+      manager.startStatsCollection(1000);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(published.length).toBeGreaterThanOrEqual(3);
+      expect(published.at(-1)).toHaveLength(1);
+      expect(processInfo()).toBe(0);
+
+      manager.requestStats();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(processInfo()).toBe(1);
+      expect(published.at(-1)?.[0].stats).toMatchObject({ cpuPercent: 5, memoryMB: 1 });
+
+      manager.stopStatsCollection();
+      const rosters = published.length;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(published.length).toBeGreaterThan(rosters);
+      expect(processInfo()).toBe(1);
+      manager.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('publishes every successful roster and updates a pane in place', async () => {
     const mappingPath = join(mkdtempSync(join(tmpdir(), 'codeman-herdr-')), 'mappings.json');
     let panes = [codexAgent];
