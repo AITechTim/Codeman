@@ -317,6 +317,9 @@ export interface TerminalMultiplexer extends EventEmitter {
   /** Stop periodic process stats collection */
   stopStatsCollection(): void;
 
+  /** A client is viewing stats; backends that poll per pane only do so while requested. */
+  requestStats?(): void;
+
   // ========== PTY Attachment ==========
 
   /**

@@ -313,6 +313,7 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
   private agentTitleResolver?: () => Promise<Map<string, string>>;
   private reconciliation: Promise<{ alive: string[]; dead: string[]; discovered: string[] }> | null = null;
   private poller: ReturnType<typeof setInterval> | null = null;
+  private statsRequested = false;
   private readonly tabLabelsByWorkspace = new Map<string, Map<string, string>>();
 
   constructor({
@@ -871,7 +872,9 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
   }
 
   destroy(): void {
-    this.stopStatsCollection();
+    this.statsRequested = false;
+    if (this.poller) clearInterval(this.poller);
+    this.poller = null;
     this.removeAllListeners();
   }
 
@@ -1038,11 +1041,14 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
     return { alive, dead, discovered };
   }
 
+  // Roster reconciliation always polls: Herdr panes can appear from its own UI.
+  // Per-pane stats spawn one `herdr pane process-info` per pane, so they run only
+  // while the Monitor panel has asked for them (stats/start -> requestStats()).
   startStatsCollection(intervalMs = Number(process.env.CODEMAN_HERDR_POLL_MS) || DEFAULT_POLL_MS): void {
     if (this.poller) return;
     const poll = () => {
       void this.reconcileSessions()
-        .then(() => this.getSessionsWithStats())
+        .then(() => (this.statsRequested ? this.getSessionsWithStats() : this.getSessions()))
         .then((sessions) => this.emit('statsUpdated', sessions))
         .catch((error) => this.emit('error', error));
     };
@@ -1051,9 +1057,13 @@ export class HerdrMuxManager extends EventEmitter implements TerminalMultiplexer
     this.poller.unref?.();
   }
 
+  requestStats(): void {
+    this.statsRequested = true;
+  }
+
+  // Closing the Monitor panel ends per-pane stats only; roster polling continues.
   stopStatsCollection(): void {
-    if (this.poller) clearInterval(this.poller);
-    this.poller = null;
+    this.statsRequested = false;
   }
 
   getAttachCommand(): string {

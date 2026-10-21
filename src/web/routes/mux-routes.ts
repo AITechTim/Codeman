@@ -40,6 +40,7 @@ export function registerMuxRoutes(app: FastifyInstance, ctx: InfraPort): void {
     // Multi-user: process-wide stats collection toggle → admin-only.
     if (isMultiUserMode() && !requireAdmin(req, reply)) return;
     ctx.mux.startStatsCollection(STATS_COLLECTION_INTERVAL_MS);
+    ctx.mux.requestStats?.();
     return {};
   });
 

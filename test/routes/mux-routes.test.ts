@@ -119,6 +119,7 @@ describe('mux-routes', () => {
       const body = JSON.parse(res.body);
       expect(body).toEqual({});
       expect(harness.ctx.mux.startStatsCollection).toHaveBeenCalled();
+      expect(harness.ctx.mux.requestStats).toHaveBeenCalled();
     });
   });
 
